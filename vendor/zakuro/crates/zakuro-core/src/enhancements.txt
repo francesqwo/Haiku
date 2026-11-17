@@ -1,0 +1,15 @@
+# enhancements, one game after another:
+# = <title id> <name>
+# <enhancement> | <build> | <who made it> | <what to know about it>
+# <code lines>
+# the build is any, rev<remaster version> for a cartridge without an update,
+# or update <major>.<minor> for a game with that update. each code here was
+# tested on its build in Zakuro, where it doubled the frames the game draws.
+# the 60 FPS codes come from the 60 FPS cheat thread on GBAtemp and Reshiban's
+# collection of them. most of these games count time in frames, so they run
+# faster too, which the note says where the code's author said so or where
+# it showed in testing. turning an enhancement off puts back what its code
+# changed, so a game goes back to its own frame rate.
+
+# public: Haiku runs one game, Fire Emblem Fates, which has no entry here, so
+# the list of other games' community codes is left out.

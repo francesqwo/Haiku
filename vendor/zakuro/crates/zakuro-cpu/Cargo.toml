@@ -1,0 +1,17 @@
+[package]
+name = "zakuro-cpu"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# native-final: the ARM11 interpreter (instruction decode and execution).
+# Haiku's pure build leaves it out: only the register state stays, which the
+# recompiled code runs on.
+[features]
+default = ["interpreter"]
+interpreter = []
+
+[dependencies]
+zakuro-common.workspace = true
+log.workspace = true
+serde.workspace = true

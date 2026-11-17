@@ -1,0 +1,32 @@
+# Haiku Setup: builds Haiku from the player's own dump, then starts it.
+# The release ships this program, the prebuilt engine (no game code), a
+# small GCC, Haiku's overrides and the recipes for its game-derived files;
+# see dev/reports/builder.md and dev/builder/package.sh.
+
+[package]
+name = "haiku-setup"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "haiku-setup"
+path = "src/main.rs"
+
+[dependencies]
+# the recompiler, as a library: it writes the game's code as C and compiles it
+recomp3ds = { path = "../vendor/3dsrecomp" }
+# the installer Haiku.exe --install uses (data/ from the dump)
+zakuro-fs = { path = "../vendor/zakuro/crates/zakuro-fs" }
+sha2 = "0.10"
+png = "0.18"
+miniz_oxide = "0.8"
+
+[build-dependencies]
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+# a project of its own, whatever directory it sits in
+[workspace]
+
+[profile.release]
+debug = 0

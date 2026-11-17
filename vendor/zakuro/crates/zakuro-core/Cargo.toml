@@ -1,0 +1,58 @@
+[package]
+name = "zakuro-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+symphonia-codec-aac = "0.6"
+symphonia-core = "0.6"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+zakuro-common.workspace = true
+# native-final: the register state only, unless `emulation` (the interpreter)
+zakuro-cpu = { path = "../zakuro-cpu", default-features = false }
+zakuro-fs.workspace = true
+# native-final: no emulated rasterizer or shader JIT unless `emulation`
+zakuro-gpu = { path = "../zakuro-gpu", default-features = false, features = ["vulkan"] }
+log.workspace = true
+serde.workspace = true
+# saved states, the state as postcard writes it and memory, both in LZ4
+postcard = { version = "1.1.3", default-features = false, features = ["use-std"] }
+lz4_flex = "0.14.0"
+# the hash a local wireless beacon carries of its network
+sha1 = "0.11.0"
+thiserror.workspace = true
+bitflags.workspace = true
+recomp-abi.workspace = true
+# codemods: patch modules and native plugins
+libloading = "0.8"
+rayon.workspace = true
+ab_glyph = "0.2"
+# online: the online battles' transport (crate::netplay): its encryption
+# (ChaCha20-Poly1305, an AEAD) and the keys made from the session's secret
+# (HKDF and HMAC over SHA-256), and the session secret's randomness. The
+# router's port mapping (UPnP IGD, NAT-PMP) and STUN are small enough to
+# speak directly (netplay/nat.rs); igd-next would bring url and the ICU
+# crates with it
+chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }
+hkdf = "0.12"
+hmac = "0.12"
+sha2 = "0.10"
+getrandom = "0.2"
+
+[features]
+# cpu: no ARM interpreter in the build at all. reaching code that is not
+# recompiled stops the program with the address and a guest callstack, and
+# FATES_ALLOW_INTERPRETER cannot bring it back.
+strip-interpreter = []
+# native-final: no ARM interpreter (with `emulation` off, nothing else
+# emulated is compiled either: pcos answers everything natively)
+pure = ["strip-interpreter"]
+# native-final: the development fallbacks (FATES_*=0, the Compatibility
+# renderer): Zakuro's kernel dispatcher and scheduler, HLE service requests,
+# the emulated DSP and GPU with its hardware rasterizer and shader JIT
+emulation = ["zakuro-gpu/hw-raster", "zakuro-gpu/jit", "zakuro-cpu/interpreter"]
+
+[dev-dependencies]
+env_logger = "0.11"
+zakuro-fs = { workspace = true, features = ["testing"] }

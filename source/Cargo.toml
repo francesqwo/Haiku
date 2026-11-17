@@ -1,0 +1,57 @@
+# Haiku: Fire Emblem Fates Special Edition USA, recompiled by 3dsrecomp port
+
+[package]
+name = "haiku"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[features]
+# cpu: build without Zakuro's ARM interpreter at all (no escape hatch):
+# CARGO_EXTRA="--features strip-interpreter" dev/build.sh <name>
+strip-interpreter = ["zakuro/strip-interpreter"]
+# native-final: the shipped build has no emulation in it at all: no ARM
+# interpreter, no emulated kernel, services, DSP or GPU, no Compatibility
+# renderer. A development build with every fallback linked (FATES_*=0):
+# CARGO_EXTRA="--no-default-features --features emulation" dev/build.sh <name>
+default = ["pure"]
+pure = ["strip-interpreter", "zakuro/pure"]
+emulation = ["zakuro/emulation", "fates-gfx/emulation"]
+
+[dependencies]
+zakuro = { path = "../vendor/zakuro/crates/zakuro" }
+# os: the installer reads the dump with the same parsers
+zakuro-fs = { path = "../vendor/zakuro/crates/zakuro-fs" }
+# os: the native OS layer the overrides call into
+zakuro-core = { path = "../vendor/zakuro/crates/zakuro-core" }
+# gfx: the native renderer, behind FATES_NATIVE_GFX
+fates-gfx = { path = "gfx" }
+
+# builder: the exe's icon is made from assets/icon/haiku.png (icon.rs)
+[build-dependencies]
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+# the program is Haiku.exe
+[[bin]]
+name = "Haiku"
+path = "src/main.rs"
+
+# a project of its own, whatever directory it sits in
+[workspace]
+
+# codemods: the recompiler and its interface from the tree, not the git
+# checkout: ABI 6 (Host::redirect) and the patch-module builder Haiku uses to
+# compile code mods (vendor/3dsrecomp/src/patch.rs)
+[patch."https://github.com/fearkov/3dsrecomp"]
+recomp-abi = { path = "../vendor/3dsrecomp/abi" }
+recomp3ds = { path = "../vendor/3dsrecomp" }
+
+# native-final: the shipped build (Rebuild.ps1, or PROFILE=ship dev/build.sh):
+# release with thin LTO, so code nothing reaches is not in Haiku.exe at all
+# (and 15 MB smaller). Development builds stay on plain release, which links
+# faster.
+[profile.ship]
+inherits = "release"
+lto = "thin"
+
+

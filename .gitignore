@@ -1,0 +1,38 @@
+# Nothing from the game ever goes in this repository: not your dump, not the
+# files installed or made from it, not recompiled code, not saves.
+/data/
+/game/
+/runs/
+/userdata/
+/cache/
+/mods/
+/mods-examples/
+/source/code/
+/work/
+/setup-work/
+target/
+*.log
+
+# made from your dump (Haiku Setup --apply-derived, see README.md)
+/assets/builtin/romfs/
+/assets/ui/
+/assets/font/
+/assets/glyphs/
+/overrides/amiibo_icons.c
+
+# dumps, saves, replays and states
+*.3ds
+*.cci
+*.cia
+*.cxi
+*.app
+*.sav
+*.state
+*.rec
+
+# programs and libraries: built, or added by you (SDL3.dll in dist-dll/)
+*.exe
+*.dll
+*.a
+*.o
+*.zip

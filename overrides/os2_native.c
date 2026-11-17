@@ -1,0 +1,60 @@
+/* os2: the last requests that went to emulated services, see
+ * zakuro-core/src/pcos/gsp.rs and pcos/apt.rs.
+ *
+ * nn::gxlow::CTR::Gpu's IPC stubs (the GPU service: the GX command ring,
+ * cache maintenance, display registers, the interrupt relay queue), the
+ * applet lifecycle at start-up and srv's notification semaphore. Each
+ * goes to the native layer through the bridge overrides/os_fs.c defines,
+ * and falls back to the original (IPC) when the native side declines.
+ */
+#include "overrides.h"
+
+typedef int (*OsNativeHook)(Context *ctx, uint32_t op);
+extern OsNativeHook os_native_hook;
+
+#define OS_NATIVE(op, address) do { \
+    if (os_native_hook && os_native_hook(ctx, (op))) RETURN_TO(ctx->r[14]); \
+    CALL(RECOMP_ORIGINAL(address)); \
+} while (0)
+
+/* call numbers, the same as pcos::gsp::op and pcos::apt::op */
+enum {
+    OS2_GSP_TRIGGER_CMD_REQ_QUEUE = 0x600,
+    OS2_GSP_FLUSH_DATA_CACHE = 0x601,
+    OS2_GSP_STORE_DATA_CACHE = 0x602,
+    OS2_GSP_WRITE_HW_REGS = 0x603,
+    OS2_GSP_WRITE_HW_REGS_WITH_MASK = 0x604,
+    OS2_GSP_SET_LCD_FORCE_BLACK = 0x605,
+    OS2_GSP_ACQUIRE_RIGHT = 0x606,
+    OS2_GSP_RELEASE_RIGHT = 0x607,
+    OS2_GSP_REGISTER_INTERRUPT_RELAY_QUEUE = 0x608,
+    OS2_GSP_UNREGISTER_INTERRUPT_RELAY_QUEUE = 0x609,
+    OS2_APT_INITIALIZE = 0x620,
+    OS2_APT_GET_LOCK_HANDLE = 0x621,
+    OS2_APT_ENABLE = 0x622,
+    OS2_APT_RECEIVE_PARAMETER = 0x623,
+    OS2_APT_GLANCE_PARAMETER = 0x624,
+    OS2_SRV_ENABLE_NOTIFICATION = 0x630,
+};
+
+/* nn::gxlow::CTR::Gpu */
+RECOMP_OVERRIDE(0x0013BE24) { OS_NATIVE(OS2_GSP_TRIGGER_CMD_REQ_QUEUE, 0x0013BE24); }
+RECOMP_OVERRIDE(0x0012F1C8) { OS_NATIVE(OS2_GSP_FLUSH_DATA_CACHE, 0x0012F1C8); }
+RECOMP_OVERRIDE(0x0013F4F4) { OS_NATIVE(OS2_GSP_STORE_DATA_CACHE, 0x0013F4F4); }
+RECOMP_OVERRIDE(0x0012F114) { OS_NATIVE(OS2_GSP_WRITE_HW_REGS, 0x0012F114); }
+RECOMP_OVERRIDE(0x0012F22C) { OS_NATIVE(OS2_GSP_WRITE_HW_REGS_WITH_MASK, 0x0012F22C); }
+RECOMP_OVERRIDE(0x00122B18) { OS_NATIVE(OS2_GSP_SET_LCD_FORCE_BLACK, 0x00122B18); }
+RECOMP_OVERRIDE(0x0012F15C) { OS_NATIVE(OS2_GSP_ACQUIRE_RIGHT, 0x0012F15C); }
+RECOMP_OVERRIDE(0x0012F1A0) { OS_NATIVE(OS2_GSP_RELEASE_RIGHT, 0x0012F1A0); }
+RECOMP_OVERRIDE(0x0013712C) { OS_NATIVE(OS2_GSP_REGISTER_INTERRUPT_RELAY_QUEUE, 0x0013712C); }
+RECOMP_OVERRIDE(0x00122B50) { OS_NATIVE(OS2_GSP_UNREGISTER_INTERRUPT_RELAY_QUEUE, 0x00122B50); }
+
+/* nn::applet::CTR::detail::APPLET */
+RECOMP_OVERRIDE(0x0010EAEC) { OS_NATIVE(OS2_APT_INITIALIZE, 0x0010EAEC); }
+RECOMP_OVERRIDE(0x0010EB3C) { OS_NATIVE(OS2_APT_GET_LOCK_HANDLE, 0x0010EB3C); }
+RECOMP_OVERRIDE(0x0010EBD0) { OS_NATIVE(OS2_APT_ENABLE, 0x0010EBD0); }
+RECOMP_OVERRIDE(0x00123780) { OS_NATIVE(OS2_APT_RECEIVE_PARAMETER, 0x00123780); }
+RECOMP_OVERRIDE(0x0012F474) { OS_NATIVE(OS2_APT_GLANCE_PARAMETER, 0x0012F474); }
+
+/* nn::srv::detail::Service::EnableNotification */
+RECOMP_OVERRIDE(0x0010D578) { OS_NATIVE(OS2_SRV_ENABLE_NOTIFICATION, 0x0010D578); }

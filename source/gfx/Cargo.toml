@@ -1,0 +1,23 @@
+# gfx: the native renderer. It takes the game's draws at the engine level
+# (prim::Context, from overrides/gfx_native.c) and draws them with its own
+# Vulkan device, with no PICA200 register state machine in between.
+
+[package]
+name = "fates-gfx"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[features]
+# native-final: the emulated-GPU fallback and comparisons (FATES_GFX_EMULATED
+# =keep, shadow mode, the Compatibility renderer); off in the pure build
+emulation = ["zakuro-core/emulation"]
+
+[dependencies]
+zakuro-core = { path = "../../vendor/zakuro/crates/zakuro-core" }
+# texture format decoding (PICA texel layouts), no GPU emulation
+zakuro-gpu = { path = "../../vendor/zakuro/crates/zakuro-gpu", default-features = false, features = ["vulkan"] }
+ash = { version = "0.38", default-features = false, features = ["loaded", "std"] }
+naga = { version = "30.0.1", features = ["glsl-in", "wgsl-in", "spv-out"] }
+log = "0.4"
+png = "0.18.1"

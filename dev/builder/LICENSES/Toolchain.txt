@@ -1,0 +1,84 @@
+The compiler in setup\w64devkit, and where to get its source
+============================================================
+
+Haiku Setup compiles the game's recompiled code on your PC with a part of
+w64devkit 2.11.0 (x64), unchanged: 178 of its files, listed in Haiku's
+source as dev/builder/toolchain.txt. w64devkit is by Christopher Wellons
+(https://github.com/skeeto/w64devkit) and is built from source by its own
+Dockerfile.
+
+What is in setup\w64devkit, and its licence
+-------------------------------------------
+
+- GCC 16.2.0: gcc.exe, cc1.exe, collect2.exe, lto-wrapper.exe, libgcc and
+  the compiler's own headers under lib\gcc. GNU General Public License
+  version 3 (GPL-3.0.txt). cc1.exe has GMP 6.3.0, MPFR 4.2.2 and MPC 1.4.1
+  linked into it statically (GNU Lesser General Public License version 3,
+  that is the GPL-3.0 plus the LGPL's extra permissions); their source is
+  offered below with GCC's.
+- GNU Binutils 2.47: as.exe, ld.exe, ar.exe. GNU General Public License
+  version 3 (GPL-3.0.txt).
+- The MinGW-w64 v14.0.0 runtime: the startup object, import libraries,
+  libmingwex, winpthreads and the C headers. Their licences are in
+  MinGW-w64-runtime.txt (mostly the Zope Public License 2.1, MIT-style
+  licences and public domain).
+- w64devkit itself, the build that made them: the Unlicense (public
+  domain).
+
+Haiku.exe, which these build on your PC, is not bound by the GPL. The
+parts of GCC that end up inside a program (libgcc and the headers under
+lib\gcc) are under the GCC Runtime Library Exception 3.1
+(GCC-runtime-library-exception-3.1.txt): a program that an unmodified GCC
+compiles from code that isn't GCC's may be distributed on the program's
+own terms. Haiku.exe is compiled from Haiku's own code (MIT) and from your
+own game, so the exception applies. The MinGW-w64 runtime's licences
+likewise allow programs linked with it on any terms.
+
+The source code (GNU GPL version 3, section 6(d))
+-------------------------------------------------
+
+The Corresponding Source of the GPL-covered programs above is offered from
+the same place as this download, at no extra charge: the GitHub release
+that holds Haiku.zip also holds
+
+    Haiku-toolchain-source-w64devkit-2.11.0.zip
+
+beside it (@REPO_URL@/releases). That zip holds the exact
+upstream release tarballs w64devkit 2.11.0 builds the toolchain from, the
+source of w64devkit 2.11.0 itself (its Dockerfile, which is the complete
+build script, and the patch series it applies to GCC, Binutils and
+MinGW-w64), and SHA256SUMS. It stays available for as long as the release
+that carries Haiku.zip does.
+
+The same files from their upstream projects. w64devkit's Dockerfile
+fetches exactly these and checks each against this SHA-256:
+
+  gcc-16.2.0.tar.xz
+    https://ftp.gnu.org/gnu/gcc/gcc-16.2.0/gcc-16.2.0.tar.xz
+    SHA-256 e6738e29597f733270731aa90600f37ffdc045079dfc27ec7e8192cc81085c3e
+  binutils-2.47.tar.xz
+    https://ftp.gnu.org/gnu/binutils/binutils-2.47.tar.xz
+    SHA-256 154ab23b60070e8f27013c22977f1129425d67d1e8acd6e13010e617811e4cff
+  gmp-6.3.0.tar.xz
+    https://ftp.gnu.org/gnu/gmp/gmp-6.3.0.tar.xz
+    SHA-256 a3c2b80201b89e68616f4ad30bc66aee4927c3ce50e33929ca819d5c43538898
+  mpfr-4.2.2.tar.xz
+    https://ftp.gnu.org/gnu/mpfr/mpfr-4.2.2.tar.xz
+    SHA-256 b67ba0383ef7e8a8563734e2e889ef5ec3c3b898a01d00fa0a6869ad81c6ce01
+  mpc-1.4.1.tar.xz
+    https://ftp.gnu.org/gnu/mpc/mpc-1.4.1.tar.xz
+    SHA-256 91204cd32f164bd3b7c992d4a6a8ce6519511aadab30f78b6982d0bf8d73e931
+  mingw-w64-v14.0.0.tar.bz2
+    https://downloads.sourceforge.net/project/mingw-w64/mingw-w64/mingw-w64-release/mingw-w64-v14.0.0.tar.bz2
+    SHA-256 6eaf921d9eb987d3820b364ea9775bc19b965ec81490b6fdd716526c28e1995c
+
+(The Dockerfile names the GNU mirror ftp.wayne.edu; every GNU mirror
+serves the same files, as the SHA-256 shows.) w64devkit's own source is the
+v2.11.0 tag of https://github.com/skeeto/w64devkit; the copy in the zip,
+w64devkit-2.11.0-src.tar.gz, has SHA-256
+d24cfcf20ae5a344fd005e66e64ec642f702eecec320d47d02d31410b0c83572.
+
+To build the toolchain as w64devkit does: unpack the w64devkit source and
+build its Dockerfile (docker build, as its README describes). It unpacks
+each tarball, applies the patch series under src/ with quilt, and runs
+each project's configure and make for x86_64-w64-mingw32.
