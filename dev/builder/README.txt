@@ -9,7 +9,8 @@ frame rates and the bottom screen on one display.
 This download holds no part of the game. Haiku is built on your PC from
 your own copy:
 
-- your dump of Fire Emblem Fates Special Edition (USA), decrypted: a .3ds
+- your dump of Fire Emblem Fates Special Edition (the US, European or
+  Japanese release), decrypted: a .3ds
   (.cci), .cia or .cxi of the cartridge, or Citra's or Azahar's sdmc
   folder with it installed;
 - optionally, your DLC: a decrypted .cia, or the same sdmc folder.
@@ -44,6 +45,20 @@ What the build makes, next to Haiku Setup.exe:
 Your dump is only read; it can be deleted afterwards (keep it to rebuild).
 
 
+Japanese voices (optional)
+--------------------------
+
+Haiku can play the game with the Japanese cast's voices (the text stays
+English). On Haiku Setup's Play screen choose "Add Japanese voices...",
+then select a dump that has them: Fire Emblem if (the Japanese release,
+for example the Special Edition, CTR-P-BFZJ), or a Western "undub". Haiku
+Setup takes only its voice and sound files (about 360 MB) into
+data\voices-ja and checks them; nothing else of that dump is used, and
+your game's own files are not changed. Then switch between English and
+Japanese on the Play screen, or in the game's Options > Audio > Voices
+(the change applies when the game restarts).
+
+
 Playing
 -------
 
@@ -51,6 +66,36 @@ Esc (or the controller's Guide button) opens the options. Mods go in the
 mods folder next to Haiku.exe; none come with Haiku. Controllers,
 keyboard, widescreen, frame rate and the bottom screen are all in the
 options.
+
+
+Fan translations of the Japanese game
+-------------------------------------
+
+Haiku can use the fan translations made for the Japanese release, Fire
+Emblem if: Team If's translation (the "FireEmblemIf-FanTranslation"
+project on GitHub) and cris1010's "Fire Emblem Fates Uncensored Patch"
+(Team If's work continued, on the Varis Hangout forum). Neither comes with
+Haiku; get them from their own pages.
+
+- Team If: put the release's zip in the mods folder as it is.
+- Uncensored Patch: it is a RAR, which Haiku can't open. Extract it with
+  7-Zip (the password is on the patch's own page) and put the extracted
+  folder, or just its rom folder, in the mods folder.
+- Then turn it on in the Mods screen and Apply and Restart. Haiku lays the
+  Japanese files out for this game as the patch's own patcher does; the
+  patcher (IfPatcher.exe) is never run.
+- Haiku's own lines (Kana's gender, same-gender S-supports, End Turn, the
+  Sunglasses) are added to the translation's text, and a line it lacks is
+  the US game's own.
+- Its title logo is used; its Japanese fonts aren't (the game's own draw
+  the translation, and the few signs they can't show, such as o with a
+  bar, are written as the nearest they can). To use them anyway, add
+  options = { fonts = 1 }  to its entry in userdata\haiku\mods.toml.
+- Don't load a save state made with the translation off while it's on (or
+  the reverse); the game's own saves are fine either way.
+- On this US game the petting minigame stays cut, the Japan-only DLC
+  can't run, DLC maps keep their English text, and a code patch made for
+  the Japanese game (such as the endings patch) is left out.
 
 
 Legal

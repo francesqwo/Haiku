@@ -192,14 +192,14 @@ fn word(memory: &mut Memory, addr: u32) -> u32 {
 /// the units on the map by force, with their tiles from the map's image,
 /// and the map cursor's tile.
 fn units(memory: &mut Memory, frame: u64) {
-    let pool = word(memory, UNIT_POOL);
-    let forces = word(memory, FORCES);
+    let pool = word(memory, zakuro_core::region::us(UNIT_POOL));
+    let forces = word(memory, zakuro_core::region::us(FORCES));
     if pool == 0 || forces == 0 {
         println!("units {frame}: no unit pool");
         return;
     }
     let mut tiles: std::collections::HashMap<u32, (u32, u32)> = std::collections::HashMap::new();
-    let image = word(memory, MAP_IMAGE);
+    let image = word(memory, zakuro_core::region::us(MAP_IMAGE));
     if image != 0 && memory.is_readable(image, 8 + 1024) {
         let mut grid = [0u8; 1024];
         memory.read_bytes(image + 8, &mut grid);
@@ -209,7 +209,7 @@ fn units(memory: &mut Memory, frame: u64) {
             }
         }
     }
-    let cursor = word(memory, MAP_CURSOR);
+    let cursor = word(memory, zakuro_core::region::us(MAP_CURSOR));
     if cursor != 0 {
         let x = f32::from_bits(word(memory, cursor + 0x18));
         let y = f32::from_bits(word(memory, cursor + 0x1C));

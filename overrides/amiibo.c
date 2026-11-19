@@ -67,6 +67,10 @@ extern const uint16_t amiibo_icons[4][2304];
 #define ITEM_TURNS    0xC0u  /* record, 0 = none */
 #define ITEM_CLEARED  0xC4u  /* u8, then three zero bytes */
 #define ITEM_SCROLL   0xC8u  /* GameFont::ScrollText */
+/* jpn: the Japanese build's MenuItem is the same up to +0xC4 and ends there
+   (operator new(0xC8) in its ContentsMenu::CreateBind, 0x003F4934; it has
+   no ScrollText: GameFont::ScrollText isn't in that build) */
+#define ITEM_SIZE_JPN 0xC8u
 #define LIST_ROOM     256u   /* GameMenuItemListTemplate<256> */
 
 /* ContentsReader */
@@ -190,6 +194,8 @@ static int hero_listed(Context *ctx, uint32_t list) {
 }
 
 /* called first by the BasicMenu::Create override; 1 when it took the call */
+int haiku_code_is_jpn(void); /* jpn: eur_region.c */
+
 int amiibo_menu_create(Context *ctx) {
     HeroAdd *add = hero_add_find(ctx);
     if (!add) {
@@ -231,7 +237,7 @@ int amiibo_menu_create(Context *ctx) {
                 return 1;
             }
             add->step = STEP_NEW;
-            ctx->r[0] = ITEM_SIZE;
+            ctx->r[0] = haiku_code_is_jpn() ? ITEM_SIZE_JPN : ITEM_SIZE;
             hero_call(ctx, OPERATOR_NEW);
             break;
         }
@@ -241,10 +247,13 @@ int amiibo_menu_create(Context *ctx) {
                 add->step = STEP_NEXT;
                 continue;
             }
-            for (uint32_t at = 0; at < ITEM_SIZE; at += 4)
+            const uint32_t size = haiku_code_is_jpn() ? ITEM_SIZE_JPN : ITEM_SIZE;
+            for (uint32_t at = 0; at < size; at += 4)
                 mem_write32(ctx, item + at, 0);
             add->item = item;
             add->step = STEP_SCROLL;
+            if (haiku_code_is_jpn())
+                continue; /* jpn: no ScrollText in this build's item */
             ctx->r[0] = item + ITEM_SCROLL;
             hero_call(ctx, SCROLLTEXT_CTOR);
             break;
@@ -454,4 +463,11 @@ RECOMP_OVERRIDE(0x0049C284) {
         }
     }
     CALL(RECOMP_ORIGINAL(0x0049C284));
+}
+
+/* pulsefix: what of this file is the console's state, kept with Divine
+   Pulse's moments and saved states (overrides/keep.c) */
+void amiibo_keep(void (*add)(const char *, void *, uint32_t)) {
+    add("amiibo.hero_adds", &hero_adds, sizeof hero_adds);
+    add("amiibo.hero_gift_tried", &hero_gift_tried, sizeof hero_gift_tried);
 }

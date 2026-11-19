@@ -183,6 +183,9 @@ pub struct Plan {
     pub plugins: Vec<PluginSpec>,
     /// notes by mod index: problems (which leave it out) and conflicts.
     pub problems: BTreeMap<usize, String>,
+    /// codemods2: each mod's own changes, by name, to say which mod a build
+    /// failure is about.
+    pub own: Vec<(String, Vec<(u32, u32)>)>,
     pub notes: BTreeMap<usize, Vec<String>>,
 }
 
@@ -195,6 +198,83 @@ impl Plan {
     pub fn names(&self) -> Vec<String> {
         self.mods.iter().map(|(_, name)| name.clone()).collect()
     }
+
+    /// codemods2: the mods whose own changes meet any of the address
+    /// ranges, all of them when none does.
+    pub fn blame(&self, ranges: &[(u32, u32)]) -> Vec<String> {
+        let blamed: Vec<String> = self
+            .own
+            .iter()
+            .filter(|(_, own)| own.iter().any(|&(a, b)| ranges.iter().any(|&(c, d)| a < d && c < b)))
+            .map(|(name, _)| name.clone())
+            .collect();
+        if blamed.is_empty() { self.names() } else { blamed }
+    }
+}
+
+/// codemods2: why the code mods couldn't be compiled, in plain words for
+/// the Mods screen, and the mods it is about (none: all of them).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Failure {
+    pub text: String,
+    pub mods: Vec<String>,
+}
+
+impl From<String> for Failure {
+    fn from(text: String) -> Failure {
+        Failure { text, mods: Vec::new() }
+    }
+}
+
+impl From<&str> for Failure {
+    fn from(text: &str) -> Failure {
+        Failure { text: text.to_owned(), mods: Vec::new() }
+    }
+}
+
+impl std::fmt::Display for Failure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.text)
+    }
+}
+
+impl Failure {
+    /// whether it is about the mod named name.
+    pub fn about(&self, name: &str) -> bool {
+        self.mods.is_empty() || self.mods.iter().any(|mod_name| mod_name == name)
+    }
+}
+
+fn failure_path(key: u64) -> PathBuf {
+    cache_root().join(format!("{key:016x}")).join("failed.toml")
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct FailureFile {
+    text: String,
+    mods: Vec<String>,
+}
+
+/// codemods2: keeps why this set of code mods couldn't be compiled, so the
+/// next start says so instead of "not compiled yet".
+pub fn record_failure(key: u64, failure: &Failure) {
+    let path = failure_path(key);
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let file = FailureFile { text: failure.text.clone(), mods: failure.mods.clone() };
+    let _ = std::fs::write(path, toml::to_string(&file).unwrap_or_default());
+}
+
+/// codemods2: why this set of code mods couldn't be compiled last time.
+pub fn last_failure(key: u64) -> Option<Failure> {
+    let file: FailureFile = toml::from_str(&std::fs::read_to_string(failure_path(key)).ok()?).ok()?;
+    Some(Failure { text: file.text, mods: file.mods })
+}
+
+/// codemods2: the note a mod gets when its code couldn't be compiled.
+pub fn failure_note(failure: &Failure) -> String {
+    format!("Off: its code can't be compiled. {}", failure.text)
 }
 
 /// the base the recompiled code linked in was made from.
@@ -224,6 +304,12 @@ pub fn plan(list: &ModList, game: &Game, base_digest: u64) -> Plan {
         if !files.changes_code() {
             continue;
         }
+        // eur2: a code mod made for the other build of the game is refused
+        if let Some(problem) = crate::haiku_mods::code_region_problem(info.title.as_deref()) {
+            log::warn!("mods: {}: {problem}", info.name);
+            plan.problems.insert(index, problem);
+            continue;
+        }
         match apply(game, &code, files) {
             Ok((patched, theirs)) => {
                 if let Ok((alone, _)) = apply(game, &game.code, files) {
@@ -240,6 +326,7 @@ pub fn plan(list: &ModList, game: &Game, base_digest: u64) -> Plan {
             }
         }
     }
+    plan.own = own.iter().map(|(index, ranges)| (list.mods[*index].name.clone(), ranges.clone())).collect();
     // two code mods changing the same bytes: the later one wins
     for (i, (first, ranges)) in own.iter().enumerate() {
         for (second, others) in &own[i + 1..] {
@@ -321,7 +408,7 @@ impl Stage {
 
 /// recompiles the plan's changed functions into its patch module, unless
 /// it is built already, telling stage how it goes.
-pub fn build(plan: &Plan, game: &Game, base: &patch::Base, compiler: &Compiler, stage: &(dyn Fn(Stage) + Sync), cancel: &AtomicBool) -> Result<Built, String> {
+pub fn build(plan: &Plan, game: &Game, base: &patch::Base, compiler: &Compiler, stage: &(dyn Fn(Stage) + Sync), cancel: &AtomicBool) -> Result<Built, Failure> {
     let code = plan.code.clone().ok_or("nothing to build")?;
     if let Some(built) = built(plan.key).filter(|built| built.data_only || module_path(plan.key).is_file()) {
         return Ok(built);
@@ -330,19 +417,44 @@ pub fn build(plan: &Plan, game: &Game, base: &patch::Base, compiler: &Compiler, 
     stage(Stage::Analysing);
     let exheader_bytes = plan.exheader.clone().unwrap_or_else(|| game.exheader.clone());
     let exheader = recomp3ds::rom::ExHeader::read(&exheader_bytes);
+    // codemods2: what the analysis is given, for 3dsrecomp's patch_plan
+    // example, to look at a mod's plan away from the game
+    if let Some(dir) = std::env::var_os("HAIKU_CODEMODS_DUMP").map(PathBuf::from) {
+        let _ = std::fs::create_dir_all(&dir);
+        let _ = std::fs::write(dir.join("base.txt"), base.to_text());
+        let _ = std::fs::write(dir.join("patched.bin"), code.as_slice());
+        let _ = std::fs::write(dir.join("exheader.bin"), &exheader_bytes);
+        let changed: String = plan.changed.iter().map(|(start, end)| format!("{start:08X} {end:08X}\n")).collect();
+        let _ = std::fs::write(dir.join("changed.txt"), changed);
+        log::info!("codemods: the analysis's input is in {}", dir.display());
+    }
     let program = patch::program(&exheader, &code, &plan.changed);
     let (made, program) = patch::plan(base, program, &plan.changed);
     log::info!(
-        "codemods: {} functions changed, {} to recompile, {} new instructions, {} entries with no code now, {} of Haiku's own replaced, analysed in {:.1} s",
+        "codemods: {} functions changed, {} to recompile, {} new instructions, {} entries with no code now, {} of Haiku's own replaced, {} dead ends, analysed in {:.1} s",
         made.stale.len(),
         made.functions.len(),
         made.new_instructions,
         made.missing.len(),
         made.replaced.len(),
+        made.dead_ends.len(),
         started.elapsed().as_secs_f32()
     );
+    for hole in made.holes.iter().take(20) {
+        log::warn!("codemods: a hole: {:?} code at 0x{:08X} goes to 0x{:08X} ({:?}), from 0x{:08X} in the function at 0x{:08X}", hole.mode, hole.from, hole.to, hole.way, hole.from, hole.function);
+    }
     if let Some(hole) = made.holes.first() {
-        return Err(format!("the patched code goes to 0x{:08X}, where there is no code Haiku can recompile", hole & !1));
+        // codemods2: in plain words, on the mod whose code goes there
+        let function = made.functions.get(&hole.function);
+        let spans: Vec<(u32, u32)> = function.map(|f| f.instructions.iter().map(|&at| (at, at + 4)).collect()).unwrap_or_else(|| vec![(hole.from, hole.from + 4)]);
+        let others = if made.holes.len() > 1 { format!(" (and {} more)", made.holes.len() - 1) } else { String::new() };
+        return Err(Failure {
+            text: format!(
+                "It jumps to 0x{:08X}, where there's no game code{others}: is it for the USA Special Edition?",
+                hole.to
+            ),
+            mods: plan.blame(&spans),
+        });
     }
     let dir = cache_root().join(format!("{:016x}", plan.key));
     let _ = std::fs::remove_dir_all(&dir);
@@ -357,7 +469,22 @@ pub fn build(plan: &Plan, game: &Game, base: &patch::Base, compiler: &Compiler, 
         data_only: made.stale.is_empty() && made.functions.is_empty(),
     };
     if !info.data_only {
-        let files = patch::source(&made, &program, base, base.digest(), plan.key)?;
+        let module = patch::source(&made, &program, base, base.digest(), plan.key).map_err(|error| {
+            log::warn!("codemods: {error}");
+            Failure {
+                text: format!(
+                    "It uses {} instruction{} the PC can't run (the first at 0x{:08X}).",
+                    error.count,
+                    if error.count == 1 { "" } else { "s" },
+                    error.first
+                ),
+                mods: plan.blame(&[(error.first, error.first + 4)]),
+            }
+        })?;
+        if let Some(first) = module.left_to_host.first() {
+            log::info!("codemods: {} instructions Haiku can't recompile are in code only guessed to be code, the first at 0x{first:08X}; the game stops there if it ever goes there", module.left_to_host.len());
+        }
+        let files = module.files;
         let source = dir.join("src");
         std::fs::create_dir_all(&source).map_err(|error| error.to_string())?;
         let mut sources = Vec::new();
@@ -374,7 +501,14 @@ pub fn build(plan: &Plan, game: &Game, base: &patch::Base, compiler: &Compiler, 
             !cancel.load(Ordering::Relaxed)
         };
         let library = source.join("patch.dll");
-        recomp3ds::compile::compile(compiler, &source, &sources, &library, &progress, true)?;
+        recomp3ds::compile::compile(compiler, &source, &sources, &library, &progress, true).map_err(|error| {
+            if cancel.load(Ordering::Relaxed) {
+                return Failure::from("Compiling was cancelled.");
+            }
+            log::warn!("codemods: the compiler failed: {error}");
+            log::warn!("codemods: the compiler was {}", compiler.describe());
+            Failure::from("The compiler failed; haiku.log says why.")
+        })?;
         std::fs::rename(&library, module_path(plan.key)).map_err(|error| format!("could not keep the module, {error}"))?;
     }
     info.seconds = started.elapsed().as_secs_f32();
@@ -440,6 +574,8 @@ pub struct Job {
     pub cancel: Arc<AtomicBool>,
     pub download: bool,
     pub names: Vec<String>,
+    /// codemods2: why it failed, and which mods that is about.
+    pub failure: Arc<Mutex<Option<Failure>>>,
 }
 
 impl Job {
@@ -451,6 +587,9 @@ impl Job {
         let cancel = Arc::new(AtomicBool::new(false));
         let (state, stop) = (stage.clone(), cancel.clone());
         let names = plan.names();
+        let names_kept = names.clone();
+        let failure = Arc::new(Mutex::new(None));
+        let failed = failure.clone();
         std::thread::spawn(move || {
             let set = |next: Stage| {
                 if let Ok(mut stage) = state.lock() {
@@ -461,20 +600,27 @@ impl Job {
                 Some(compiler) => Ok(compiler),
                 None => self::download(&|fraction| set(Stage::Downloading(fraction)), &stop),
             };
-            let result = compiler.and_then(|compiler| {
+            let result = compiler.map_err(|error| {
+                log::warn!("codemods: the compiler download failed: {error}");
+                Failure::from("The compiler couldn't be downloaded.")
+            }).and_then(|compiler| {
                 let run = std::panic::AssertUnwindSafe(|| build(&plan, &game, &base, &compiler, &set, &stop));
-                std::panic::catch_unwind(run).unwrap_or_else(|_| Err("Haiku hit a bug compiling the code mods".to_owned()))
+                std::panic::catch_unwind(run).unwrap_or_else(|_| Err(Failure::from("Haiku hit a bug compiling it; haiku.log says more.")))
             });
             set(match result {
                 Ok(_) => Stage::Done,
                 Err(_) if stop.load(Ordering::Relaxed) => Stage::Failed("cancelled".to_owned()),
-                Err(error) => {
-                    log::warn!("codemods: the code mods could not be compiled: {error}");
-                    Stage::Failed(error)
+                Err(failure) => {
+                    log::warn!("codemods: the code mods could not be compiled: {} (about {})", failure.text, if failure.mods.is_empty() { names.join(", ") } else { failure.mods.join(", ") });
+                    record_failure(plan.key, &failure);
+                    if let Ok(mut slot) = failed.lock() {
+                        *slot = Some(failure.clone());
+                    }
+                    Stage::Failed(failure.text)
                 }
             });
         });
-        Job { stage, cancel, download, names }
+        Job { stage, cancel, download, names: names_kept, failure }
     }
 
     pub fn stage(&self) -> Stage {
@@ -513,13 +659,100 @@ pub fn built_notes(built: &Built) -> Vec<String> {
         ));
     }
     if !built.replaced.is_empty() {
-        let names: Vec<String> = built.replaced.iter().map(|&at| match override_name(at) {
-            Some(file) => format!("0x{:08X} ({file})", at & !1),
-            None => format!("0x{:08X}", at & !1),
-        }).collect();
-        notes.push(format!("It changes {} functions Haiku has its own version of: {}. Haiku's are used.", names.len(), names.join(", ")));
+        // codemods2: the mod's code wins where they overlap
+        let off: Vec<&str> = turned_off(&built.replaced);
+        let files: std::collections::BTreeSet<&str> = built.replaced.iter().filter_map(|&at| override_name(at)).collect();
+        let files: Vec<&str> = files.into_iter().collect();
+        notes.push(format!(
+            "It changes {} functions Haiku also hooks{}: its code runs.{}",
+            built.replaced.len(),
+            if files.is_empty() { String::new() } else { format!(" ({})", files.join(", ")) },
+            if off.is_empty() { String::new() } else { format!(" Off while it runs: {}.", off.join(", ")) }
+        ));
     }
     notes
+}
+
+/// codemods2: what happens to Haiku's own version of a function whose
+/// original a code mod changes. the mod's code always runs (Haiku's
+/// versions call the original, which is the mod's); a Haiku feature that
+/// would change what that code sees turns off.
+pub fn overlap(address: u32) -> (&'static str, Option<&'static str>) {
+    match address & !1 {
+        0x00420B74 => ("the title screen: Haiku's plain Fates logo is off, the mod's title shows", Some("the plain title logo")),
+        0x001AE730 | 0x003D8C38 => ("the Randomizer works through it: the Randomizer is off", Some("the Randomizer")),
+        0x0043F390 => ("the Main Menu: Haiku only places its Mods entry, the mod's menu runs", None),
+        _ => match override_name(address) {
+            Some("cheats.c") => ("a cheat works through it: the mod's code runs, and the cheat adds to it only when you turn it on", None),
+            _ => ("Haiku's version runs the mod's inside it", None),
+        },
+    }
+}
+
+/// codemods2: the Haiku features the code mods turn off.
+pub fn turned_off(replaced: &[u32]) -> Vec<&'static str> {
+    let mut off: Vec<&'static str> = replaced.iter().filter_map(|&at| overlap(at).1).collect();
+    off.dedup();
+    off
+}
+
+/// codemods2: logs, for each of Haiku's functions the code mods change,
+/// what wins.
+pub fn log_overlaps(names: &[String], replaced: &[u32]) {
+    for &at in replaced {
+        let (what, _) = overlap(at);
+        log::info!("codemods: {} changes 0x{:08X} ({}), which Haiku also hooks; {what}", names.join(", "), at & !1, override_name(at).unwrap_or("Haiku"));
+    }
+    let off = turned_off(replaced);
+    if !off.is_empty() {
+        log::warn!("codemods: Haiku features off while {} runs: {}", names.join(", "), off.join(", "));
+    }
+}
+
+/// codemods2: the folder, under userdata/haiku, that holds the saves of
+/// the code mods running (their ids, sorted, joined with +), none for the
+/// game's own saves. A code mod changes what the game writes in its saves
+/// and reads from them (FE1: 39 slots, its own units, classes and event
+/// flags; its readme says its saves and the game's must never mix, the
+/// Global save included), so each set of code mods has saves of its own,
+/// beside the game's own folder (userdata/haiku/user), which is left
+/// alone. Plugins and file-only mods use the game's own saves.
+static SAVES: Mutex<Option<String>> = Mutex::new(None);
+
+/// the folder name for a set of code mod ids: sorted, joined with +, each
+/// kept to letters, digits and - _ . (anything else becomes _).
+pub fn saves_folder(ids: &[String]) -> String {
+    let mut ids: Vec<String> = ids
+        .iter()
+        .map(|id| id.chars().map(|c| if c.is_ascii_alphanumeric() || "-_.".contains(c) { c } else { '_' }).collect::<String>())
+        .map(|id| id.trim_matches('.').to_owned())
+        .collect();
+    ids.sort_by_key(|id| id.to_lowercase());
+    ids.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
+    ids.join("+")
+}
+
+/// codemods2: the Mods screen's note on a mod that patches the code (the
+/// log names the folder: userdata/haiku/user-mods/<ids>).
+pub fn own_saves_note(_id: &str) -> String {
+    "Uses its own saves, apart from the game's.".to_owned()
+}
+
+pub fn set_saves(ids: &[String]) {
+    if let Ok(mut saves) = SAVES.lock() {
+        *saves = (!ids.is_empty()).then(|| saves_folder(ids));
+    }
+}
+
+/// codemods2: where the running game's saves are: data_dir/user-mods/<ids>
+/// with code mods running, else none (data_dir/user, the game's own).
+pub fn saves_dir(data_dir: &Path) -> Option<PathBuf> {
+    SAVES.lock().ok()?.as_ref().map(|folder| data_dir.join("user-mods").join(folder))
+}
+
+/// codemods2: where the running game's save states go: beside its saves.
+pub fn states_base(data_dir: &Path) -> PathBuf {
+    saves_dir(data_dir).unwrap_or_else(|| data_dir.to_owned())
 }
 
 /// the code mods the last run turned off, written when the game reached
@@ -537,4 +770,26 @@ pub fn take_failed(data_dir: Option<&Path>) -> Option<(Vec<String>, String)> {
 /// where the game writes a failure.
 pub fn failed_path(data_dir: Option<&Path>) -> Option<PathBuf> {
     data_dir.map(|dir| dir.join(FAILED_FILE))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// codemods2: a set of code mods has one save folder whatever their
+    /// order, and an id can't leave userdata/haiku/user-mods.
+    #[test]
+    fn code_mods_keep_saves_by_the_sorted_set_of_ids() {
+        assert_eq!(saves_folder(&["FE1".into()]), "FE1");
+        assert_eq!(saves_folder(&["zeta".into(), "Alpha".into()]), saves_folder(&["Alpha".into(), "zeta".into()]));
+        assert_eq!(saves_folder(&["zeta".into(), "Alpha".into()]), "Alpha+zeta");
+        assert_eq!(saves_folder(&["../x y".into()]), "_x_y");
+        let data = Path::new("userdata/haiku");
+        set_saves(&["FE1".into()]);
+        assert_eq!(saves_dir(data), Some(data.join("user-mods").join("FE1")));
+        assert_eq!(states_base(data), data.join("user-mods").join("FE1"));
+        set_saves(&[]);
+        assert_eq!(saves_dir(data), None);
+        assert_eq!(states_base(data), data.to_owned());
+    }
 }

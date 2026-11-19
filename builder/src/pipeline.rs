@@ -200,6 +200,11 @@ pub fn run(paths: &Paths, game: &dump::Game, dlcs: &[dlc::Dlc], status: &Shared,
     let stop = || Err::<String, String>("Stopped. Start the build again to carry on where it stopped.".into());
     let dump_key = format!("{}|{}", file_key(&game.path), payload_key(paths));
     log::line(format!("building from {} ({}, {} bytes), {} DLC", game.path.display(), game.kind, game.size, dlcs.len()));
+    // eurdlc: a DLC that can't serve this game is said before anything is
+    // checked, installed or removed (the DLC installed before stays)
+    for d in dlcs {
+        crate::jpn::dlc_fits(game.region, d.title_id).map_err(|why| format!("The DLC doesn't fit this game: {why}"))?;
+    }
 
     // 1. the whole dump against its hashes
     let p = Progress::begin(status, "verify", "Checking your dump");
@@ -263,6 +268,19 @@ pub fn run(paths: &Paths, game: &dump::Game, dlcs: &[dlc::Dlc], status: &Shared,
             let said = dlc::install(d, &data).map_err(|e| format!("The DLC can't be installed: {e}"))?;
             log::line(format!("DLC {}: {said}", d.path.display()));
         }
+        // jpprep: a DLC that can't serve this game (the Japanese DLC on the
+        // USA or EUR game, a USA or EUR DLC on the Japanese one) is said
+        // before it is used
+        if let Some(region) = crate::jpn::installed_region(&data) {
+            for d in dlcs {
+                crate::jpn::dlc_fits(region, d.title_id).map_err(|why| format!("The DLC doesn't fit this game: {why}"))?;
+            }
+        }
+        // eur: the DLC next to an EUR game, filed as it asks and with its
+        // text in every EUR language folder (nothing for the USA game)
+        for line in zakuro_fs::eur::adapt_dlc(&data).map_err(|e| format!("The DLC can't be fitted to the EUR game: {e}"))? {
+            log::line(format!("eur: {line}"));
+        }
         mark(&mut state, paths, "dlc", &dlc_key);
     }
     if stopped() {
@@ -279,8 +297,49 @@ pub fn run(paths: &Paths, game: &dump::Game, dlcs: &[dlc::Dlc], status: &Shared,
         let pack = derive::read_pack(&pack_bytes)?;
         let staging = paths.work.join("derived");
         remove_dir(&staging)?;
-        let count = derive::apply(&pack, &data.join("romfs"), &staging, &|i, n| p.at(i as f32 / n as f32, format!("{i} of {n} files")))
-            .map_err(|e| format!("Haiku's files can't be made from your dump: {e}"))?;
+        // eur: the EUR game's files differ in places (its own UI sheets,
+        // fonts and message folders): what can't be made from them is
+        // left out and listed in the log
+        let eur = zakuro_fs::eur::is_eur_data(&data);
+        // jpprep: the Japanese game, likewise (its own files, its own pack)
+        let jpn = crate::jpn::installed_region(&data) == Some(crate::jpn::GameRegion::Jpn);
+        let count = if jpn {
+            let (count, skipped) = derive::apply_skipping(&pack, &data.join("romfs"), &staging, &|i, n| p.at(i as f32 / n as f32, format!("{i} of {n} files")))?;
+            log::line(format!("jpprep: {} of Haiku's files can't be made from the Japanese game's (its USA English text and sheets)", skipped.len()));
+            let jpn_pack = paths.setup.join("derived-jpn.pack");
+            let extra = if jpn_pack.is_file() {
+                let bytes = std::fs::read(&jpn_pack).map_err(|e| format!("setup/derived-jpn.pack: {e}"))?;
+                let pack = derive::read_pack(&bytes)?;
+                let (made, skipped) = derive::apply_skipping(&pack, &data.join("romfs"), &staging, &|i, n| p.at(i as f32 / n as f32, format!("{i} of {n} Japanese files")))?;
+                log::line(format!("jpprep: {made} of Haiku's Japanese files made{}", if skipped.is_empty() { String::new() } else { format!("; not from this dump: {}", skipped.join(", ")) }));
+                made
+            } else {
+                log::line("jpprep: no setup/derived-jpn.pack: Haiku's own lines (Kana, End Turn, Sunglasses, S-supports) and its menus' Japanese font are not made");
+                0
+            };
+            count + extra
+        } else if eur {
+            let (count, skipped) = derive::apply_skipping(&pack, &data.join("romfs"), &staging, &|i, n| p.at(i as f32 / n as f32, format!("{i} of {n} files")))?;
+            log::line(format!("eur: {} of Haiku's files can't be made from the EUR game's: {}", skipped.len(), skipped.join(", ")));
+            // eur2: Haiku's own text in the EUR game's five languages and its
+            // button prompt sheets (derived-eur.pack, made against the EUR
+            // game), over those
+            let eur_pack = paths.setup.join("derived-eur.pack");
+            let extra = if eur_pack.is_file() {
+                let bytes = std::fs::read(&eur_pack).map_err(|e| format!("setup/derived-eur.pack: {e}"))?;
+                let pack = derive::read_pack(&bytes)?;
+                let (made, skipped) = derive::apply_skipping(&pack, &data.join("romfs"), &staging, &|i, n| p.at(i as f32 / n as f32, format!("{i} of {n} EUR files")))?;
+                log::line(format!("eur2: {made} of Haiku's EUR files made{}", if skipped.is_empty() { String::new() } else { format!("; not from this dump: {}", skipped.join(", ")) }));
+                made
+            } else {
+                log::line("eur2: no setup/derived-eur.pack: Haiku's text stays English-only on the EUR game");
+                0
+            };
+            count + extra
+        } else {
+            derive::apply(&pack, &data.join("romfs"), &staging, &|i, n| p.at(i as f32 / n as f32, format!("{i} of {n} files")))
+                .map_err(|e| format!("Haiku's files can't be made from your dump: {e}"))?
+        };
         // the release's own assets (no game data) under the derived ones
         let assets = paths.root.join("assets");
         remove_dir(&assets)?;
@@ -292,6 +351,21 @@ pub fn run(paths: &Paths, game: &dump::Game, dlcs: &[dlc::Dlc], status: &Shared,
         remove_dir(&overrides)?;
         copy_dir(&paths.setup.join("overrides"), &overrides).map_err(|e| format!("copying the overrides: {e}"))?;
         copy_dir(&staging.join("overrides"), &overrides).map_err(|e| format!("copying the overrides: {e}"))?;
+        // eur: the overrides with the EUR game's addresses
+        if eur {
+            let n = crate::eur::translate_overrides(&overrides, &paths.setup.join("eur"))?;
+            log::line(format!("eur: {n} override files translated to the EUR addresses"));
+        }
+        // jpprep: and the Japanese game's, and its menus' font for Haiku's
+        // own menus (its kana and kanji), made from the dump
+        if jpn {
+            match crate::jpn::make_font(&data.join("romfs"), &assets) {
+                Ok(n) => log::line(format!("jpprep: the Japanese menus' font: {n} sheets")),
+                Err(e) => log::line(format!("jpprep: the Japanese menus' font can't be made ({e}): Haiku's menus show Latin letters only")),
+            }
+            let n = crate::jpn::translate_overrides(&overrides, &paths.setup)?;
+            log::line(format!("jpprep: {n} override files translated to the Japanese addresses"));
+        }
         remove_dir(&staging)?;
         log::line(format!("made {count} files"));
         mark(&mut state, paths, "assets", &dump_key);

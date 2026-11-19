@@ -975,6 +975,22 @@ int main(void) {
     if (recomp_tails_pending != 1) return 6;
     recomp_tails_forget(0);
     if (recomp_tails_pending != 0 || expired_ran) return 7;
+    /* pulsefix: the tails waiting are kept, others wait in their place, and
+       the kept ones are put back instead (a rewind's moment, a saved state) */
+    typedef struct { uint64_t tail, name; uint32_t tls, ret, sp; uint32_t words[RECOMP_TAIL_WORDS]; } Kept;
+    uint32_t recomp_tails_keep(Kept *out, uint32_t max);
+    void recomp_tails_put(const Kept *in, uint32_t count);
+    Kept kept[4];
+    words[0] = 77;
+    recomp_tail_defer(&ctx, 0x00100008, 0x00200F00, expired, "expired", words);
+    if (recomp_tails_keep(kept, 4) != 1 || kept[0].ret != 0x00100008 || kept[0].words[0] != 77) return 8;
+    recomp_tails_forget(0);
+    recomp_tail_defer(&ctx, 0x00100010, 0x00200E00, expired, "expired", words);
+    recomp_tail_defer(&ctx, 0x00100018, 0x00200D00, expired, "expired", words);
+    recomp_tails_put(kept, 1);
+    Kept now[4];
+    if (recomp_tails_pending != 1 || recomp_tails_keep(now, 4) != 1 || now[0].ret != 0x00100008 || now[0].sp != 0x00200F00) return 9;
+    recomp_tails_forget(0);
     return 0;
 }
 "#;

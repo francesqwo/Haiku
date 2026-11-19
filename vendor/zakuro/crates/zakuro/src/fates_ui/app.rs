@@ -30,7 +30,12 @@ impl App {
             self.menus.toast = Some((text, std::time::Instant::now()));
         }
         crate::cheats::set_menu_open(self.fates.options.on_cheats()); // cheats2: only on the Cheats tab
-        let toast = self.menus.toast.as_ref().filter(|(_, since)| since.elapsed().as_millis() < 2500).map(|(text, _)| text.clone());
+        // pulse: Divine Pulse's and the save states' notices
+        if let Some(text) = crate::pulse::take_toast().or_else(crate::states::take_notice) {
+            self.menus.toast = Some((text, std::time::Instant::now()));
+        }
+        // statecheck: a long notice stays long enough to be read
+        let toast = self.menus.toast.as_ref().filter(|(text, since)| since.elapsed().as_millis() < 2500u128.max(text.len() as u128 * 55)).map(|(text, _)| text.clone());
         if toast.is_none() {
             self.menus.toast = None;
         }

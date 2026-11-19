@@ -117,8 +117,16 @@ pub fn unit_texture(r: &[u32], unit: usize, virt: &dyn Fn(u32) -> u32) -> Option
         return None;
     }
     let wrap = ((param >> 12) & 7) as u8;
+    // skybg: a cube map (unit 0, type 1): its six faces stacked (skybg.rs)
+    let mut format = r[format_reg] & 0xF;
+    if unit == 0 {
+        if let Some(faces) = crate::skybg::unit0_cube_faces(r) {
+            crate::skybg::note_cube(faces.map(virt));
+            format |= crate::skybg::CUBE;
+        }
+    }
     Some((
-        TexRef { addr: virt(addr), width, height, format: r[format_reg] & 0xF },
+        TexRef { addr: virt(addr), width, height, format },
         Sampling { wrap: wrap & 3, wrap_t: ((param >> 8) & 3) as u8, sharp: false, linear_mag: param & 2 != 0, linear_min: param & 4 != 0 },
     ))
 }
@@ -215,6 +223,9 @@ pub fn shaded_from(setup: &Setup, topology: u8, attributes: &[[u32; 4]; 16], def
             if let Some((t, _)) = textures[unit] {
                 enabled |= 1 << unit;
                 mips[unit] = unit_mip(r, unit, t.width, t.height); // gfx-terrain
+                if t.format & crate::skybg::CUBE != 0 {
+                    mips[unit] = Mip { levels: 1, ..Mip::default() }; // skybg: the stacked faces' largest size
+                }
             }
         }
     }

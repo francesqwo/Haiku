@@ -65,7 +65,7 @@ const RENDERSTATE_PROJ_BIND: u32 = 0x001A_3340;
 /// above times the palette's scale. Returns (distance, s), or None (an
 /// orthographic projection, or no matrices) leaving the setup as it was.
 pub fn pull(system: &mut System, s: &mut Setup, o: &Objects) -> Option<(f32, f32)> {
-    let proj_bind = prim::r32(system, RENDERSTATE_PROJ_BIND);
+    let proj_bind = prim::r32(system, zakuro_core::region::us(RENDERSTATE_PROJ_BIND));
     let proj = prim::r8(system, proj_bind + 2) as usize;
     let view = prim::r8(system, o.bind + 10) as usize;
     let palette = prim::r8(system, o.bind + 0x22) as usize;

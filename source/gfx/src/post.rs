@@ -89,12 +89,12 @@ pub fn supported(system: &mut System, callback: u32) -> bool {
         return false;
     }
     let vtable = r32(system, effect);
-    let run = r32(system, vtable + 8);
+    let run = zakuro_core::region::to_us(r32(system, vtable + 8)); // eur
     if run != BLOOM_DRAW {
         return false;
     }
     // BloomContext's settings (literal 0x001AB580): +0x14 depth of field
-    let settings = r32(system, 0x001A_B580);
+    let settings = r32(system, zakuro_core::region::us(0x001A_B580));
     r8(system, settings + 0x14) == 0
 }
 
@@ -365,7 +365,7 @@ impl Recorder {
             // FrameBuffer::MakeCommand(cmd, bool): the display's framebuffer
             // object (literal 0x00106550) through nn::gr's
             0x0010_653C => {
-                let fb = r32(system, 0x0010_6550);
+                let fb = r32(system, zakuro_core::region::us(0x0010_6550));
                 self.call(system, surfaces, 0x0011_3354, &[fb, arg(0), 3, arg(1)]);
             }
             // PostEffectContext::DrawQuads(this, first quad, quads)
@@ -597,7 +597,7 @@ impl State {
     /// a post effect starts on display `disp`: its colour buffer is the
     /// display's native target from now on
     pub fn begin(&mut self, system: &mut System, disp: u8) {
-        let fb = r32(system, 0x0010_6564);
+        let fb = r32(system, zakuro_core::region::us(0x0010_6564));
         let color = r32(system, fb);
         let display = Display {
             key: crate::surfaces::Key { addr: phys(system, color), width: r32(system, fb + 8), format: r8(system, fb + 4) as u32 },
@@ -654,10 +654,10 @@ pub fn trace_effect(system: &mut System, effect: u32) {
         let p = phys(system, at);
         eprintln!("gfx-post   {name} {at:08X} -> phys {p:08X}");
     }
-    let settings = r32(system, 0x001A_B580);
+    let settings = r32(system, zakuro_core::region::us(0x001A_B580));
     eprintln!("gfx-post   settings {settings:08X}: {}", words(system, settings, 8));
-    eprintln!("gfx-post   filter flags {:08X}", r32(system, 0x0021_7524));
-    let display = r32(system, 0x0010_6564);
+    eprintln!("gfx-post   filter flags {:08X}", r32(system, zakuro_core::region::us(0x0021_7524)));
+    let display = r32(system, zakuro_core::region::us(0x0010_6564));
     eprintln!("gfx-post   display framebuffer {display:08X}: {}", words(system, display, 0x12));
     let vb = r32(system, effect + 8);
     for q in 0..16u32 {

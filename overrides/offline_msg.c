@@ -51,6 +51,17 @@ static const uint16_t offline_text_fr[] =
     u"Les fonctions en ligne ne sont pas\ndisponibles dans cette version.";
 static const uint16_t offline_text_es[] =
     u"Las funciones en línea no están\ndisponibles en esta versión.";
+/* eur: the EUR build's other two languages (Lang::Folder 3 and 4) */
+static const uint16_t offline_text_de[] =
+    u"Online-Funktionen sind in dieser\nVersion nicht verfügbar.";
+static const uint16_t offline_text_it[] =
+    u"Le funzioni online non sono\ndisponibili in questa versione.";
+
+/* jpprep: the Japanese game's (it has no Lang::Folder) */
+static const uint16_t offline_text_ja[] =
+    u"このバージョンでは\nオンライン機能を利用できません。";
+int haiku_code_is_jpn(void); /* eur_region.c */
+int haiku_jpn_japanese(void); /* jpn2: jpn_text.c */
 
 /* HomeButton::StartErrEulaApplet(ProcInst* parent, int code) */
 RECOMP_OVERRIDE(0x0017CC4C) {
@@ -58,9 +69,12 @@ RECOMP_OVERRIDE(0x0017CC4C) {
     if (os_native_hook && os_native_hook(ctx, OFFLINE_ERROR_DISPLAY) && ctx->r[0] == OFFLINE_NOT_AVAILABLE) {
         const uint16_t *text = offline_text_en;
         uint32_t length = sizeof offline_text_en / 2; /* with the terminating zero */
-        switch (mem_read8(ctx, LANG_INDEX)) {
+        switch (haiku_code_is_jpn() ? 0 : mem_read8(ctx, LANG_INDEX)) {
+        case 0: if (haiku_jpn_japanese()) { text = offline_text_ja; length = sizeof offline_text_ja / 2; } break; /* jpprep; jpn2: English under a translation */
         case 2: text = offline_text_fr; length = sizeof offline_text_fr / 2; break;
         case 5: text = offline_text_es; length = sizeof offline_text_es / 2; break;
+        case 3: text = offline_text_de; length = sizeof offline_text_de / 2; break; /* eur */
+        case 4: text = offline_text_it; length = sizeof offline_text_it / 2; break; /* eur */
         default: break;
         }
         const uint32_t buffer = mem_read32(ctx, MESS_STATE + 4);

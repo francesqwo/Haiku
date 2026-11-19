@@ -110,6 +110,18 @@ impl Backend {
         }
     }
 
+    /// pulse2: Divine Pulse's effect over the top screen in the next present.
+    pub fn set_pulse_effect(&mut self, effect: Option<zakuro_gpu::PulseEffect>) {
+        if let Backend::Vulkan(presenter) = self {
+            presenter.set_pulse_effect(effect);
+        }
+    }
+
+    /// pulse2: whether Divine Pulse's effects can be drawn.
+    pub fn pulse_effects(&self) -> bool {
+        matches!(self, Backend::Vulkan(presenter) if presenter.pulse_effects())
+    }
+
     /// smooth2: with VSync off, the rate presents go out at (see
     /// VulkanPresenter::set_free_rate).
     pub fn set_free_rate(&mut self, rate: Option<f64>) {

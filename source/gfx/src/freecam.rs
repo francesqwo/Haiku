@@ -161,7 +161,7 @@ fn pack_axis(v: [f32; 3]) -> u32 {
 /// (battles, the castle's view, cutscenes).
 fn read_view(system: &mut System, state: u32) -> Option<View> {
     let camera = r32(system, state + 8);
-    let world = r32(system, FIELD_WORLD_PTR);
+    let world = r32(system, zakuro_core::region::us(FIELD_WORLD_PTR));
     if camera == 0 || world == 0 || camera != r32(system, world + 0x34) {
         return None;
     }
@@ -258,7 +258,7 @@ impl crate::Gfx {
             self.freecam.view = read_view(system, state);
         }
         let Some(view) = self.freecam.view else { return };
-        let world = r32(system, FIELD_WORLD_PTR);
+        let world = r32(system, zakuro_core::region::us(FIELD_WORLD_PTR));
         let sky_actor = if world != 0 { r32(system, world + 0x10) } else { 0 };
         let sky = sky_actor != 0 && sky_actor.wrapping_add(0x80) == model;
         if trace_on() {
@@ -328,6 +328,12 @@ impl crate::Gfx {
                     }
                 }
                 let colour = self.freecam.haze_color?;
+                // skybg: a dome drawn with its cube map (skybg.rs) is the
+                // real sky to the zenith and the nadir, no pinched poles to
+                // hide: no haze over it (the field's distance haze stays)
+                if sky && crate::skybg::is_cube(s) && !crate::skybg::sky_haze() {
+                    return None;
+                }
                 overlay(s, colour, mode, param)
             });
             out.push((d.clone(), keys));

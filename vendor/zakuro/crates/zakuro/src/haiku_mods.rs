@@ -42,6 +42,88 @@ use serde::{Deserialize, Serialize};
 
 /// the game's title id, the name of its folder in a Luma3DS mod.
 pub const PROGRAM_ID: &str = "0004000000179800";
+/// eur2: the EUR Special Edition's title id.
+pub const PROGRAM_ID_EUR: &str = "000400000017A800";
+/// jpprep: the Japanese builds' title ids (Fire Emblem if: the Special
+/// Edition, Byakuya Oukoku, Anya Oukoku).
+pub const PROGRAM_IDS_JPN: [&str; 3] = ["000400000012DE00", "000400000012DC00", "000400000012DD00"];
+
+/// eur2: the title ids a mod's folders may be named for, the running game's
+/// first (a USA mod's files still serve the EUR game: its RomFS paths are
+/// the same but for the language folders).
+pub fn program_ids() -> [&'static str; 2] {
+    // jpprep: the Japanese build's own title first
+    if zakuro_core::region::is_jpn() {
+        let running = zakuro_core::region::title();
+        let own = PROGRAM_IDS_JPN.into_iter().find(|id| u64::from_str_radix(id, 16).ok() == Some(running)).unwrap_or(PROGRAM_IDS_JPN[0]);
+        return [own, PROGRAM_ID];
+    }
+    if zakuro_core::region::is_eur() {
+        [PROGRAM_ID_EUR, PROGRAM_ID]
+    } else {
+        [PROGRAM_ID, PROGRAM_ID_EUR]
+    }
+}
+
+/// eur2: why a code mod can't run on this game: it was made for the other
+/// build of Fates (its Luma folder's title id, or mod.toml's `title`), or,
+/// on the EUR game, it doesn't say it was made for it. Code mods patch the
+/// game's code at fixed places, and the two builds' code is laid out
+/// differently, so one made for the USA build would break the EUR one.
+///
+/// fanpatch: the same check covers the Japanese game (Fire Emblem if,
+/// 000400000012DE00/DC00/DD00, or `jpn`; haiku_fanpatch also finds it from
+/// a Japanese title folder, exheader.bin or Team If's layout) and any other
+/// title. A mod made for the Japanese game keeps its files: haiku_fanpatch
+/// leaves only its code out, as soon as the mod is read.
+pub fn code_region_problem(title: Option<&str>) -> Option<String> {
+    let eur = zakuro_core::region::is_eur();
+    // fanpatch: title ids, or usa / eur / jpn
+    let parsed = title.and_then(crate::haiku_fanpatch::parse_title);
+    // jpprep: on a Japanese build a code mod must be made for that very
+    // build (the Uncensored Patch's endings code.ips is, for the Special
+    // Edition); the USA and EUR builds answer as before
+    if zakuro_core::region::is_jpn() {
+        return jpn_code_problem(parsed);
+    }
+    if parsed.is_some_and(crate::haiku_fanpatch::is_japanese) {
+        return Some(crate::haiku_fanpatch::JAPANESE_CODE.to_owned());
+    }
+    if let Some(other) = parsed.filter(|id| ![zakuro_core::region::USA, zakuro_core::region::EUR].contains(id)) {
+        return Some(format!("Its code changes are made for another game ({other:016X}), so they can't be used."));
+    }
+    let made_for_eur = parsed == Some(zakuro_core::region::EUR);
+    let made_for_usa = parsed == Some(zakuro_core::region::USA);
+    if eur && !made_for_eur {
+        Some(format!(
+            "Its code changes are made for the USA version of Fire Emblem Fates ({}), and your game is the European Special Edition, whose code is laid out differently, so they can't be used. A code mod made for the European version says so with title = \"{PROGRAM_ID_EUR}\" in its mod.toml, or sits in luma/titles/{PROGRAM_ID_EUR}/.",
+            if made_for_usa { "its folder says 0004000000179800" } else { "it doesn't say it is made for the European one" }
+        ))
+    } else if !eur && made_for_eur {
+        Some(format!("Its code changes are made for the European Special Edition ({PROGRAM_ID_EUR}), and your game is the USA version, whose code is laid out differently, so they can't be used."))
+    } else {
+        None
+    }
+}
+/// jpprep: code_region_problem on a Japanese build (Fire Emblem if).
+fn jpn_code_problem(parsed: Option<u64>) -> Option<String> {
+    let running = zakuro_core::region::title();
+    match parsed {
+        Some(title) if title == running => None,
+        Some(title) if crate::haiku_fanpatch::is_japanese(title) => Some(format!(
+            "Its code changes are made for another Japanese edition ({title:016X}), and your game is {running:016X}, whose code is laid out differently, so they can't be used."
+        )),
+        Some(zakuro_core::region::USA) | Some(zakuro_core::region::EUR) => Some(format!(
+            "Its code changes are made for {}, and your game is the Japanese one (Fire Emblem if), whose code is laid out differently, so they can't be used.",
+            crate::haiku_fanpatch::title_name(parsed.unwrap_or_default())
+        )),
+        Some(other) => Some(format!("Its code changes are made for another game ({other:016X}), so they can't be used.")),
+        None => Some(format!(
+            "It doesn't say which game its code changes are made for, and your game is the Japanese one (Fire Emblem if), so they can't be used. A code mod made for it says so with title = \"{running:016X}\" in its mod.toml, or sits in luma/titles/{running:016X}/."
+        )),
+    }
+}
+
 /// the list of mods turned on, beside settings.toml.
 pub const CONFIG_FILE: &str = "mods.toml";
 
@@ -64,6 +146,11 @@ struct Manifest {
     /// looks and sounds (false), for online battles; none: Haiku decides
     /// from what it changes.
     gameplay: Option<bool>,
+    /// eur2: the build of the game its code changes are made for (a title
+    /// id: 0004000000179800 USA, 000400000017A800 EUR); none: the USA one.
+    /// fanpatch: also 000400000012DE00/DC00/DD00 (the Japanese game), or
+    /// usa / eur / jpn.
+    title: Option<String>,
 }
 
 /// codemods: an option a plugin reads (haiku_mod.h, api->option), declared
@@ -117,11 +204,17 @@ pub struct ModInfo {
     pub options: Vec<ModOption>,
     /// online2: what its mod.toml says of gameplay, if anything.
     pub gameplay: Option<bool>,
+    /// eur2: the title id it is made for: its Luma or Citra folder's, else
+    /// its mod.toml's `title`.
+    pub title: Option<String>,
     /// why it can't be used, when it can't.
     pub problem: Option<String>,
     /// hdpacks: a download still in its zips, unpacked when turned on
     /// (haiku_import.rs)
     pub download: Option<crate::haiku_import::Download>,
+    /// fanpatch: a mod made for another release (Team If's layout, a
+    /// Japanese or EUR title): what Haiku made of it
+    pub fanpatch: Option<crate::haiku_fanpatch::FanPatch>,
 }
 
 impl ModInfo {
@@ -226,6 +319,8 @@ impl ModList {
             for path in paths {
                 let zip = path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("zip"));
                 if !path.is_dir() && !zip {
+                    // fanpatch: a RAR or 7z says to extract it first
+                    found.extend(crate::haiku_fanpatch::archive(&path));
                     continue;
                 }
                 // hdpacks: the downloads put away once unpacked, and the
@@ -446,7 +541,7 @@ impl ModList {
             .iter()
             .enumerate()
             .filter(|(index, info)| self.enabled[*index] && self.can_enable(*index) && !info.files.is_empty() && !self.left_out.contains(&info.id))
-            .filter_map(|(_, info)| info.content.clone())
+            .flat_map(|(index, info)| crate::haiku_fanpatch::content_dirs(info, &self.options_of(index))) // fanpatch: and its extras
             .collect()
     }
 
@@ -547,6 +642,7 @@ impl ModList {
             if let Some(code_notes) = self.code_notes.get(&info.id) {
                 note.extend(code_notes.iter().cloned());
             }
+            note.extend(crate::haiku_fanpatch::notes(info, &self.options_of(index))); // fanpatch
             if !on {
                 continue;
             }
@@ -740,6 +836,7 @@ fn read_mod(source: &Path, cache: Option<&Path>) -> ModInfo {
                 plugin = manifest.plugin;
                 info.options = manifest.options;
                 info.gameplay = manifest.gameplay;
+                info.title = manifest.title.map(|t| t.trim().to_owned()).filter(|t| !t.is_empty());
             }
             Err(error) => {
                 log::warn!("mods: {} can't be read, {error}", path.display());
@@ -747,7 +844,24 @@ fn read_mod(source: &Path, cache: Option<&Path>) -> ModInfo {
             }
         }
     }
-    let content = content_folder(&folder);
+    let (content, titled) = content_folder(&folder);
+    if titled.is_some() {
+        info.title = titled.map(str::to_owned); // eur2
+    }
+    // fanpatch: a mod for another release: its title (a Japanese title
+    // folder, exheader.bin, a Japanese layout), for code_region_problem, and
+    // a Japanese layout laid out for this build in the cache
+    let fanpatch = crate::haiku_fanpatch::inspect(&info.id, &folder, &content, titled.is_some(), info.title.as_deref(), cache);
+    let content = match &fanpatch {
+        Some((fan, content)) => {
+            if let Some(title) = fan.title {
+                info.title = Some(format!("{title:016X}"));
+            }
+            content.clone()
+        }
+        None => content,
+    };
+    info.fanpatch = fanpatch.map(|(fan, _)| fan);
     // the game's files: romfs/, romfs_ext/ (a patch or stub stands for the
     // file it changes) and dlc/<IIII>/ for the DLC
     let mut files = Vec::new();
@@ -785,7 +899,7 @@ fn read_mod(source: &Path, cache: Option<&Path>) -> ModInfo {
             let name = file.rsplit('/').next().unwrap_or(file);
             name.starts_with("tex1_") && (name.ends_with(".png") || name.ends_with(".dds"))
         };
-        let titled = find_ci(&textures, PROGRAM_ID).filter(|titled| {
+        let titled = program_ids().into_iter().find_map(|id| find_ci(&textures, id)).filter(|titled| {
             let mut pictures = Vec::new();
             list_files(titled, "", &mut pictures);
             pictures.iter().any(named)
@@ -835,6 +949,7 @@ fn read_mod(source: &Path, cache: Option<&Path>) -> ModInfo {
         info.modules = true;
     }
     info.content = Some(content);
+    crate::haiku_fanpatch::finish(&mut info); // fanpatch: foreign code left out, options
     info
 }
 
@@ -883,7 +998,7 @@ fn wrapped(folder: &Path) -> PathBuf {
     let mut current = folder.to_path_buf();
     for _ in 0..4 {
         // hdpacks: textures/ too, a texture pack's own folder
-        if find_ci(&current, "mod.toml").is_some() || find_ci(&current, "romfs").is_some() || find_ci(&current, "luma").is_some() || find_ci(&current, "textures").is_some() {
+        if find_ci(&current, "mod.toml").is_some() || find_ci(&current, "romfs").is_some() || find_ci(&current, "luma").is_some() || find_ci(&current, "textures").is_some() || crate::haiku_fanpatch::stops_unwrap(&current) {
             break;
         }
         let Ok(entries) = std::fs::read_dir(&current) else { break };
@@ -897,19 +1012,23 @@ fn wrapped(folder: &Path) -> PathBuf {
 }
 
 /// where a mod's romfs/ and the rest are: a Luma3DS layout's
-/// luma/titles/<title id>/, Citra's <title id>/, or the folder itself.
-fn content_folder(folder: &Path) -> PathBuf {
-    let luma = find_ci(folder, "luma").and_then(|luma| find_ci(&luma, "titles")).and_then(|titles| find_ci(&titles, PROGRAM_ID));
-    if let Some(luma) = luma {
-        return luma;
+/// luma/titles/<title id>/, Citra's <title id>/, or the folder itself; and
+/// the title id when it was one (eur2: the running game's, else the other
+/// build's).
+fn content_folder(folder: &Path) -> (PathBuf, Option<&'static str>) {
+    for id in program_ids() {
+        let luma = find_ci(folder, "luma").and_then(|luma| find_ci(&luma, "titles")).and_then(|titles| find_ci(&titles, id));
+        if let Some(luma) = luma {
+            return (luma, Some(id));
+        }
+        if let Some(titles) = find_ci(folder, "titles").and_then(|titles| find_ci(&titles, id)) {
+            return (titles, Some(id));
+        }
+        if let Some(citra) = find_ci(folder, id) {
+            return (citra, Some(id));
+        }
     }
-    if let Some(titles) = find_ci(folder, "titles").and_then(|titles| find_ci(&titles, PROGRAM_ID)) {
-        return titles;
-    }
-    if let Some(citra) = find_ci(folder, PROGRAM_ID) {
-        return citra;
-    }
-    folder.to_path_buf()
+    (folder.to_path_buf(), None)
 }
 
 /// the entry of dir named name, in any case.
@@ -1074,6 +1193,24 @@ pub fn take_open_request() -> bool {
     OPEN_ASKED.swap(false, Ordering::Relaxed)
 }
 
+/// fanpatch: the tests' zips, for haiku_fanpatch's tests.
+/// jpprep: the Japanese build's answers (the running title is the USA one
+/// in tests: the same title accepted, another Japanese edition, no title,
+/// another game refused)
+#[cfg(test)]
+#[test]
+fn a_japanese_build_takes_code_made_for_it() {
+    assert_eq!(jpn_code_problem(Some(zakuro_core::region::USA)), None);
+    assert!(jpn_code_problem(Some(zakuro_core::region::JPN)).unwrap().contains("another Japanese edition"));
+    assert!(jpn_code_problem(None).unwrap().contains("doesn't say"));
+    assert!(jpn_code_problem(Some(0x0004_0000_0000_1000)).unwrap().contains("another game"));
+}
+
+#[cfg(test)]
+pub(crate) fn tests_zip(files: &[(&str, &[u8])]) -> Vec<u8> {
+    tests::zip(files)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1092,7 +1229,7 @@ mod tests {
     }
 
     /// a zip of stored files, as `zip -0` makes.
-    fn zip(files: &[(&str, &[u8])]) -> Vec<u8> {
+    pub(crate) fn zip(files: &[(&str, &[u8])]) -> Vec<u8> {
         let mut out = Vec::new();
         let mut central = Vec::new();
         for (name, data) in files {

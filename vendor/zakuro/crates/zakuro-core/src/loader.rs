@@ -89,12 +89,17 @@ pub fn load(path: impl AsRef<std::path::Path>, mut config: Config) -> Result<Sys
         }
     }
     let updated = config.update.as_ref().is_some_and(|update| attach_update(&mut title, update));
-    // mods: the mods folder in data_dir, then the mods turned on, in order
-    crate::mods::lay_all(&mut title, config.data_dir.as_deref(), &config.mods);
     // codemods: the code mods' exheader and code, checked against the
     // recompiled code before anything is mapped
     let code_mods = std::mem::take(&mut config.code_mods);
     let (mod_code, patch) = crate::codemods::prepare(&mut title, &code_mods, config.linked.as_ref());
+    // codemods2: code mods left out here go whole, their files too
+    if code_mods.code.is_some() && mod_code.is_none() && !code_mods.content.is_empty() {
+        config.mods.retain(|dir| !code_mods.content.contains(dir));
+        log::warn!("codemods: {}: their files are left out with their code", code_mods.names.join(", "));
+    }
+    // mods: the mods folder in data_dir, then the mods turned on, in order
+    crate::mods::lay_all(&mut title, config.data_dir.as_deref(), &config.mods);
     let mut dlc = load_dlc(&title, &config.dlc);
     crate::mods::lay_dlc(&mut dlc, &config.dlc, &config.mods);
 

@@ -420,7 +420,7 @@ impl crate::Gfx {
             for r in 0..mh {
                 win[(mh - 1 - r) * row..(mh - r) * row].copy_from_slice(&rgba[r * row..(r + 1) * row]);
             }
-            let offsets: [f32; 4] = std::array::from_fn(|i| f32::from_bits(r32(system, LIT_GAUSS_OFFSETS + 4 * i as u32)));
+            let offsets: [f32; 4] = std::array::from_fn(|i| f32::from_bits(r32(system, zakuro_core::region::us(LIT_GAUSS_OFFSETS) + 4 * i as u32)));
             crate::blur::gauss(&mut win, mw, mh, scale as f32, offsets); // gfx-perf: the same, faster
             for r in 0..mh {
                 rgba[r * row..(r + 1) * row].copy_from_slice(&win[(mh - 1 - r) * row..(mh - r) * row]);
@@ -500,7 +500,7 @@ impl crate::Gfx {
         }
         let callback = r32(system, model + 4);
         let vtable = if callback != 0 { r32(system, callback) } else { 0 };
-        if callback == 0 || r32(system, vtable) != FIELD_ACTOR_ON_BEGIN {
+        if callback == 0 || zakuro_core::region::to_us(r32(system, vtable)) != FIELD_ACTOR_ON_BEGIN {
             return;
         }
         let index = r16(system, mesh) as u32;
@@ -604,11 +604,11 @@ fn cstr(system: &mut System, at: u32) -> Vec<u8> {
 /// the shadow map, with field shadows on: unit 0 when its texture is named
 /// "ShadowMap...", else unit 1 when its is.
 pub fn receiver_unit(system: &mut System, material: u32) -> Option<u32> {
-    let on = r32(system, LIT_SHADOW_ON);
+    let on = r32(system, zakuro_core::region::us(LIT_SHADOW_ON));
     if r8(system, on) != 1 {
         return None;
     }
-    let name = r32(system, LIT_SHADOWMAP);
+    let name = r32(system, zakuro_core::region::us(LIT_SHADOWMAP));
     let tex0 = r32(system, material + 4);
     let name0 = if tex0 != 0 { r32(system, tex0 + 0x1C) } else { 0 };
     if tex0 != 0 && starts_with(system, name0, name) {
@@ -648,13 +648,13 @@ fn patricia(system: &mut System, dic: u32, key: &[u8]) -> Option<u32> {
 /// FieldShadow::GetShadowMapContent (0x001992FC): the shadow binary's
 /// "ShadowMap" content, two (blob, words) pairs for units 0 and 1.
 fn shadow_map_content(system: &mut System) -> Option<u32> {
-    let holder = r32(system, LIT_SHADOW_BINARY);
+    let holder = r32(system, zakuro_core::region::us(LIT_SHADOW_BINARY));
     let bin = r32(system, holder + 4);
     if bin == 0 {
         return None;
     }
     let root = r32(system, bin + 0x80 + 0x30);
-    let at = r32(system, LIT_CONTENT_NAME);
+    let at = r32(system, zakuro_core::region::us(LIT_CONTENT_NAME));
     let name = cstr(system, at);
     let index = patricia(system, root + 0x28, &name)?;
     let table = r32(system, root + 0x24);
@@ -690,11 +690,11 @@ pub fn field_actor_words(w: &mut Vec<u32>, system: &mut System, o: &Objects) {
         return;
     }
     let mat = o.material;
-    let on = r32(system, LIT_SHADOW_ON);
+    let on = r32(system, zakuro_core::region::us(LIT_SHADOW_ON));
     if r8(system, on) != 1 {
         // shadows off: "Detail..." textures with mipmaps get their sampler
         // again with the minimum level at the last one
-        let detail = r32(system, LIT_DETAIL);
+        let detail = r32(system, zakuro_core::region::us(LIT_DETAIL));
         for unit in 0..3u32 {
             let tex = r32(system, mat + 4 + 4 * unit);
             if tex == 0 {
@@ -767,12 +767,12 @@ pub fn receiver_mapping(system: &mut System, o: &Objects) -> Option<(u32, [u8; 4
     }
     let callback = r32(system, o.model + 4);
     let vtable = if callback != 0 { r32(system, callback) } else { 0 };
-        if callback == 0 || r32(system, vtable) != FIELD_ACTOR_ON_BEGIN {
+        if callback == 0 || zakuro_core::region::to_us(r32(system, vtable)) != FIELD_ACTOR_ON_BEGIN {
         return None;
     }
     let unit = receiver_unit(system, o.material)?;
-    let one = f32::from_bits(r32(system, 0x0020_BB40));
-    let zero = f32::from_bits(r32(system, 0x0020_BB34));
+    let one = f32::from_bits(r32(system, zakuro_core::region::us(0x0020_BB40)));
+    let zero = f32::from_bits(r32(system, zakuro_core::region::us(0x0020_BB34)));
     Some((unit, [1, 0, 3, 1], [one, one, zero, zero, zero]))
 }
 
@@ -816,7 +816,7 @@ pub fn test_drop_post(system: &mut System, prim_ctx: u32, disp: u32) {
             let (_, callback) = prim::state_callback(system, prim_ctx, s);
             callback == 0 || {
                 let vtable = r32(system, callback);
-                r32(system, vtable) != POST_EFFECT_ON_BEGIN
+                zakuro_core::region::to_us(r32(system, vtable)) != POST_EFFECT_ON_BEGIN
             }
         })
         .collect();

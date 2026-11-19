@@ -24,10 +24,13 @@ pub mod native_gfx;
 pub mod pcos;
 pub mod randomizer; // randomizer: the New Game randomizer
 pub mod supports; // supports: Corrin S-supports anyone, Kana's gender
+pub mod msgtrace; // fanpatch: HAIKU_MSG_TRACE, the messages looked up in vain
+pub mod tones; // tones: Corrin's speaking style (the Japanese game's talk tones) with a translation
 pub mod replay;
 pub mod room;
 pub mod netplay; // online: online battles between two Haiku
 pub mod recompiled;
+pub mod region; // eur: USA or EUR code, and the USA -> EUR address map
 pub mod services;
 pub mod state;
 
@@ -111,6 +114,11 @@ pub struct Config {
     /// codemods: what the code mods turned on change of the game's code:
     /// the patched code, an exheader, the patch module, the plugins.
     pub code_mods: codemods::CodeMods,
+    /// codemods2: where the game's saves (save data, extra data, SpotPass,
+    /// the SD card) are kept, in place of data_dir/user: a code mod has
+    /// saves of its own (userdata/haiku/user-mods/<ids>), so the game's own
+    /// are never read or written while it runs.
+    pub saves_dir: Option<std::path::PathBuf>,
 }
 
 impl Default for Config {
@@ -141,6 +149,7 @@ impl Default for Config {
             skip_idle_loops: true,
             mods: Vec::new(),
             code_mods: codemods::CodeMods::default(),
+            saves_dir: None,
         }
     }
 }
@@ -324,6 +333,9 @@ impl System {
         let mut services = ServiceState::default();
         if let Some(dir) = &config.data_dir {
             services.fs.user_dir = dir.join("user");
+        }
+        if let Some(dir) = &config.saves_dir {
+            services.fs.user_dir = dir.clone(); // codemods2: a code mod's own saves
         }
         System {
             cpu: Cpu::new(),

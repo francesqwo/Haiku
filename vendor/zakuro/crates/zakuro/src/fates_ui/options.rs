@@ -168,6 +168,10 @@ pub enum Item {
     // info-ui: the enemy targeting lines and the growth-rates button
     TargetingLines,
     GrowthButton,
+    // pulse: Divine Pulse and its charges
+    DivinePulse,
+    PulseCharges,
+    PulseFixed,
     // supports
     CorrinSAny,
     KanaGender,
@@ -177,6 +181,13 @@ pub enum Item {
     Cheat(u16),
     /// qol4: the game's soft reset, after the same Yes/No
     ReturnTitle,
+    /// jpvoice: Voices, English or Japanese (only with the voice layer
+    /// installed), and the restart that applies a change
+    Voices,
+    VoicesRestart,
+    /// tones: Corrin's speaking style (only with a Japanese-script
+    /// translation on)
+    SpeakingStyle,
 }
 
 /// what the app has to do after a change.
@@ -202,7 +213,14 @@ pub enum Effect {
     ReturnTitle,
 }
 
+// pulse: Divine Pulse's mode (0 off, 1 story, 2 fixed, 3 unlimited), which
+// picks the Gameplay tab's rows; set each frame from the settings
+thread_local! {
+    pub(super) static PULSE_ROWS: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
+}
+
 fn items(tab: Tab, page: Page, mode: BottomScreen, mods: usize) -> Vec<Item> {
+    let pulse_mode = PULSE_ROWS.with(|rows| rows.get()); // pulse
     use Item::*;
     match page {
         Page::Keyboard => (0..Keys::default().all_mut().len()).map(Key).chain([RestoreKeys]).collect(),
@@ -226,11 +244,24 @@ fn items(tab: Tab, page: Page, mode: BottomScreen, mods: usize) -> Vec<Item> {
                 BottomScreen::Panel => vec![BottomMode, BottomSide, BottomSize],
                 BottomScreen::Classic => vec![BottomMode],
             },
-            Tab::Audio => vec![Volume, Mute, AudioDevice, MuteUnfocused],
+            Tab::Audio => {
+                let mut list = vec![Volume, Mute, AudioDevice, MuteUnfocused];
+                crate::haiku_voices::audio_rows(&mut list, Voices, VoicesRestart); // jpvoice
+                list
+            }
             Tab::Controls => vec![ButtonLayout, Glyphs, Deadzone, Rumble, TouchSpeed, KeyboardPage, ControllerPage, RestoreControls],
-            Tab::Interface => vec![UiScale, Language],
+            // nolang: the USA game has English text only (m/@E), so its Language
+            // row changed nothing; it is shown on the European game (five
+            // languages) and the Japanese one (Haiku's menu language)
+            Tab::Interface if zakuro_core::region::is_eur() || zakuro_core::region::is_jpn() => vec![UiScale, Language],
+            Tab::Interface => vec![UiScale],
             // qol3: no SpotPass row (its questions are always answered No)
-            Tab::Gameplay => vec![GameSpeed, FastSpeed, SkipStory, BoonBane, FreeCamera, FreeCameraStyle, CastleWalk, TargetingLines, GrowthButton, CorrinSAny, KanaGender, ReturnTitle, ExitDesktop], // qol; cameras: FreeCamera, FreeCameraStyle, CastleWalk; info-ui: TargetingLines, GrowthButton; supports: CorrinSAny, KanaGender; qol4: ReturnTitle
+            Tab::Gameplay => {
+                let mut list = vec![GameSpeed, FastSpeed, SkipStory, BoonBane, FreeCamera, FreeCameraStyle, CastleWalk, TargetingLines, GrowthButton, CorrinSAny, KanaGender, DivinePulse, ReturnTitle, ExitDesktop]; // qol; cameras: FreeCamera, FreeCameraStyle, CastleWalk; info-ui: TargetingLines, GrowthButton; supports: CorrinSAny, KanaGender; qol4: ReturnTitle; pulse: DivinePulse
+                super::pulse::gameplay_rows(&mut list, pulse_mode); // pulse: its charges while it is on
+                super::tones::gameplay_rows(&mut list, SpeakingStyle, KanaGender); // tones: after Kana's Gender
+                list
+            }
             Tab::Mods => super::mods::items(mods), // mods
             Tab::Cheats => super::cheats::groups(), // cheats
         },
@@ -262,6 +293,20 @@ fn on_off(value: bool) -> String {
 
 fn percent(value: f32) -> String {
     format!("{:.0}%", value * 100.0)
+}
+
+/// eur: the languages the EUR Special Edition has text for, in the order
+/// its menus list them.
+const EUR_LANGUAGES: [Language; 5] = [Language::English, Language::French, Language::German, Language::Spanish, Language::Italian];
+
+/// eur: the language the EUR game shows for a system language: its own
+/// five, anything else English (what its Owner::Initialize does).
+fn eur_language(language: Language) -> Language {
+    if EUR_LANGUAGES.contains(&language) {
+        language
+    } else {
+        Language::English
+    }
 }
 
 fn step<T: Clone + PartialEq>(list: &[T], value: T, dir: i32) -> T {
@@ -501,6 +546,20 @@ pub fn row(item: Item, settings: &Settings, env: &Env, armed: Option<Item>, rebi
             (s("Restore Defaults"), value, s(help))
         }
         Item::UiScale => (s("Menu Size"), Some(percent(pc.ui_scale)), s("The size of these menus.")),
+        // eur: the EUR Special Edition shows its text in the language the
+        // system reports: English, French, German, Spanish or Italian
+        // jpprep: the Japanese game is Japanese only; the row says which
+        // language Haiku's own menus are in
+        Item::Language if zakuro_core::region::is_jpn() => (
+            s("Menu Language"),
+            Some(s(if pc.japanese_english_menus { "English" } else { "日本語" })),
+            s("The language of Haiku's own menus. The game's text is Japanese (or a translation mod's)."),
+        ),
+        Item::Language if zakuro_core::region::is_eur() => (
+            s("Game Language"),
+            Some(s(eur_language(settings.language).name())),
+            s("The language of the game's text: English, French, German, Spanish or Italian. It changes the next time the game starts."),
+        ),
         Item::Language => (
             s("Language"),
             Some(s(settings.language.name())),
@@ -560,6 +619,7 @@ pub fn row(item: Item, settings: &Settings, env: &Env, armed: Option<Item>, rebi
             Some(on_off(pc.targeting_lines == crate::settings::TargetingLines::On)),
             s("On the battle map, show a line from each enemy to the unit it will attack next enemy phase, as the enemy's own AI decides. The lines follow a unit while you move it."),
         ),
+        Item::DivinePulse | Item::PulseCharges | Item::PulseFixed => super::pulse::row(item, settings), // pulse
         Item::GrowthButton => (
             s("Growth Rates Button"),
             Some(s(if pc.growth_button { "Show" } else { "Hide" })),
@@ -591,6 +651,14 @@ pub fn row(item: Item, settings: &Settings, env: &Env, armed: Option<Item>, rebi
                 _ => "Kana's gender, whatever Corrin's.",
             }),
         ),
+        // jpvoice
+        Item::Voices => (
+            s("Voices"),
+            Some(s(if pc.voices == crate::settings::Voices::Japanese { "Japanese" } else { "English" })),
+            s(crate::haiku_voices::help(pc.voices)),
+        ),
+        Item::VoicesRestart => (s("Restart with These Voices"), None, s("Restart the game so the voices change. Anything you haven't saved will be lost.")),
+        Item::SpeakingStyle => super::tones::row(), // tones
         Item::ExitDesktop => (s("Exit to Desktop"), None, s("Close the game and return to the desktop. Anything you haven't saved will be lost.")),
         // qol4
         Item::ReturnTitle => (s("Return to Title"), None, s("Restart the game from its opening, as the game's own soft reset does. Anything you haven't saved will be lost.")),
@@ -805,6 +873,14 @@ pub fn adjust(item: Item, dir: i32, settings: &mut Settings, env: &Env) -> Optio
             pc.ui_scale = nudge(pc.ui_scale, d, 0.05, 0.75, 2.0);
             Effect::Apply
         }
+        Item::Language if zakuro_core::region::is_jpn() => {
+            pc.japanese_english_menus = !pc.japanese_english_menus; // jpprep
+            Effect::Apply
+        }
+        Item::Language if zakuro_core::region::is_eur() => {
+            settings.language = step(&EUR_LANGUAGES, eur_language(settings.language), d); // eur
+            Effect::Apply
+        }
         Item::Language => {
             settings.language = step(&Language::ALL, settings.language, d);
             Effect::Apply
@@ -868,6 +944,8 @@ pub fn adjust(item: Item, dir: i32, settings: &mut Settings, env: &Env) -> Optio
             pc.growth_button = !pc.growth_button;
             Effect::Apply
         }
+        // pulse
+        Item::DivinePulse | Item::PulseCharges | Item::PulseFixed => return super::pulse::adjust(item, d, pc),
         // supports
         Item::CorrinSAny => {
             pc.corrin_s_any = !pc.corrin_s_any;
@@ -878,7 +956,15 @@ pub fn adjust(item: Item, dir: i32, settings: &mut Settings, env: &Env) -> Optio
             pc.kana_gender = step(&[K::Ask, K::Vanilla, K::Male, K::Female, K::Random], pc.kana_gender, d);
             Effect::Apply
         }
-        Item::ExitDesktop | Item::ReturnTitle => return None, // qol4: ReturnTitle
+        // jpvoice: either way, the other language
+        Item::Voices => {
+            use crate::settings::Voices as V;
+            pc.voices = if pc.voices == V::Japanese { V::English } else { V::Japanese };
+            crate::haiku_voices::chosen(pc.voices);
+            Effect::Apply
+        }
+        Item::SpeakingStyle => return super::tones::adjust(d), // tones
+        Item::ExitDesktop | Item::ReturnTitle | Item::VoicesRestart => return None, // qol4: ReturnTitle; jpvoice: VoicesRestart
     };
     Some(effect)
 }
@@ -926,6 +1012,9 @@ fn game_speed_key(settings: &Settings) -> String {
 /// whether a row is a toggle or list, changed with left and right, rather
 /// than pressed.
 fn changes(item: Item) -> bool {
+    if matches!(item, Item::DivinePulse | Item::PulseCharges | Item::PulseFixed) {
+        return true; // pulse
+    }
     if let Item::Cheat(id) = item {
         return super::cheats::changes(id); // cheats
     }
@@ -934,6 +1023,7 @@ fn changes(item: Item) -> bool {
         Item::KeyboardPage | Item::ControllerPage | Item::RestoreControls | Item::RestoreKeys | Item::RestorePad | Item::Key(_) | Item::Pad(_)
             | Item::ExitDesktop // qol
             | Item::ReturnTitle // qol4
+            | Item::VoicesRestart // jpvoice
             | Item::ModsNone | Item::ModsFolder | Item::ModsApply // mods
     )
 }
@@ -1056,7 +1146,9 @@ impl OptionsMenu {
 
     /// mods: the rows the page shows at once.
     fn visible(&self) -> usize {
-        if self.tab() == Tab::Mods && self.page == Page::Main {
+        if self.page == Page::Cheats(super::states::GROUP) {
+            super::states::VISIBLE // pulse: the slot's card under the rows
+        } else if self.tab() == Tab::Mods && self.page == Page::Main {
             super::mods::VISIBLE
         } else {
             VISIBLE
@@ -1152,6 +1244,13 @@ impl OptionsMenu {
 
     /// what a press of a row does inside the menu, before the settings.
     fn press(&mut self, item: Item, dir: i32, settings: &mut Settings, env: &Env, effects: &mut Vec<Effect>) {
+        // pulse: a save state's slot opens its dialog
+        if let (Item::Cheat(id), 0) = (item, dir) {
+            if super::states::is_ours(id) && !super::states::changes(id) {
+                super::states::press(id, settings);
+                return;
+            }
+        }
         // cheats: A on a Cheats row opens a page or a list, or acts
         if let (Item::Cheat(id), 0) = (item, dir) {
             match super::cheats::press(id, self.page, self.selected) {
@@ -1185,6 +1284,12 @@ impl OptionsMenu {
             // qol: the game's Yes/No first, No chosen to start with
             Item::ExitDesktop if dir == 0 => {
                 self.confirm = Some(super::mods::Confirm { yes: false, download: None, exit: true, title: false });
+                return;
+            }
+            // jpvoice: the restart that applies Voices, after the Yes/No
+            Item::VoicesRestart if dir == 0 => {
+                crate::haiku_voices::set_asking(true);
+                self.confirm = Some(super::mods::Confirm { yes: true, download: None, exit: false, title: false });
                 return;
             }
             // qol4: the same for Return to Title
@@ -1248,6 +1353,7 @@ impl OptionsMenu {
         let mut effects = Vec::new();
         let now = input.time;
         self.bottom_mode = settings.pc.bottom_screen; // bottom2
+        PULSE_ROWS.with(|rows| rows.set(super::pulse::mode(&settings.pc))); // pulse
         self.mod_count = env.mods.rows.len(); // mods
         // hdpacks: a download being unpacked shows over the Mods page; B
         // closes the menu, the unpacking goes on
@@ -1295,6 +1401,9 @@ impl OptionsMenu {
                 }
                 None => {}
             }
+            if self.confirm.is_none() {
+                crate::haiku_voices::set_asking(false); // jpvoice
+            }
             // qol3: the title's question alone: answered, the menu closes
             if self.exit_only && self.confirm.is_none() {
                 self.hide();
@@ -1302,6 +1411,8 @@ impl OptionsMenu {
             }
         } else if super::cheats::confirming() {
             super::cheats::confirm_nav(canvas, input, nav); // cheats: a cheat's Yes/No
+        } else if super::states::confirming() {
+            super::states::confirm_nav(canvas, input, nav); // pulse: a save state's dialog
         } else if self.rebinding.is_none() {
             self.navigate(canvas, input, nav, settings, env, &mut effects);
         }
@@ -1310,6 +1421,7 @@ impl OptionsMenu {
             if !self.exit_only {
                 self.draw(canvas, now, prompts, settings, env);
                 super::cheats::draw_confirm(canvas, now); // cheats
+                super::states::draw_confirm(canvas, now); // pulse
             }
             if let Some(job) = &env.mods.job {
                 super::codemods::draw_job(canvas, job, now); // codemods
@@ -1586,6 +1698,7 @@ impl OptionsMenu {
             let label = super::mods::fit_label(canvas, item, label, pill_x - if chosen { 36.0 } else { 8.0 } - (PANEL_X + 32.0)); // mods
             let label_width = canvas.text(PANEL_X + 32.0, y + 2.0, &label, 0.95, label_colour);
             super::mods::draw_row_extras(canvas, item, env, PANEL_X + 32.0, y, label_width, chosen, now); // mods
+            super::states::draw_row_extras(canvas, item, PANEL_X + 32.0, y, label_width, chosen); // statecheck: a slot made with another layer
             match value {
                 Some(value) => {
                     let pill = if chosen { Art::PillRed } else { Art::PillCream };
@@ -1629,6 +1742,10 @@ impl OptionsMenu {
         }
         if self.top + visible < items.len() {
             canvas.image(Art::ScrollDown, arrow_x, arrows_bottom - 15.0 + float, 22.0, 13.0, white);
+        }
+        // pulse: the chosen save state's card
+        if self.page == Page::Cheats(super::states::GROUP) {
+            super::states::draw_card(canvas, selected);
         }
         // mods: the selected mod's details, and the keyboard's move keys
         if self.tab() == Tab::Mods && self.page == Page::Main {

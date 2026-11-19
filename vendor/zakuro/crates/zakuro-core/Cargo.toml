@@ -19,6 +19,10 @@ serde.workspace = true
 # saved states, the state as postcard writes it and memory, both in LZ4
 postcard = { version = "1.1.3", default-features = false, features = ["use-std"] }
 lz4_flex = "0.14.0"
+# pulsefix: the restore check compares the parts of a state in a form
+# whose maps are in order (a HashMap's own order differs between two equal
+# ones)
+serde_json = "1"
 # the hash a local wireless beacon carries of its network
 sha1 = "0.11.0"
 thiserror.workspace = true

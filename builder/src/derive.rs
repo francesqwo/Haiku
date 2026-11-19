@@ -796,6 +796,43 @@ pub enum Made {
 
 /// makes every file of the pack under root (each target's own path),
 /// telling progress how far it is.
+/// eur: apply for a game whose files differ from the ones the pack was
+/// made against (the EUR Special Edition): an entry that can't be made is
+/// left out (and what was made from it); the made count and the left out
+/// back.
+pub fn apply_skipping(pack: &[Entry], romfs: &Path, root: &Path, progress: &dyn Fn(usize, usize)) -> Result<(usize, Vec<String>), String> {
+    let mut game = Game::new(romfs.to_path_buf());
+    let mut derived: HashMap<String, Picture> = HashMap::new();
+    let mut skipped = Vec::new();
+    let needed: std::collections::HashSet<&str> =
+        pack.iter().flat_map(|e| e.sources.iter()).filter(|s| s.how == How::Derived).map(|s| s.path.as_str()).collect();
+    for (i, e) in pack.iter().enumerate() {
+        progress(i + 1, pack.len());
+        if e.sources.iter().any(|s| s.how == How::Derived && !derived.contains_key(&s.path)) && e.sources.iter().any(|s| s.how == How::Derived) {
+            skipped.push(e.target.clone());
+            continue;
+        }
+        let Ok(made) = make(&mut game, &derived, e) else {
+            skipped.push(e.target.clone());
+            continue;
+        };
+        let path = root.join(&e.target);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|err| format!("{}: {err}", parent.display()))?;
+        }
+        match made {
+            Made::Bytes(bytes) => std::fs::write(&path, bytes).map_err(|err| format!("{}: {err}", path.display()))?,
+            Made::Picture(picture) => {
+                write_png(&path, &picture)?;
+                if needed.contains(e.target.as_str()) {
+                    derived.insert(e.target.clone(), picture);
+                }
+            }
+        }
+    }
+    Ok((pack.len() - skipped.len(), skipped))
+}
+
 pub fn apply(pack: &[Entry], romfs: &Path, root: &Path, progress: &dyn Fn(usize, usize)) -> Result<usize, String> {
     let mut game = Game::new(romfs.to_path_buf());
     let mut derived: HashMap<String, Picture> = HashMap::new();

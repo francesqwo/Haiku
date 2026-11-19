@@ -106,6 +106,10 @@ enum {
     OP_ITEM = 11,     /* cheats2, tests: unit, item id: unit::Item::New and Unit::ItemAdd, as a gift gives one */
     OP_BUILDING = 10, /* cheats2: building (unique index): My Castle's own level-up sequence for it
                          (castle::CreateBuildingSequence::CreateForLevelUp), as the Build menu's Yes does */
+    OP_LIVE2D = 12,   /* jpn, tests only: unit, support point, the Japanese build's
+                         Live2DHandler::Create (the host passes its address: the class
+                         isn't in the USA build): My Room's petting view for that unit,
+                         as ProcMyRoom::NormalSkinShip opens it, from the free roam */
 };
 
 /* addresses */
@@ -632,6 +636,20 @@ static int ch_step(Context *ctx, uint32_t r) {
                 }
                 job.step = 1;
                 ch_issue(ctx, 0x0018B8A4u, free_move, 0, a0 ? a0 : 1, 0);
+                return 1;
+            }
+            job.result = 1;
+            return 0;
+        case OP_LIVE2D:
+            if (s == 0) {
+                uint32_t free_move = mem_read32(ctx, A_FREE_MOVE);
+                if (!free_move || mem_read32(ctx, A_SITUATION) || !ch_valid_unit(ctx, a0) || !a2) {
+                    job.result = 2;
+                    return 0;
+                }
+                job.step = 1;
+                /* Live2DHandler::Create(ProcInst* parent, const Person*, SUPPORT_POINT, STATE_MODE) */
+                ch_issue(ctx, a2, free_move, mem_read32(ctx, a0 + 0x9Cu), a1, 0);
                 return 1;
             }
             job.result = 1;
@@ -1230,4 +1248,16 @@ RECOMP_OVERRIDE(0x003A134C) {
     mem_write16(ctx, jail, 2);
     cheats_words[CW_STATS2]++;
     CALL_THEN(RECOMP_ORIGINAL(0x003A134C), ch_capacity_back, jail, 0);
+}
+
+/* pulsefix: what of this file is the console's state, kept with Divine
+   Pulse's moments and saved states (overrides/keep.c) */
+void cheats_keep(void (*add)(const char *, void *, uint32_t)) {
+    add("cheats.job", &job, sizeof job);
+    add("cheats.ch_levelling", &ch_levelling, sizeof ch_levelling);
+    add("cheats.veins_used", &veins_used, sizeof veins_used);
+    add("cheats.veins_count", &veins_count, sizeof veins_count);
+    add("cheats.veins_phase", &veins_phase, sizeof veins_phase);
+    add("cheats.recruits", &recruits, sizeof recruits);
+    add("cheats.recruits_count", &recruits_count, sizeof recruits_count);
 }

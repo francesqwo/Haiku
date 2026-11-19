@@ -32,7 +32,35 @@ pub struct Aac {
     pub failures: u64,
 }
 
+/// statesnd: what a saved state keeps of the decoder: whether the game
+/// opened it and what it last answered. The decoder itself is made again
+/// at the next frame, as for a new stream.
+#[derive(Clone, Copy, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct Saved {
+    initialized: bool,
+    form: u32,
+    used: u32,
+    channels: u32,
+    rate_index: i32,
+}
+
 impl Aac {
+    /// statesnd: for a saved state.
+    pub fn saved(&self) -> Saved {
+        Saved { initialized: self.initialized, form: self.form, used: self.used, channels: self.channels, rate_index: self.rate_index }
+    }
+
+    /// statesnd: the decoder as a saved state had it (a new one is made at
+    /// its next frame); the counters stay this run's.
+    pub fn put_back(&mut self, saved: Saved) {
+        self.decoder = None;
+        self.initialized = saved.initialized;
+        self.form = saved.form;
+        self.used = saved.used;
+        self.channels = saved.channels;
+        self.rate_index = saved.rate_index;
+    }
+
     pub fn initialize(&mut self, form: u32) {
         self.decoder = None;
         self.initialized = true;

@@ -19,7 +19,10 @@ mod gui;
 pub mod haiku_mods; // mods: Haiku's mod manager
 pub mod haiku_codemods; // codemods: code patches recompiled, native plugins
 pub mod haiku_builtin; // sunglasses: Haiku's own RomFS layer (assets/builtin)
+pub mod haiku_voices; // jpvoice: the Japanese voice layer (data/voices-ja)
 pub mod haiku_import; // hdpacks: downloads (split, zips of zips) unpacked into mod folders
+pub mod haiku_fanpatch; // fanpatch: mods for other releases (Team If), Haiku's text under mods'
+pub mod jpn_english; // jpn2: Haiku's lines and menus in English under a translation on the Japanese game
 // hfr: high frame rates, display modes and pacing
 pub mod display;
 pub mod hfr;
@@ -48,6 +51,10 @@ pub mod qol4; // qol4: Options in the Main Menu, the soft reset, the map menu's 
 mod boot3; // boot3: the launch window and the taskbar, hangs at start and at Return to Title
 pub mod info_ui; // info-ui: enemy targeting lines, growth rates
 pub mod cheats; // cheats: the Options menu's Cheats tab
+pub mod pulse; // pulse: Divine Pulse, the rewind (Gameplay)
+mod pulse_fx; // pulse2: its effects on the picture
+pub mod states; // pulse: save states (Cheats > Save States)
+pub mod statecheck; // statecheck: a state remembers the file layer it was made with
 mod trailer_dump; // trailer: dev-only frame dump switches for the trailer pipeline
 mod wide;
 mod zig;
@@ -128,6 +135,7 @@ pub fn run_with(linked: Option<Linked>, overlay: Option<Box<dyn GameOverlay>>) {
         }
     };
     let mut settings = Settings::load();
+    fates_ui::ja::set_english(settings.pc.japanese_english_menus); // jpprep
     // input: settings from before the PC control scheme move to it
     if controls::migrate(&mut settings.keys, &mut settings.pad) {
         settings.save();
@@ -215,6 +223,9 @@ pub fn run_with(linked: Option<Linked>, overlay: Option<Box<dyn GameOverlay>>) {
 
     // native-rt: deterministic or real-time scheduling for the session
     zakuro_core::pcos::rt::choose(app.options.headless.is_some());
+    if app.options.headless.is_some() {
+        zakuro_core::pcos::threads::background(); // quiet: tests never slow a game being played
+    }
     if let Some(mut frames) = app.options.headless {
         hfr::apply_game_timing(&app.settings.pc); // hfr
         qol::apply(&app.settings.pc); // qol
@@ -222,6 +233,7 @@ pub fn run_with(linked: Option<Linked>, overlay: Option<Box<dyn GameOverlay>>) {
         zakuro_core::supports::set_settings(app.settings.pc.corrin_s_any, app.settings.pc.kana_gender.core()); // supports
         info_ui::apply(&app.settings.pc); // info-ui
         cheats::apply(&app.settings.pc); // cheats
+        pulse::apply(&app.settings.pc); // pulse
         online_ui::configure(&app.settings.pc.online); // online2: the host's rule
         app.start();
         // mods: FATES_MODS_RESTART_AT=n runs n frames, then restarts the game
@@ -264,6 +276,7 @@ pub fn run_with(linked: Option<Linked>, overlay: Option<Box<dyn GameOverlay>>) {
                 // qol: Skip Story's cover, as a window would have it
                 qol::headless_frame(&mut game.system.memory, game.frame, &speed_settings);
                 cheats::headless_frame(&mut game.system, game.frame); // cheats
+                zakuro_core::tones::frame(&mut game.system.memory); // tones: a speaking style chosen in the options
                 if qol::read(qol::Word::QuitRequest).unwrap_or(0) != 0 {
                     qol::write(qol::Word::QuitRequest, 0);
                     println!("qol: frame {} Exit to Desktop was confirmed (a window closes here)", game.frame);
@@ -546,6 +559,16 @@ fn run_headless(game: &mut Running, frames: u64, mut each_frame: impl FnMut(&mut
         if let Some(tools) = &mut playtest {
             tools.before(&mut game.system.memory, ran + 1); // playtest
         }
+        // pulse: FATES_PULSE_AT and FATES_STATES_AT; while the rewind
+        // screen holds the game, no frame of it runs
+        pulse::headless_frame(&mut game.system, ran + 1);
+        if states::headless_frame(&mut game.system, ran + 1) {
+            game.frame = game.system.frames;
+        }
+        if pulse::holds() {
+            ran += 1;
+            continue;
+        }
         each_frame(game);
         game.frame += 1;
         zakuro_core::native_gfx::HEADLESS_FRAME.store(ran + 1, std::sync::atomic::Ordering::Relaxed); // wide2: trace key
@@ -580,9 +603,16 @@ fn run_headless(game: &mut Running, frames: u64, mut each_frame: impl FnMut(&mut
             }
         }
         let frame_start = Instant::now();
+        pulse::before_frame(&mut game.system); // pulse: a moment shown, a rewind made
         outcome = game.system.run_frame();
         times.push(frame_start.elapsed());
         ran += 1;
+        // pulse: the moments worth keeping; after a moment was loaded the
+        // replay goes on from its frame, so the same inputs play again
+        pulse::after_frame(&mut game.system, ran);
+        if pulse::take_loaded() && pulse::replays_again(true) {
+            game.frame = game.system.frames;
+        }
         if let Some(clock) = &mut game.clock {
             clock.frame(&mut game.system.memory); // hfr
         }
@@ -656,6 +686,9 @@ fn run_headless(game: &mut Running, frames: u64, mut each_frame: impl FnMut(&mut
     }
     if let Some(line) = info_ui::summary() {
         println!("{line}"); // info-ui
+    }
+    if let Some(line) = pulse::summary() {
+        println!("{line}"); // pulse
     }
     println!(
         "{:.1} MIPS, {}",
@@ -1095,7 +1128,8 @@ impl App {
         Config {
             new3ds: self.options.new3ds,
             data_dir: self.data_dir.clone(),
-            language: settings.language.code(),
+            // jpprep: the Japanese game is Japanese only, as a Japanese console reports
+            language: if zakuro_core::region::is_jpn() { 0 } else { settings.language.code() },
             recompiled: self.options.recompiled.clone().filter(|_| !interpret).map(Into::into),
             linked: self.linked.filter(|_| !interpret),
             find_recompiled: !interpret,
@@ -1120,6 +1154,7 @@ impl App {
 
     /// starts what the command line asks for, the test pattern or a game.
     fn start(&mut self) {
+        states::set_dir(self.data_dir.as_deref()); // pulse: userdata/haiku/states
         if self.options.test_pattern {
             // the test pattern has no CPU program to run, paused keeps just
             // presenting what is there
@@ -1170,6 +1205,18 @@ impl App {
         let code_mods = self.fates_code_mods(path); // codemods: before config(), which leaves out what it leaves out
         let mut config = self.config(&self.active);
         config.code_mods = code_mods; // codemods
+        haiku_voices::lay(&mut config.mods, &self.active.pc, path); // jpvoice: the voice layer, under the mods
+        haiku_voices::started(path); // jpvoice
+        haiku_fanpatch::lay_text(&mut config.mods, path); // fanpatch: Haiku's own text kept under the mods'
+        // codemods2: a code mod's saves are its own, the game's are left alone
+        if let Some(data) = self.data_dir.clone() {
+            config.saves_dir = haiku_codemods::saves_dir(&data);
+            match &config.saves_dir {
+                Some(dir) => log::info!("saves: {} (code mods run: the game's own saves in {} are left alone)", dir.display(), data.join("user").display()),
+                None => log::info!("saves: {}", data.join("user").display()),
+            }
+            states::set_dir(Some(&haiku_codemods::states_base(&data))); // pulse: the save states go with the saves
+        }
         config.wireless_reboot = self.wireless_reboot.take();
         // the update, DLC and Download Play child found with the game in
         // the library
@@ -1200,7 +1247,9 @@ impl App {
             }
             None => None,
         };
+        let layers = config.mods.clone(); // statecheck: the layer, as the loader gets it
         let system = loader::load(path, config).map_err(|error| format!("could not open {}, {error}", path.display()))?;
+        statecheck::started(&system, &layers, &self.fates.mods, path, self.active.language); // statecheck: what states made now carry
         self.fates_code_mods_loaded(); // codemods: what the loader said about them
         // online2: the gameplay mods this game runs with, for online battles
         zakuro_core::netplay::set_compat(zakuro_core::netplay::Compat { gameplay_mods: self.fates.mods.online_stamps(), cheated_units: false });
@@ -1271,6 +1320,7 @@ impl App {
         zakuro_core::supports::set_settings(self.settings.pc.corrin_s_any, self.settings.pc.kana_gender.core()); // supports
         info_ui::apply(&self.settings.pc); // info-ui
         cheats::apply(&self.settings.pc); // cheats
+        pulse::apply(&self.settings.pc); // pulse
         Ok(())
     }
 
@@ -1573,6 +1623,7 @@ impl App {
     /// saves the settings and puts to use what can change right away.
     fn apply_settings(&mut self) {
         self.settings.save();
+        fates_ui::ja::set_english(self.settings.pc.japanese_english_menus); // jpprep
         self.active = self.settings.for_game(self.program_id());
         if let Some(game) = &mut self.game {
             // gfx-models: hfr_apply below decides while the frame rate loop
@@ -1606,6 +1657,7 @@ impl App {
         zakuro_core::supports::set_settings(self.settings.pc.corrin_s_any, self.settings.pc.kana_gender.core()); // supports
         info_ui::apply(&self.settings.pc); // info-ui
         cheats::apply(&self.settings.pc); // cheats
+        pulse::apply(&self.settings.pc); // pulse
         self.display_apply();
         self.display_apply_resolution();
     }
@@ -1958,6 +2010,7 @@ impl App {
         self.poll_jobs();
         self.poll_gamepads();
         self.qol_poll(); // qol: the Game Speed key, the speed, the boon/bane panel
+        self.states_poll(); // pulse: save states
         self.info_poll(); // info-ui: the growth key
         // bottom: the panel's button, the touch cursor, the slide; a mouse
         // held still over a sliding panel follows it
@@ -1980,7 +2033,8 @@ impl App {
         let typing = self.game.as_ref().is_some_and(|game| game.system.keyboard_request().is_some());
         let playing = self.game.is_some() && !self.paused && !self.menus.over_game() && !typing
             // ui: the options menu and the game's message boxes stop it
-            && !(fates_ui::enabled() && self.fates.pauses(self.menus.message.is_some()));
+            && !(fates_ui::enabled() && self.fates.pauses(self.menus.message.is_some()))
+            && !pulse::holds(); // pulse: the rewind screen stops it
         // Tab or a controller's right trigger, or the right stick's click
         // while ZR has the trigger, whichever no button of the console's is on
         // input: or the fast-forward binding ([keys]/[pad] fast_forward)
@@ -2137,18 +2191,41 @@ impl App {
         let mut input = fates_ui::filter_input(&mut self.fates, input);
         info_ui::frame_input(&mut game.system.memory, game.frame, &mut input, false); // info-ui: the growth button's touches
         cheats::frame(&mut game.system); // cheats: the menu's view and its actions, between two frames
+        zakuro_core::tones::frame(&mut game.system.memory); // tones: a speaking style chosen in the options
         game.frame += 1;
         zakuro_core::native_gfx::HEADLESS_FRAME.store(game.frame, std::sync::atomic::Ordering::Relaxed); // gfxmodels3: the frame for dev traces in a window too
         if let Some(recorder) = &mut game.recorder {
             recorder.record(input);
         }
         game.system.set_input(input);
+        let run = pulse::before_frame(&mut game.system); // pulse: a moment shown, a rewind made
+        let quiet = run != pulse::Run::Normal;
+        let muted = run == pulse::Run::Quiet; // pulse2: a rewind's own frame is heard
         let outcome = game.system.run_frame();
+        // pulse: the moments worth keeping, what opens the rewind
+        pulse::after_frame(&mut game.system, game.frame);
+        let pulse_loaded = pulse::take_loaded();
+        // pulse2: the sound winds down as the rewind opens, and starts over
+        // (the moment's music going on, fading in) as it closes, before
+        // this frame's sound goes in
+        if let (Some(cue), Some(audio)) = (pulse_fx::take_cue(), &self.audio) {
+            match cue {
+                pulse_fx::Cue::Stop => audio.time_stop(),
+                pulse_fx::Cue::Resume => audio.time_resume(),
+            }
+        }
+        if pulse_loaded && pulse::replays_again(false) {
+            game.frame = game.system.frames;
+        } else if quiet {
+            // the frames the rewind screen runs are not the player's: a
+            // replay's next input waits for the game to go on
+            game.frame -= 1;
+        }
         if let Some(clock) = &mut game.clock {
             clock.frame(&mut game.system.memory); // hfr
         }
         // bottom2: what Fates shows on its lower screen, for Auto
-        if self.active.pc.bottom_screen == settings::BottomScreen::Auto && game.system.title.as_ref().is_some_and(|title| title.program_id() == bottom_scene::FATES_USA) {
+        if self.active.pc.bottom_screen == settings::BottomScreen::Auto && game.system.title.as_ref().is_some_and(|title| zakuro_core::region::Region::of(title.program_id()).is_some()) { // eur: and the EUR build; jpprep: and the Japanese
             self.bottom.read_game(&mut game.system.memory, game.frame);
         }
         // the overlay reads the game the program was built on, not another
@@ -2166,7 +2243,7 @@ impl App {
         // fast forward plays no sound, there is too much of it too soon
         // qol: nor a game speed above what is time-stretched
         let heard = self.qol.heard();
-        if let (Some(audio), false) = (&self.audio, self.fast_forwarding || !heard) {
+        if let (Some(audio), false) = (&self.audio, self.fast_forwarding || !heard || muted) { // pulse: quiet
             audio.push(&sound);
         } else if let (Some(audio), false) = (&self.audio, heard) {
             audio.hold();
@@ -2188,6 +2265,14 @@ impl App {
                 self.menus.message = Some(message);
                 self.back_to_library();
             }
+        }
+        // pulse: a moment was loaded: the pictures' pacing and the sound
+        // start over, as after a loaded state
+        if pulse_loaded {
+            self.hfr_apply();
+            self.hfr.reset();
+            // pulse2: the sound already started over (time_resume) when the
+            // rewind closed; a moment shown keeps it stopped
         }
     }
 
@@ -2307,7 +2392,7 @@ impl App {
     /// the file of a slot of the running game's saved states.
     fn state_path(&self, slot: u8) -> Option<PathBuf> {
         let program_id = self.game.as_ref()?.system.title.as_ref()?.program_id();
-        Some(self.data_dir.as_ref()?.join("states").join(format!("{program_id:016X}")).join(format!("{slot}.state")))
+        Some(haiku_codemods::states_base(self.data_dir.as_ref()?).join("states").join(format!("{program_id:016X}")).join(format!("{slot}.state"))) // codemods2: beside the saves
     }
 
     /// saves the running game's state to the slot chosen.
@@ -2345,7 +2430,7 @@ impl App {
                 std::io::ErrorKind::NotFound => format!("Slot {slot} has no state saved."),
                 _ => format!("The state could not be read, {error}"),
             })
-            .and_then(|bytes| game.system.load_state(&bytes).map_err(|error| format!("The state could not be loaded, {error}.")));
+            .and_then(|bytes| statecheck::load_raw(&mut game.system, &bytes, &path.display().to_string()).map(|_| ()).map_err(|error| format!("The state could not be loaded, {error}"))); // statecheck: the layer checked first
         match loaded {
             Ok(()) => {
                 log::info!("loaded the state from {}", path.display());
@@ -2355,7 +2440,7 @@ impl App {
                 // frame gives the one about the state
                 self.overlay_corner = None;
                 if let Some(audio) = &self.audio {
-                    audio.clear();
+                    audio.state_loaded(); // statesnd: the state's sound fades in
                 }
             }
             Err(error) => self.menus.message = Some(error),
@@ -2470,6 +2555,15 @@ impl App {
         });
         if let Some(backend) = &mut self.backend {
             backend.set_crossfade(crossfade);
+            pulse_fx::presented();
+            backend.set_pulse_effect(pulse_fx::effect()); // pulse2
+            pulse_fx::set_drawn(backend.pulse_effects());
+        }
+        // pulse2: FATES_OUTPUT_WAV: a presented frame's worth of the output
+        if let Some(audio) = self.audio.as_ref().filter(|audio| audio.recording()) {
+            static FPS: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+            let fps = *FPS.get_or_init(|| std::env::var("FATES_OUTPUT_WAV_FPS").ok().and_then(|v| v.parse().ok()).unwrap_or(60.0));
+            audio.record_frame(1.0 / fps);
         }
         let t2 = Instant::now();
         // wide: the shape the settings and the window ask for, taken by the

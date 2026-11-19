@@ -1915,3 +1915,17 @@ RECOMP_OVERRIDE(0x00172FAC) {
     chain(ctx, 0x00172FACu, 0x004DBB50u, cam, 0, 0);
     CALL(recomp_call);
 }
+
+/* pulsefix: what of this file is the console's state, kept with Divine
+   Pulse's moments and saved states (overrides/keep.c) */
+void cameras_keep(void (*add)(const char *, void *, uint32_t)) {
+    add("cameras.fc", &fc, sizeof fc);
+    add("cameras.fc_saved", &fc_saved, sizeof fc_saved);
+    add("cameras.cf", &cf, sizeof cf);
+    add("cameras.wk", &wk, sizeof wk);
+    add("cameras.walk_steps", &walk_steps, sizeof walk_steps);
+    add("cameras.look_saved", &look_saved, sizeof look_saved);
+    add("cameras.anims_step", &anims_step, sizeof anims_step);
+    add("cameras.shadow_kept", &shadow_kept, sizeof shadow_kept);
+    add("cameras.calc_step", &calc_step, sizeof calc_step);
+}

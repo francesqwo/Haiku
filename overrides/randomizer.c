@@ -1004,3 +1004,16 @@ RECOMP_OVERRIDE(0x001F8A84) {
     }
     CALL_THEN(RECOMP_ORIGINAL(0x001F8A84), rando_hair_model, ctx->r[0], ctx->r[1], ctx->r[2]);
 }
+
+/* pulsefix: what of this file is the console's state, kept with Divine
+   Pulse's moments and saved states (overrides/keep.c) */
+void randomizer_keep(void (*add)(const char *, void *, uint32_t)) {
+    add("randomizer.rando_phase", &rando_phase, sizeof rando_phase);
+    add("randomizer.rando_rpanel", &rando_rpanel, sizeof rando_rpanel);
+    add("randomizer.rando_mode", &rando_mode, sizeof rando_mode);
+    add("randomizer.rando_difficulty", &rando_difficulty, sizeof rando_difficulty);
+    add("randomizer.rando_cursor", &rando_cursor, sizeof rando_cursor);
+    add("randomizer.rando_menu_up", &rando_menu_up, sizeof rando_menu_up);
+    add("randomizer.rando_text_phase", &rando_text_phase, sizeof rando_text_phase);
+    add("randomizer.rando_talk_alias", &rando_talk_alias, sizeof rando_talk_alias);
+}

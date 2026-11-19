@@ -14,6 +14,7 @@ mod app;
 pub(crate) use app::filter_input;
 pub mod codemods; // codemods: compiling code mods, its dialogs
 pub mod keyboard;
+pub mod ja; // jpprep: Haiku's menus in Japanese on the Japanese game
 pub mod kit;
 pub mod mods; // mods: the Mods page
 pub mod options;
@@ -21,6 +22,9 @@ pub mod qol; // qol: the boon/bane panel
 pub mod growth; // info-ui: the growth rates on the lower screen
 pub mod cheats; // cheats: the Cheats tab
 pub mod online; // online: the host's code and the connecting line
+pub mod pulse; // pulse: Divine Pulse's rewind screen
+pub mod states; // pulse: the Cheats tab's Save States
+pub mod tones; // tones: Options > Gameplay > Speaking Style
 pub mod script;
 pub mod snapshot;
 
@@ -266,6 +270,8 @@ pub struct FatesUi {
     pub options_key: bool,
     /// codemods: compiling code mods, and the game's code.
     pub code: codemods::CodeModsState,
+    /// pulse: the rewind screen was up last frame
+    pulse_open: bool,
 }
 
 impl Default for FatesUi {
@@ -297,6 +303,7 @@ impl Default for FatesUi {
             open_options: false, // qol4
             options_key: false,
             code: codemods::CodeModsState::default(),
+            pulse_open: false, // pulse
         }
     }
 }
@@ -566,6 +573,20 @@ impl FatesUi {
                 out.message_closed = true;
                 self.swallow = true;
             }
+            self.wants_pointer = true;
+            return out;
+        }
+
+        // pulse: Divine Pulse's rewind takes the input while it is up; the
+        // button that closed it does not reach the game
+        let pulse_open = crate::pulse::screen_open();
+        if self.pulse_open && !pulse_open {
+            self.swallow = true;
+        }
+        self.pulse_open = pulse_open;
+        if pulse_open && !self.options.open {
+            let canvas = Canvas { painter: painter.clone(), ..base.clone() };
+            pulse::frame(&canvas, &input, &nav, &prompts, screen, view.top_screen);
             self.wants_pointer = true;
             return out;
         }

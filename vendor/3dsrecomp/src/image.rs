@@ -99,6 +99,50 @@ impl Image {
         let seeds = entry.chain(exports).chain(imported).chain(pointers).collect();
         Program { text: self.text, seeds, slots: None }
     }
+
+    /// eur2: the functions the ARM C++ runtime's `__cpp_initialize__aeabi_`
+    /// calls at start-up: the static initializers (`__sti___..._cpp`). It
+    /// walks a table of 32-bit offsets, each relative to its own entry, so
+    /// no word anywhere holds their addresses and a discovery that only
+    /// follows pointers can miss them (the EUR build of Fire Emblem Fates
+    /// stopped at frame 0 on one; dev/region/eur/hints-extra.txt holds them as
+    /// hints). Not a seed of the discovery yet: seeding them, even after
+    /// everything else, gives both builds' discovery more functions (on EUR
+    /// 69 fewer hints start one), so every generated file changes and both
+    /// builds need recompiling and testing again (dev/reports/eur2.md).
+    /// The walker is found by its Thumb start,
+    /// `push {r4-r6, lr}; ldr r4, =table - .; add r4, pc; ldr r5, =end - .;
+    /// add r5, pc`; a table must lie in the data and every target in the
+    /// code, else nothing is taken from it.
+    pub fn init_table(&self) -> Vec<u32> {
+        let text = &self.text;
+        let read = |address: u32| text.read32(address).or_else(|| self.rodata.read32(address)).or_else(|| self.data.read32(address));
+        let in_data = |address: u32| self.rodata.contains(address) || self.data.contains(address);
+        let mut found = Vec::new();
+        let bytes = &text.bytes;
+        let mut at = 0;
+        while at + 10 <= bytes.len() {
+            let b = &bytes[at..at + 10];
+            if b[0] == 0x70 && b[1] == 0xB5 && b[3] == 0x4C && b[4] == 0x7C && b[5] == 0x44 && b[7] == 0x4D && b[8] == 0x7D && b[9] == 0x44 {
+                let walker = text.base + at as u32;
+                // ldr rN, [pc, #imm8*4]: pc is the instruction's address + 4, word aligned
+                let literal = |ldr: u32, imm: u8| ((ldr + 4) & !3) + imm as u32 * 4;
+                let start = read(literal(walker + 2, b[2])).map(|offset| offset.wrapping_add(walker + 4 + 4));
+                let end = read(literal(walker + 6, b[6])).map(|offset| offset.wrapping_add(walker + 8 + 4));
+                if let (Some(start), Some(end)) = (start, end) {
+                    if start < end && (end - start) % 4 == 0 && in_data(start) && in_data(end - 4) && end - start < 0x10000 {
+                        let targets: Vec<u32> =
+                            (start..end).step_by(4).filter_map(|entry| read(entry).map(|offset| entry.wrapping_add(offset))).collect();
+                        if targets.iter().all(|&target| text.contains(target & !1)) {
+                            found.extend(targets);
+                        }
+                    }
+                }
+            }
+            at += 2;
+        }
+        found
+    }
 }
 
 #[cfg(test)]

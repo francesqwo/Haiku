@@ -166,7 +166,10 @@ pub fn apply(pc: &PcSettings) {
     write(Word::TitleExit, env_flag("FATES_QOL_TITLE_EXIT").unwrap_or(true) as u32);
     // qol3: the title screen's logo is the plain Fates one, whatever route
     // was played last (FATES_QOL_TITLE_PLAIN=0 leaves the game's choice)
-    write(Word::TitlePlain, env_flag("FATES_QOL_TITLE_PLAIN").unwrap_or(true) as u32);
+    // codemods2: off when a code mod changes Title::Create, whose title the
+    // mod's own (FE1's Shadow Dragon logo): the mod's code wins
+    let title_modded = zakuro_core::codemods::replaces(0x00420B74);
+    write(Word::TitlePlain, (env_flag("FATES_QOL_TITLE_PLAIN").unwrap_or(true) && !title_modded) as u32);
     // the castle menu's Return to Title and Exit to Desktop (FATES_QOL_CASTLE=0 leaves them out)
     write(Word::CastleItems, env_flag("FATES_QOL_CASTLE").unwrap_or(true) as u32);
     // FATES_QOL_SUPPORTS=1 also skips support conversations a player opens
@@ -385,8 +388,8 @@ fn read_u32(memory: &mut zakuro_core::memory::Memory, address: u32) -> u32 {
 
 /// a Personality record's boon or bane modifiers.
 pub fn modifiers(memory: &mut zakuro_core::memory::Memory, index: u8, bane: bool) -> Option<Modifiers> {
-    let table = read_u32(memory, PERSONALITY);
-    let count = read_u32(memory, PERSONALITY + 4);
+    let table = read_u32(memory, zakuro_core::region::us(PERSONALITY));
+    let count = read_u32(memory, zakuro_core::region::us(PERSONALITY) + 4);
     if table == 0 || index as u32 >= count.min(64) {
         return None;
     }
@@ -507,12 +510,12 @@ pub struct Seen {
 
 impl Seen {
     pub fn read(memory: &mut zakuro_core::memory::Memory) -> Seen {
-        let event = read_u32(memory, EVENT_RUNNING);
+        let event = read_u32(memory, zakuro_core::region::us(EVENT_RUNNING));
         let story = event != 0 && {
             let mut kind = [0u8; 1];
             memory.read_bytes(event + 0x5C, &mut kind);
             let kind = kind[0] as u32;
-            let situation = read_u32(memory, SITUATION);
+            let situation = read_u32(memory, zakuro_core::region::us(SITUATION));
             (kind < 32 && (story_types() >> kind) & 1 != 0) || situation == 0 || {
                 // qol3: the map's opening talk, as overrides/qol.c has it
                 let mut place = [0u8; 6];
@@ -521,7 +524,7 @@ impl Seen {
                 kind < 32 && (opening_types() >> kind) & 1 != 0 && turn == 1 && phase == 0
             }
         };
-        let skip_object = read_u32(memory, GAME_SKIP);
+        let skip_object = read_u32(memory, zakuro_core::region::us(GAME_SKIP));
         let skip = skip_object != 0 && {
             let mut state = [0u8; 1];
             memory.read_bytes(skip_object, &mut state);
@@ -627,7 +630,7 @@ fn log_events(memory: &mut zakuro_core::memory::Memory, frame: u64) {
     if !*ON.get_or_init(|| env_flag("FATES_QOL_EVENTS").unwrap_or(false)) {
         return;
     }
-    let event = read_u32(memory, EVENT_RUNNING);
+    let event = read_u32(memory, zakuro_core::region::us(EVENT_RUNNING));
     let mut kind = [0u8; 1];
     if event != 0 {
         memory.read_bytes(event + 0x5C, &mut kind);
@@ -638,7 +641,7 @@ fn log_events(memory: &mut zakuro_core::memory::Memory, frame: u64) {
         return;
     }
     *last = now;
-    let situation = read_u32(memory, SITUATION);
+    let situation = read_u32(memory, zakuro_core::region::us(SITUATION));
     let (turn, phase) = if situation != 0 {
         let mut place = [0u8; 6];
         memory.read_bytes(situation + SITUATION_PHASE, &mut place);

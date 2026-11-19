@@ -17,7 +17,7 @@ use super::Nav;
 use crate::cheats::{self as host, Action, STAT_NAMES};
 use crate::settings::Settings;
 
-pub const GROUPS: [&str; 4] = ["Units", "Battle", "Items & Resources", "Story & Supports"];
+pub const GROUPS: [&str; 5] = ["Units", "Battle", "Items & Resources", "Story & Supports", "Save States"]; // pulse: Save States (fates_ui/states.rs)
 
 /// the rows, by id (Item::Cheat(id))
 mod id {
@@ -107,6 +107,9 @@ pub fn groups() -> Vec<Item> {
 
 pub fn items(group: u8) -> Vec<Item> {
     use id::*;
+    if group == super::states::GROUP {
+        return super::states::items(); // pulse
+    }
     let list: Vec<u16> = match group {
         0 => {
             let mut v = vec![UNIT, CLASS, LEVEL, EXP];
@@ -162,13 +165,17 @@ pub fn row(cid: u16, settings: &Settings) -> (String, Option<String>, String) {
     let view = host::with_state(|s| s.view);
     let no_game = "Load a save first: the cheats work on the game being played.";
     let unit_help = |t: &str| if unit.is_some() { t.to_owned() } else { no_game.to_owned() };
-    if cid >= id::GROUP && cid < id::GROUP + 4 {
+    if super::states::is_ours(cid) {
+        return super::states::row(cid, settings); // pulse
+    }
+    if cid >= id::GROUP && cid < id::GROUP + GROUPS.len() as u16 {
         let g = (cid - id::GROUP) as usize;
         let help = [
             "Change a unit's class, stats, level, weapon ranks and skills, or add any character to your army.",
             "Critical hits, hit rates, damage, movement, growth and EXP, in the game's own battle calculation.",
             "Gold, the convoy, seals and My Castle's resources.",
             "Every support conversation in the Support Log, support levels, and chapter select.",
+            "Save and load the whole game at any moment, in eight slots, with quick save and quick load keys.", // pulse
         ][g];
         return (s(GROUPS[g]), None, s(help));
     }
@@ -288,6 +295,9 @@ fn pick_help(kind: Option<PickKind>) -> String {
 }
 
 pub fn changes(cid: u16) -> bool {
+    if super::states::is_ours(cid) {
+        return super::states::changes(cid); // pulse
+    }
     use id::*;
     matches!(cid, LEVEL | EXP | MOV | CAPS | CRIT | HIT | MISS | GOD | OHKO | AGAIN | MOVE | VEINS | VEIN_REUSE | CAPTURE | TURN | EXP_MULT | GROWTH | WEAPONS | SEALS | LOG | SUPPORT_RANK)
         || (STAT..STAT + 8).contains(&cid)
@@ -295,6 +305,9 @@ pub fn changes(cid: u16) -> bool {
 
 /// a value changed with left and right (dir -1 or 1)
 pub fn adjust(cid: u16, dir: i32, settings: &mut Settings) -> Option<Effect> {
+    if super::states::is_ours(cid) {
+        return super::states::adjust(cid, dir, settings); // pulse
+    }
     let c = &mut settings.pc.cheats;
     let d = if dir == 0 { 1 } else { dir };
     let unit = chosen_unit();
@@ -455,8 +468,11 @@ pub fn press(cid: u16, page: Page, row: usize) -> Press {
         Page::Cheats(g) => g,
         _ => 0,
     };
-    if cid >= id::GROUP && cid < id::GROUP + 4 {
+    if cid >= id::GROUP && cid < id::GROUP + GROUPS.len() as u16 {
         return Press::Open(Page::Cheats((cid - id::GROUP) as u8));
+    }
+    if super::states::is_ours(cid) {
+        return Press::Nothing; // pulse: options.rs passes the settings to states::press
     }
     let unit = chosen_unit();
     let in_game = host::with_state(|s| s.in_game);

@@ -113,7 +113,7 @@ fn read32(system: &mut System, address: u32) -> Option<u32> {
 
 /// the Backup controller and its queue: (controller, head job, job count).
 fn backup_queue(system: &mut System) -> Option<(u32, u32, u32)> {
-    let controller = read32(system, BACKUP_GLOBAL + 4)?;
+    let controller = read32(system, crate::region::us(BACKUP_GLOBAL) + 4)?;
     let head = read32(system, controller + 0x90)?;
     let count = read32(system, controller + 0x98)?;
     Some((controller, head, count))
@@ -136,7 +136,7 @@ struct SaveList {
 }
 
 fn save_list(system: &mut System) -> Option<SaveList> {
-    let menu = read32(system, FILE_MENU_GLOBAL + 4).filter(|&menu| menu != 0)?;
+    let menu = read32(system, crate::region::us(FILE_MENU_GLOBAL) + 4).filter(|&menu| menu != 0)?;
     let data = read32(system, menu + 0x144).unwrap_or(0);
     let count = read32(system, menu + 0x148).unwrap_or(0);
     let array = read32(system, menu + 0x34).unwrap_or(0);
@@ -359,8 +359,8 @@ pub fn dump(system: &mut System, why: &str) {
     {
         let queue = super::gsp::interrupt_queue_address(system);
         let header = queue.and_then(|q| read32(system, q));
-        let receiver_queue = read32(system, 0x006B_AC40 + 0x34);
-        let flags = read32(system, 0x006B_AC40 + 0x74);
+        let receiver_queue = read32(system, crate::region::us(0x006B_AC40) + 0x34);
+        let flags = read32(system, crate::region::us(0x006B_AC40) + 0x74);
         let event = system.services.gsp.interrupt_event_object.map(|o| describe(system, o));
         lines.push(format!(
             "  gpu interrupts: shared memory 0x{:08X}, client {}, queue {queue:08X?} header {header:08X?}; the receiver's queue {receiver_queue:08X?}, its flags (+0x74) {flags:08X?}; event {event:?}; ring held {}",

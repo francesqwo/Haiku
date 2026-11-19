@@ -67,6 +67,9 @@ pub struct PatchModule {
     /// every address it has code for, bit 0 set for Thumb, sorted.
     entries: Vec<(u32, Code)>,
     pub path: PathBuf,
+    /// codemods2: the changed functions' entries the patch left no code
+    /// at, sorted.
+    gone: Vec<u32>,
 }
 
 // SAFETY: the code and tables are read only once loaded
@@ -112,8 +115,23 @@ impl PatchModule {
             let mut entries: Vec<(u32, Code)> = table.iter().map(|entry| (entry.address, entry.code)).collect();
             entries.sort_unstable_by_key(|(address, _)| *address);
             *(symbol(b"recomp_imports")? as *mut Imports) = imports;
-            Ok(PatchModule { _library: library, entries, path: path.to_owned() })
+            // codemods2: the entries the patch left no code at, if it says
+            let gone = match (symbol(b"recomp_patch_gone_count"), symbol(b"recomp_patch_gone")) {
+                (Ok(count), Ok(table)) => {
+                    let mut gone = std::slice::from_raw_parts(table as *const u32, *(count as *const u32) as usize).to_vec();
+                    gone.sort_unstable();
+                    gone
+                }
+                _ => Vec::new(),
+            };
+            Ok(PatchModule { _library: library, entries, path: path.to_owned(), gone })
         }
+    }
+
+    /// codemods2: whether the patch left no code at the changed function
+    /// entry key (bit 0 set for Thumb), which is data now, say.
+    pub fn gone(&self, key: u32) -> bool {
+        self.gone.binary_search(&key).is_ok()
     }
 
     /// the code for address, bit 0 set for Thumb.
@@ -446,6 +464,11 @@ pub struct CodeMods {
     pub plugins: Vec<PluginSpec>,
     /// the mods, by name, for messages.
     pub names: Vec<String>,
+    /// codemods2: the content folders of the mods whose code this is, which
+    /// the loader leaves out of the game's files too when it can't use the
+    /// code (a mod's files without its code would run the game's own code
+    /// on the mod's data).
+    pub content: Vec<std::path::PathBuf>,
 }
 
 impl CodeMods {
@@ -531,6 +554,24 @@ pub fn take_notes() -> Vec<String> {
 /// so that a code mod that reaches code Haiku can't run is turned off for
 /// the next start instead of stopping the game again.
 static RUNNING: Mutex<(Vec<String>, Option<PathBuf>)> = Mutex::new((Vec::new(), None));
+
+/// codemods2: the addresses of Haiku's own functions (overrides) whose
+/// originals the running code mods change. where they overlap the mod's
+/// code wins: a Haiku feature that would change what the mod's version of
+/// the function sees or does turns itself off (replaces).
+static REPLACED: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+
+pub fn set_replaced(addresses: Vec<u32>) {
+    if let Ok(mut replaced) = REPLACED.lock() {
+        *replaced = addresses;
+    }
+}
+
+/// codemods2: whether a running code mod changes the original of Haiku's
+/// function at address (bit 0 ignored).
+pub fn replaces(address: u32) -> bool {
+    REPLACED.lock().is_ok_and(|replaced| replaced.iter().any(|&at| at & !1 == address & !1))
+}
 
 pub fn set_running(names: Vec<String>, failure_file: Option<PathBuf>) {
     if let Ok(mut running) = RUNNING.lock() {

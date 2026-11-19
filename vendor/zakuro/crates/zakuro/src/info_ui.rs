@@ -199,7 +199,7 @@ impl State {
             self.changed_at = frame;
         }
         self.rates = growth.rates;
-        let info = read_u32(memory, PROC_GAME_INFO);
+        let info = read_u32(memory, zakuro_core::region::us(PROC_GAME_INFO));
         let (viewer, suspended) = if info != 0 {
             let mut b = [0u8; 1];
             memory.read_bytes(info + 0x30, &mut b);
@@ -207,7 +207,7 @@ impl State {
         } else {
             (0, true)
         };
-        let config = read_u32(memory, GAME_CONFIG);
+        let config = read_u32(memory, zakuro_core::region::us(GAME_CONFIG));
         self.detailed = config != 0 && read_u32(memory, config + 4) & 0x80 == 0;
         // round 3: never over the game's own help boxes (a skill's, an
         // item's description): the button and the view step away while one

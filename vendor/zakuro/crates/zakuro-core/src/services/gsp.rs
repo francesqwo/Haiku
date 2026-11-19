@@ -11,7 +11,7 @@ use crate::System;
 pub use crate::pcos::gsp::*;
 
 /// command ids, straight from 3dbrew's GSP::GPU table.
-mod command {
+pub(crate) mod command {
     pub const WRITE_HW_REGS: u16 = 0x0001;
     pub const WRITE_HW_REGS_WITH_MASK: u16 = 0x0002;
     pub const WRITE_HW_REG_REPEAT: u16 = 0x0003;

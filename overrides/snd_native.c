@@ -162,11 +162,26 @@ enum { SITE_SYNC = 1, SITE_SEND, SITE_WAIT_TIMEOUT, SITE_SET_STATE, SITE_TEST };
 
 /* ---- nn::snd::CTR::Dspsnd ---- */
 
-/* the offsets of the driver's own fields this file keeps up */
+/* the offsets of the driver's own fields this file keeps up (the USA
+   build's; D() gives the running build's) */
 #define DSPSND_INITIALIZED 0x1310
 #define DSPSND_AUX 0x12E8          /* aux A/B buffers, two regions */
 #define DSPSND_DSP_CYCLES 0x1318   /* the DSP time voices may use */
 #define DSPSND_DSP_DEBUG 0x131C    /* the copy of the DSP's debug words */
+
+/* jpn: the Japanese build's nn::snd is another SDK release, whose Dspsnd has
+   12 more bytes before its output capture pointer (USA +0xC, JPN +0x18):
+   every field from +0xC on is 0xC further (checked by disassembly of
+   Initialize, InitializeVariables, SyncFrameData and SendParameter in both
+   builds: +0x10 -> +0x1C, 0x1090 -> 0x109C, 0x12E8 -> 0x12F4, 0x1310 ->
+   0x131C, 0x15A4 -> 0x15B0). Its methods also take a driver mutex, which
+   none of these overrides need: they replace the whole method. */
+int haiku_code_is_jpn(void); /* eur_region.c */
+static uint32_t D(uint32_t offset) {
+    static int jpn = -1;
+    if (jpn < 0) jpn = haiku_code_is_jpn();
+    return offset + (jpn && offset >= 0xC ? 0xCu : 0u);
+}
 
 /* Dspsnd::Initialize(bool waking) */
 RECOMP_OVERRIDE(0x002F4454) {
@@ -176,19 +191,19 @@ RECOMP_OVERRIDE(0x002F4454) {
     if (!mem_read8(ctx, self + initialized)) {
         os_native_hook(ctx, SND_INITIALIZE); /* r0, r1: the native aux buffers */
         uint32_t aux0 = ctx->r[0], aux1 = ctx->r[1];
-        mem_write8(ctx, self + DSPSND_INITIALIZED, 1);
-        mem_write8(ctx, self + 0x1311, 0);
-        mem_write16(ctx, self + 0x1312, 5);
-        mem_write16(ctx, self + 0x1314, 0);
-        mem_write16(ctx, self + 0x1316, 1);
-        mem_write32(ctx, self + DSPSND_AUX + 0x0, aux0);
-        mem_write32(ctx, self + DSPSND_AUX + 0x4, aux1);
-        mem_write32(ctx, self + DSPSND_AUX + 0x8, aux0);
-        mem_write32(ctx, self + DSPSND_AUX + 0xC, aux1);
-        mem_write32(ctx, self + DSPSND_DSP_DEBUG, 0);
+        mem_write8(ctx, self + D(DSPSND_INITIALIZED), 1);
+        mem_write8(ctx, self + D(0x1311), 0);
+        mem_write16(ctx, self + D(0x1312), 5);
+        mem_write16(ctx, self + D(0x1314), 0);
+        mem_write16(ctx, self + D(0x1316), 1);
+        mem_write32(ctx, self + D(DSPSND_AUX) + 0x0, aux0);
+        mem_write32(ctx, self + D(DSPSND_AUX) + 0x4, aux1);
+        mem_write32(ctx, self + D(DSPSND_AUX) + 0x8, aux0);
+        mem_write32(ctx, self + D(DSPSND_AUX) + 0xC, aux1);
+        mem_write32(ctx, self + D(DSPSND_DSP_DEBUG), 0);
         if (!waking) {
             mem_write8(ctx, self + mem_read32(ctx, 0x002F45FC), 1);
-            mem_write32(ctx, self + 0xC, 0); /* no output capture */
+            mem_write32(ctx, self + D(0xC), 0); /* no output capture */
         }
     }
     ctx->r[0] = 0;
@@ -200,7 +215,7 @@ RECOMP_OVERRIDE(0x002F5AE8) {
     if (!snd_on(ctx)) { CALL(RECOMP_ORIGINAL(0x002F5AE8)); return; }
     uint32_t self = ctx->r[0], lr = ctx->r[14];
     os_native_hook(ctx, SND_FINALIZE);
-    mem_write8(ctx, self + DSPSND_INITIALIZED, 0);
+    mem_write8(ctx, self + D(DSPSND_INITIALIZED), 0);
     ctx->r[0] = 0;
     RETURN_TO(lr);
 }
@@ -258,7 +273,7 @@ RECOMP_OVERRIDE(0x002F49F0) {
         }
         if (step == 24) {
             /* OutputCapture::Write(short*, int), when the game captures */
-            uint32_t capture = mem_read32(ctx, s->a[0] + 0xC);
+            uint32_t capture = mem_read32(ctx, s->a[0] + D(0xC));
             if (capture && mem_read8(ctx, capture + 0x10)) {
                 ctx->r[0] = capture;
                 ctx->r[1] = s->a[2];
@@ -290,8 +305,8 @@ RECOMP_OVERRIDE(0x002F4748) {
     uint32_t self = s->a[0];
     uint32_t master = mem_read32(ctx, 0x002F4888u), voices = mem_read32(ctx, 0x002F488Cu);
     uint32_t aux = mem_read32(ctx, 0x002F4890u);
-    uint32_t region = (mem_read16(ctx, self + 0x1314) & 1) * 8;
-    uint32_t aux0 = mem_read32(ctx, self + aux + region), aux1 = mem_read32(ctx, self + region + 0x12EC);
+    uint32_t region = (mem_read16(ctx, self + D(0x1314)) & 1) * 8;
+    uint32_t aux0 = mem_read32(ctx, self + aux + region), aux1 = mem_read32(ctx, self + region + D(0x12EC));
     for (;;) {
         uint32_t step = s->step++;
         switch (step) {
@@ -337,13 +352,13 @@ RECOMP_OVERRIDE(0x002F4748) {
             s->a[2] = ctx->r[0];
             /* VoiceManager::AdjustVoicePlayState(cycles left, the DSP's) */
             ctx->r[0] = voices;
-            ctx->r[1] = mem_read32(ctx, self + DSPSND_DSP_CYCLES) - s->a[1] - s->a[2];
-            ctx->r[2] = mem_read32(ctx, self + DSPSND_DSP_DEBUG);
+            ctx->r[1] = mem_read32(ctx, self + D(DSPSND_DSP_CYCLES)) - s->a[1] - s->a[2];
+            ctx->r[2] = mem_read32(ctx, self + D(DSPSND_DSP_DEBUG));
             SEQ_CALL(s, 0x002F245Cu, f_002F245C);
             continue;
         default:
             os_native_hook(ctx, SND_SEND);
-            mem_write8(ctx, self + 0x1311, mem_read8(ctx, self + 0x1311) + 1);
+            mem_write8(ctx, self + D(0x1311), mem_read8(ctx, self + D(0x1311)) + 1);
             SEQ_RETURN(s);
         }
     }
@@ -507,4 +522,10 @@ RECOMP_OVERRIDE(0x00104CA8) {
     ctx->r[14] = s->lr;
     s->site = 0;
     CALL(RECOMP_ORIGINAL(0x00104CA8));
+}
+
+/* pulsefix: what of this file is the console's state, kept with Divine
+   Pulse's moments and saved states (overrides/keep.c) */
+void snd_native_keep(void (*add)(const char *, void *, uint32_t)) {
+    add("snd_native.snd_seqs", &snd_seqs, sizeof snd_seqs);
 }

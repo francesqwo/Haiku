@@ -1,0 +1,41 @@
+# jpprep: hand-made USA -> JPN addresses, for what dev/region/map.py can't
+# map (or maps to something that isn't what the override means). Read by
+# dev/region/translate.py after map-jpn.tsv; a line here wins, except a value
+# ending in ?, which is used only where the map has no address. `none` is an
+# address the Japanese build doesn't have: it becomes 0, and the override
+# must not read it there (it asks haiku_code_is_jpn() first).
+# bringup.sh lists every address the map left out: add it here, checked by
+# disassembly (as dev/region/eur/manual.tsv's ExpandMessage).
+us	jpn	why
+# Lang::Folder's language index (qol.c, mods.c, online.c, offline_msg.c):
+# the Japanese game is Japanese only; those overrides take jpn_text.c's
+# texts on it and never read this
+0x006BDA6C	none?	Lang::Folder (none in the Japanese build, as far as known)
+# nn::snd::CTR::Dspsnd: the Japanese build has another nn::snd release (its
+# methods take a driver mutex; the driver's fields from +0xC on are 0xC
+# further: snd_native.c's D()). Checked by disassembly, side by side: the
+# same calls in the same order; the literals are the same kinds of value.
+0x002F4454	0x002F5500	Dspsnd::Initialize(bool)
+0x002F45E8	0x002F56D4	Initialize's literal: the initialized flag's offset (0x1310 -> 0x131C)
+0x002F4748	0x002F5834	Dspsnd::SendParameter(void)
+0x002F4888	0x002F5990	SendParameter's literal: MasterManager (0x0076E5C4 -> 0x00773864)
+0x002F488C	0x002F5994	SendParameter's literal: VoiceManager (0x0076FC00 -> 0x00774EB8)
+0x002F4890	0x002F5998	SendParameter's literal: the aux buffers' offset (0x12E8 -> 0x12F4)
+0x002F49F0	0x002F5AF8	Dspsnd::SyncFrameData(void)
+0x002F4AF4	0x002F5C18	SyncFrameData's literal: VoiceManager
+0x002F4AF8	0x002F5C1C	SyncFrameData's literal: MasterManager
+0x002F287C	0x002F38E4	MasterManager::ExecuteEffect(AuxBusId, unsigned int): SendParameter's third and fourth calls
+# FieldShadow::Update's return addresses (cameras.c): the call of
+# ICamera::IsReject (0x00544984) returns to 0x0019A3C0 (the JPN code skips
+# AABB::Add when it isn't 0: the same meaning), and the call of
+# AABB::Expand(float, float, float) (0x003D0090) to 0x0019A3FC
+0x0019958C	0x0019A3C0	FieldShadow::Update: after bl ICamera::IsReject
+0x001995D8	0x0019A3FC	FieldShadow::Update: after bl AABB::Expand
+# TalkExpander is a class of the western builds; the Japanese build expands a
+# talk line in ProcTalkManager::ExpandMessage(const wchar_t*) (r0 the
+# manager, r1 the line): the same loop over $a, $N, $G and $e codes
+# (disassembled side by side). randomizer.c only rewrites r1.
+0x001C009C	0x001E6064	TalkExpander::ExpandMessage(const wchar_t*) -> ProcTalkManager::ExpandMessage(const wchar_t*)
+# GameFont::ScrollText isn't in the Japanese build (amiibo.c's DLC-list
+# entries; amiibo_menu_create adds none on JPN)
+0x004E6B40	none	GameFont::ScrollText::ScrollText(void)

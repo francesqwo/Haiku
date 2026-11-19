@@ -23,8 +23,16 @@ extern "C" {
     static recomp_module_count: u32;
     static recomp_modules: u8;
     static recomp_origins: u8;
+    // eur: the title the code is recompiled from (overrides/eur_region.c)
+    static haiku_code_title: u64;
     // hooks: the overrides' tails registry (recomp.h, CALL_THEN)
     fn recomp_tails_forget(tls: u32);
+    // pulsefix: the tails waiting, kept and put back with the console's
+    // state; and the overrides' own variables that are part of it
+    // (overrides/keep.c)
+    fn recomp_tails_keep(out: *mut zakuro_core::state::keep::Tail, max: u32) -> u32;
+    fn recomp_tails_put(kept: *const zakuro_core::state::keep::Tail, count: u32);
+    fn haiku_keep_regions(out: *mut *const zakuro_core::state::keep::Region) -> u32;
     // codemods: the registry patch modules and plugins' after-hooks share
     static mut recomp_tails_pending: u32;
     fn recomp_tail_defer(ctx: *mut c_void, ret: u32, sp: u32, tail: zakuro_core::codemods::Tail, name: *const std::ffi::c_char, words: *const u32);
@@ -58,6 +66,8 @@ extern "C" {
     static mut fates_gfx_hooks_unit_icon: fates_gfx::unit_icon::Hooks;
     // gfx-final: overrides/gfx_capture.c
     static mut fates_gfx_hooks_capture: fates_gfx::capture::Hooks;
+    // jpn: overrides/gfx_live2d.c, Live2D models (My Room) drawn natively
+    static mut fates_gfx_hooks_live2d: fates_gfx::live2d::Hooks;
     // mods: overrides/mods.c, the Main Menu's Mods entry
     static mut haiku_mods_hook: Option<unsafe extern "C" fn(*mut c_void, u32)>;
     // randomizer: overrides/randomizer.c, the New Game randomizer
@@ -66,6 +76,11 @@ extern "C" {
     // supports: overrides/supports.c, Corrin S-supports anyone, Kana's gender
     static mut haiku_supports_hook: Option<unsafe extern "C" fn(*mut c_void, u32, u32, u32) -> u32>;
     static mut haiku_supports_text: u32;
+    // tones: overrides/tones.c, Corrin's speaking style with a translation
+    static mut haiku_tones_hook: Option<unsafe extern "C" fn(*mut c_void, u32, u32, u32) -> u32>;
+    static mut haiku_tones_active: u32;
+    // jpn2: overrides/jpn_text.c, Haiku's menu entries in English under a translation on the Japanese game
+    static mut haiku_jpn_english: u32;
     // cameras: overrides/cameras.c, the battle free camera and castle walking
     static mut fates_cameras_hook: Option<unsafe extern "C" fn(*mut zakuro::cameras::CamFrame)>;
     // qol: overrides/qol.c, Skip Story, the SpotPass questions, the boon/bane panel
@@ -92,6 +107,8 @@ extern "C" {
     static mut info_ui_words: [u32; 512];
     // cheats: overrides/cheats.c's words (the Cheats tab)
     static mut cheats_words: [u32; 1024];
+    // pulse: overrides/pulse.c's words (Divine Pulse)
+    static mut pulse_words: [u32; 64];
     static mut qol_story_types: u32;
     static mut qol_castle_items: u32;
     static mut qol_dialog_open: u32;
@@ -186,6 +203,12 @@ fn info_ui_words_ptr() -> *mut u32 {
     std::ptr::addr_of_mut!(info_ui_words).cast::<u32>()
 }
 
+// pulse: where overrides/pulse.c's words are
+fn pulse_words_ptr() -> *mut u32 {
+    // SAFETY: the address of a static array of the game build
+    std::ptr::addr_of_mut!(pulse_words).cast::<u32>()
+}
+
 // cheats: where overrides/cheats.c's words are
 fn cheats_words_ptr() -> *mut u32 {
     // SAFETY: the address of a static array of the game build
@@ -254,10 +277,14 @@ fn main() {
             os_native_hook = hook as *const c_void;
         }
     }
+    // eur: USA or EUR code; the Rust side maps its USA addresses by it.
+    // SAFETY: a constant the recompiled code defines
+    let code_title = unsafe { haiku_code_title };
+    zakuro_core::region::set(code_title);
     // SAFETY: the tables 3dsrecomp wrote beside the code build.rs links in
     let code = unsafe {
         zakuro::Linked::new(
-            0x0004000000179800,
+            code_title,
             recomp_abi,
             addr_of!(recomp_entries) as *const c_void,
             recomp_entry_count,
@@ -271,6 +298,10 @@ fn main() {
     // waiting in it; FATES_HOOKS_STATS=1 counts how each tail ran, printed
     // at exit. SAFETY: set before the game's code runs
     zakuro_core::recompiled::set_tails_forget(recomp_tails_forget);
+    // pulsefix: what of the overrides goes with Divine Pulse's moments and
+    // saved states, besides the console's memory. Set before the game's
+    // code runs, so the variables' first values are what they start from
+    zakuro_core::state::keep::set_hooks(zakuro_core::state::keep::Hooks { regions: haiku_keep_regions, tails_keep: recomp_tails_keep, tails_put: recomp_tails_put });
     zakuro::haiku_codemods::set_override_names(OVERRIDE_NAMES); // codemods
     // codemods: SAFETY: the code's own registry, whose C types these are
     // (recomp.h); a Context pointer is passed through as it came
@@ -310,10 +341,24 @@ fn main() {
             haiku_supports_hook = Some(zakuro_core::supports::hook);
         }
     }
+    // tones: Corrin's speaking style; acts only while a translation with the
+    // Japanese game's talk tones is on (FATES_TONES=0 leaves the hooks out).
+    // SAFETY: set once, before any recompiled code runs
+    if std::env::var("FATES_TONES").map_or(true, |value| value != "0") {
+        unsafe {
+            zakuro_core::tones::set_active_word(std::ptr::addr_of_mut!(haiku_tones_active));
+            haiku_tones_hook = Some(zakuro_core::tones::hook);
+        }
+    }
+    // jpn2: Haiku's entries in the game's menus follow the script's language
+    // on the Japanese game. SAFETY: set once, before any recompiled code runs
+    unsafe { zakuro::jpn_english::set_word(std::ptr::addr_of_mut!(haiku_jpn_english)) };
     zakuro::hfr::set_game_timing(zakuro::hfr::GameTiming { set_max_step: hfr_set_max_step, scene_step: hfr_scene_step });
     zakuro::qol::set_hooks(zakuro::qol::Hooks { word: qol_word }); // qol
     zakuro::info_ui::set_hooks(zakuro::info_ui::Hooks { words: info_ui_words_ptr }); // info-ui
     zakuro::cheats::set_hooks(zakuro::cheats::Hooks { words: cheats_words_ptr }); // cheats
+    zakuro::pulse::set_hooks(zakuro::pulse::Hooks { words: pulse_words_ptr }); // pulse
+    zakuro::states::set_haiku_version(env!("CARGO_PKG_VERSION")); // pulse: save states' header
     // cpu: the game's code runs only as recompiled native code. reaching
     // anything that would need Zakuro's ARM interpreter stops with the
     // address and a guest callstack; FATES_ALLOW_INTERPRETER=1 lets the
@@ -363,6 +408,8 @@ fn main() {
     unsafe { fates_units_snap_hook = Some(fates_gfx::units_snap) }; // gfx-2d
     // gfx-final: unit-icon textures rendered natively
     fates_gfx::install_capture(unsafe { &mut *std::ptr::addr_of_mut!(fates_gfx_hooks_capture) });
+    // jpn: Live2D models drawn natively
+    fates_gfx::install_live2d(unsafe { &mut *std::ptr::addr_of_mut!(fates_gfx_hooks_live2d) });
     // drawdist: far grass in batches, the batch overrides/drawdist.c fills
     fates_gfx::drawdist::set_batch(unsafe { std::ptr::addr_of_mut!(drawdist_batch) });
     zakuro::run(Some(code));

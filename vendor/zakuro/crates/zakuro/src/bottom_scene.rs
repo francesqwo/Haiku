@@ -115,7 +115,7 @@ pub fn live_procs(memory: &mut Memory, out: &mut Vec<(u32, u32)>) {
     out.clear();
     let mut stack = Vec::with_capacity(32);
     for root in 0..3 {
-        if let Some(proc) = read_u32(memory, PROC_ROOTS + root * 4).filter(|p| *p != 0) {
+        if let Some(proc) = read_u32(memory, zakuro_core::region::us(PROC_ROOTS) + root * 4).filter(|p| *p != 0) {
             stack.push(proc);
         }
     }
@@ -157,7 +157,7 @@ pub struct GameInfo {
 
 impl GameInfo {
     pub fn read(memory: &mut Memory) -> Option<GameInfo> {
-        let this = read_u32(memory, GAME_INFO).filter(|p| *p != 0)?;
+        let this = read_u32(memory, zakuro_core::region::us(GAME_INFO)).filter(|p| *p != 0)?;
         let viewer = read_u8(memory, this + 0x30)?;
         let suspends = [read_u32(memory, this + 0x1058)? as i32, read_u32(memory, this + 0x105C)? as i32];
         Some(GameInfo { viewer, suspended: suspends.iter().any(|n| *n > 0), cursor_on_unit: cursor_on_unit(memory).unwrap_or(false) })
@@ -166,9 +166,9 @@ impl GameInfo {
 
 /// whether the map cursor's tile has a unit on it, as FreeCursorTick asks.
 fn cursor_on_unit(memory: &mut Memory) -> Option<bool> {
-    read_u32(memory, MAP).filter(|p| *p != 0)?;
-    let cursor = read_u32(memory, MAP_CURSOR).filter(|p| *p != 0)?;
-    let image = read_u32(memory, MAP_IMAGE).filter(|p| *p != 0)?;
+    read_u32(memory, zakuro_core::region::us(MAP)).filter(|p| *p != 0)?;
+    let cursor = read_u32(memory, zakuro_core::region::us(MAP_CURSOR)).filter(|p| *p != 0)?;
+    let image = read_u32(memory, zakuro_core::region::us(MAP_IMAGE)).filter(|p| *p != 0)?;
     let x = f32::from_bits(read_u32(memory, cursor + 0x18)?);
     let y = f32::from_bits(read_u32(memory, cursor + 0x1C)?);
     if !(0.0..32.0).contains(&x) || !(0.0..32.0).contains(&y) {
@@ -178,7 +178,7 @@ fn cursor_on_unit(memory: &mut Memory) -> Option<bool> {
     if index == 0 {
         return Some(false);
     }
-    let pool = read_u32(memory, UNIT_POOL).filter(|p| *p != 0)?;
+    let pool = read_u32(memory, zakuro_core::region::us(UNIT_POOL)).filter(|p| *p != 0)?;
     let unit = pool + (index as u32 - 1) * 0x140;
     Some(read_u32(memory, unit + 8)? & 1 == 0)
 }
@@ -208,6 +208,10 @@ pub enum Reason {
     /// buildings and materials, and the touch tabs for the army and the
     /// profile card.
     Castle,
+    /// jpprep: a My Room visit's Live2D (`ProcLive2D`), where the Japanese
+    /// game's petting minigame is played by touch (stroking is a mouse drag
+    /// on the lower screen): on the Japanese build only.
+    MyRoom,
 }
 
 impl Reason {
@@ -222,6 +226,7 @@ impl Reason {
             Reason::Log => "conversation log",
             Reason::LowerMessage => "message on the lower screen",
             Reason::Castle => "My Castle map and tabs",
+            Reason::MyRoom => "My Room (touch the visitor)", // jpprep
         }
     }
 
@@ -244,7 +249,7 @@ impl Reason {
             Reason::Tutorial | Reason::AvatarCreator => pc.bottom_show_guides,
             // playtest: things read or touched on the lower screen, like a
             // tutorial page
-            Reason::Log | Reason::LowerMessage | Reason::Castle => pc.bottom_show_guides,
+            Reason::Log | Reason::LowerMessage | Reason::Castle | Reason::MyRoom => pc.bottom_show_guides, // jpprep: MyRoom
         }
     }
 
@@ -305,6 +310,8 @@ const UNIT_LIST: u32 = name_hash("UnitListMapMenu");
 const TALK_LOG: u32 = name_hash("TalkLogViewer");
 const GAME_MESSAGE: u32 = name_hash("GameMessage");
 const CASTLE: u32 = name_hash("CastleSeq");
+/// jpprep: My Room's Live2D view (the petting minigame on the Japanese game)
+const LIVE2D: u32 = name_hash("ProcLive2D");
 const TALK: u32 = name_hash("ProcTalkManager");
 /// a GameMessage's byte that CreateKeyTouchWaitLower sets to 1 (0x0019A9F8):
 /// the message is on the lower screen.
@@ -328,6 +335,8 @@ impl Probe {
         }
         let want = if COMBAT.iter().any(|proc| has(*proc)) {
             Some(Reason::Combat)
+        } else if zakuro_core::region::is_jpn() && has(LIVE2D) {
+            Some(Reason::MyRoom) // jpprep
         } else if has(TALK_LOG) {
             Some(Reason::Log) // playtest
         } else if has(TUTORIAL) {
@@ -499,7 +508,7 @@ impl ProcLog {
                     let Some(name_at) = read_u32(memory, proc + 0x0C) else { continue };
                     if self.names.get(&name_at).is_some_and(|name| watch.to_string_lossy() == name.as_str()) {
                         let words: Vec<String> = (0..9).map(|k| read_u32(memory, proc + 0x70 + 4 * k).map_or("?".into(), |w| format!("{w:08X}"))).collect();
-                        let delta = read_u32(memory, 0x006D_CA9C).map(|w| w as i32);
+                        let delta = read_u32(memory, zakuro_core::region::us(0x006D_CA9C)).map(|w| w as i32);
                         let _ = writeln!(self.out, "{frame} watch {proc:08X} +70: {}; frame ms (0x006DCA9C) {delta:?}", words.join(" "));
                     }
                 }

@@ -36,7 +36,7 @@ pub mod wide;
 use format::ColorFormat;
 pub use interpolation::Matches;
 use registers::*;
-pub use backend::{layout, place, GpuScreen, Overlay, OverlayMesh, OverlayTexture, OverlayVertex, PresentError, Presenter, ScreenFilter, ScreenImage, ScreenLayout, ScreenOrientation, Shown, Stereo, StereoMode, Viewport};
+pub use backend::{layout, place, GpuScreen, PulseEffect, Overlay, OverlayMesh, OverlayTexture, OverlayVertex, PresentError, Presenter, ScreenFilter, ScreenImage, ScreenLayout, ScreenOrientation, Shown, Stereo, StereoMode, Viewport};
 pub use renderer::{DrawCall, Renderer, RendererKind, SoftwareRenderer};
 #[cfg(feature = "vulkan")]
 pub use device::SharedDevice;

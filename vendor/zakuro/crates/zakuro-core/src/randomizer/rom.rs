@@ -48,6 +48,23 @@ impl Rom {
             (None, Some(romfs)) => romfs.base,
             (None, None) => return None,
         };
+        Rom::from_parts(layered, image, base)
+    }
+
+    /// jpn2: the RomFS of one DLC content (a folder installed by Setup, or
+    /// a content of a DLC kept as a CIA). The Japanese Special Edition keeps
+    /// Revelation's chapters (GameData/Person/C...) there, under local/.
+    pub fn of_dlc(dlc: &zakuro_fs::Dlc, index: u16) -> Option<Rom> {
+        match dlc.folder(index) {
+            Some(layered) => Rom::from_parts(Some(layered), dlc.image(), 0),
+            None => {
+                let romfs = dlc.content_romfs(index)?;
+                Rom::from_parts(None, dlc.image(), romfs.base)
+            }
+        }
+    }
+
+    fn from_parts(layered: Option<Arc<zakuro_fs::layered::Layered>>, image: Arc<zakuro_fs::RomImage>, base: u64) -> Option<Rom> {
         let mut rom = Rom { layered, image, base, dir_meta: Vec::new(), file_meta: Vec::new(), file_data: 0 };
         let mut header = [0u8; 0x28];
         if rom.read_at(0, &mut header) != header.len() || u32_at(&header, 0)? != 0x28 {

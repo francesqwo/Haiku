@@ -192,7 +192,7 @@ pub(super) fn refresh_units(state: &mut State, system: &mut System) {
     if state.active.as_ref().map_or(true, |a| a.hair.is_empty()) {
         return;
     }
-    let units = r32(&mut system.memory, UNIT_POOL);
+    let units = r32(&mut system.memory, crate::region::us(UNIT_POOL));
     if units == 0 || !system.memory.is_readable(units, UNIT_SIZE * UNITS) {
         return;
     }

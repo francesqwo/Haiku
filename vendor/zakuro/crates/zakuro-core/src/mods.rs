@@ -188,6 +188,10 @@ pub fn lay_dlc(dlc: &mut [zakuro_fs::Dlc], paths: &[PathBuf], mods: &[PathBuf]) 
     if mods.is_empty() {
         return;
     }
+    // jpdlc: DLC kept as a CIA gets the mods too (the Japanese DLC voices)
+    for dlc in dlc.iter_mut().filter(|dlc| dlc.folders.is_empty()) {
+        lay_dlc_cia(dlc, mods);
+    }
     for dlc in dlc.iter_mut().filter(|dlc| !dlc.folders.is_empty()) {
         let name = format!("{:016X}", dlc.title_id);
         let Some(base) = paths.iter().find(|path| path.is_dir() && path.file_name().is_some_and(|file| file.to_string_lossy().eq_ignore_ascii_case(&name))) else {
@@ -208,6 +212,35 @@ pub fn lay_dlc(dlc: &mut [zakuro_fs::Dlc], paths: &[PathBuf], mods: &[PathBuf]) 
                 }
                 Err(error) => log::warn!("mods: the mods can't be laid over DLC content {content}, {error}"),
             }
+        }
+    }
+}
+
+/// jpdlc: the mods' dlc/<content index>/ folders over the contents of DLC
+/// kept as a CIA: each content with any becomes a layered RomFS over the
+/// CIA's own (read through the CIA's image, as a folder content is), which
+/// fs serves in place of the content's window.
+fn lay_dlc_cia(dlc: &mut zakuro_fs::Dlc, mods: &[PathBuf]) {
+    let indexes: Vec<u16> = dlc.contents.iter().filter(|content| content.offset.is_some()).map(|content| content.index).collect();
+    for index in indexes {
+        let content = format!("{index:04X}");
+        let dirs: Vec<PathBuf> = mods.iter().map(|path| path.join("dlc").join(&content)).filter(|path| path.is_dir()).collect();
+        if dirs.is_empty() {
+            continue;
+        }
+        let Some(romfs) = dlc.content_romfs(index) else {
+            continue;
+        };
+        let refs: Vec<&Path> = dirs.iter().map(PathBuf::as_path).collect();
+        let image = dlc.image();
+        match zakuro_fs::layered::Layered::with_mods(&romfs, image.data(), &refs) {
+            Ok(Some(modded)) => {
+                let changes = modded.changes;
+                log::info!("mods: DLC content {content} (in the CIA): {} files replaced, {} added, {} patched, {} removed", changes.replaced, changes.added, changes.patched, changes.removed);
+                dlc.folders.push((index, std::sync::Arc::new(modded)));
+            }
+            Ok(None) => {}
+            Err(error) => log::warn!("mods: the mods can't be laid over DLC content {content}, {error}"),
         }
     }
 }

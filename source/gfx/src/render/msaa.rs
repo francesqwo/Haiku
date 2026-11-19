@@ -362,13 +362,14 @@ impl Renderer {
         let shade = if alpha_tested(s) && m.shade > 1 && !crate::drawdist::far_batch(s) { m.shade.min(samples) } else { 0 };
         // drawdist: a batch of tufts has its own shade.vert, so its own pipelines
         let batch = crate::drawdist::is_batch(s);
-        let slot = shade | (batch as u32) << 16;
+        let cube = crate::skybg::is_cube(s); // skybg: a cube map's draw, the cube build of raster.frag
+        let slot = shade | (batch as u32) << 16 | (cube as u32) << 17;
         if let Some(&p) = m.shaded.get(&(s.key, samples, slot)) {
             return Ok(p);
         }
         let _t = crate::perf::scope(crate::perf::C::Pipeline);
         let pass = self.msaa_pass(samples)?;
-        let p = self.shaded_make_at(s.key, pass, samples, shade as f32 / samples as f32, batch)?;
+        let p = self.shaded_make_at(s.key, pass, samples, shade as f32 / samples as f32, batch, cube)?;
         self.msaa.as_mut().unwrap().shaded.insert((s.key, samples, slot), p);
         Ok(p)
     }

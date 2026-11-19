@@ -57,12 +57,25 @@ fn recorder() -> Option<&'static Mutex<Recorder>> {
     .as_ref()
 }
 
+/// statesnd: a saved state was loaded: the guest clock jumps (on, or
+/// back), and the recording goes straight on with the loaded moment's
+/// sound instead of writing the jump as silence.
+static LOADED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// statesnd: see LOADED.
+pub fn state_loaded() {
+    LOADED.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// records one frame as it comes out of the mixer, made for guest time
 /// `tick`.
 pub fn record(samples: &[[i16; 2]], tick: u64) {
     let Some(recorder) = recorder() else { return };
     let mut r = recorder.lock().unwrap();
     let period = crate::CYCLES_PER_AUDIO_FRAME;
+    if LOADED.swap(false, std::sync::atomic::Ordering::Relaxed) && r.samples > 0 {
+        r.next_tick = tick;
+    }
     // trailer: FATES_AUDIO_WAV_NOLEAD=1 starts the recording at its first
     // frame (a run from a saved state), not with silence from boot
     if r.samples == 0 && r.next_tick == 0 && std::env::var_os("FATES_AUDIO_WAV_NOLEAD").is_some() {
@@ -97,4 +110,12 @@ pub fn record(samples: &[[i16; 2]], tick: u64) {
             let _ = file.get_mut().seek(SeekFrom::Start(position));
         }
     }
+}
+
+/// pulse2, tests: how many samples the recording holds so far (none when
+/// not recording), so a log line can say where in the WAV it happened.
+pub fn position() -> Option<u64> {
+    let recorder = recorder()?;
+    let r = recorder.lock().ok()?;
+    Some(r.samples)
 }

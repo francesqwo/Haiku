@@ -17,6 +17,8 @@
 //! current and last buffer id), which nn::snd's own VoiceManager::
 //! UpdateStatus turns into wave-buffer states.
 
+use serde::{Deserialize, Serialize};
+
 use crate::memory::Memory;
 
 pub const VOICES: usize = 24;
@@ -39,7 +41,7 @@ const PROGRESS: [f32; FRAME_SAMPLES] = {
     progress
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum Format {
     Pcm8,
     #[default]
@@ -58,7 +60,7 @@ impl Format {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum Interpolation {
     /// the firmware's polyphase filter, played as linear (as the emulated
     /// route does, for comparable output).
@@ -69,7 +71,7 @@ pub enum Interpolation {
 }
 
 /// a wave buffer as nn::snd hands it over, its samples left in guest memory.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct Buffer {
     /// guest virtual address of the samples.
     pub address: u32,
@@ -88,7 +90,7 @@ pub struct Buffer {
 }
 
 /// y = b0 x + a1 y1, 15 fraction bits.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 struct SimpleFilter {
     b0: i32,
     a1: i32,
@@ -102,7 +104,7 @@ impl Default for SimpleFilter {
 }
 
 /// the second-order filter, 14 fraction bits, feedback given negated.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 struct BiquadFilter {
     b: [i32; 3],
     a: [i32; 2],
@@ -116,7 +118,7 @@ impl Default for BiquadFilter {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct Filters {
     simple: Option<SimpleFilter>,
     biquad: Option<BiquadFilter>,
@@ -153,7 +155,7 @@ impl Filters {
 }
 
 /// what the game changed on a voice since the last frame.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Pending {
     pub reset: bool,
     pub partial_reset: bool,
@@ -194,8 +196,11 @@ impl Pending {
 
 /// an ADPCM buffer's bytes and what decoding them started from, so a
 /// looping buffer is decoded once.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct AdpcmSource {
+    /// statesnd: not in a saved state (the bytes are in guest memory, which
+    /// the state holds); `Voice::decode_again` reads them back
+    #[serde(skip)]
     data: Vec<u8>,
     count: usize,
     coefficients: [i16; 16],
@@ -203,7 +208,10 @@ struct AdpcmSource {
     end: [i16; 2],
 }
 
-#[derive(Debug, Clone)]
+/// statesnd: a voice is part of a saved state (`NativeSnd::saved`), all
+/// but its last frame's samples and its read buffer, which every frame it
+/// plays makes again before using them.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Voice {
     pub enabled: bool,
     sync_count: u16,
@@ -220,6 +228,9 @@ pub struct Voice {
     history: [i16; 2],
     queue: Vec<Buffer>,
     playing: Option<Buffer>,
+    /// statesnd: not in a saved state (a whole track can be one ADPCM
+    /// buffer, megabytes decoded); `decode_again` makes it again
+    #[serde(skip)]
     decoded: Vec<i16>,
     decoded_from: Option<AdpcmSource>,
     remaining: u32,
@@ -229,13 +240,20 @@ pub struct Voice {
     last_buffer_id: u16,
     buffer_update: bool,
     position: u32,
+    #[serde(skip, default = "silent")]
     frame: Frame,
     /// the buffer ran out on the frame's last sample: the next one follows
     /// on from the next frame's first, as on the console.
     ran_out_at_frame_end: bool,
     /// the samples of the buffer being played, read from guest memory once
     /// per frame (PCM) as far as the frame reaches.
+    #[serde(skip)]
     scratch: Vec<u8>,
+}
+
+/// statesnd: a voice's frame as it comes back from a saved state.
+fn silent() -> Frame {
+    [[0; 2]; FRAME_SAMPLES]
 }
 
 impl Default for Voice {
@@ -272,7 +290,7 @@ impl Default for Voice {
 
 /// the status word a voice reports each frame, as nn::snd reads it
 /// (DspsndChannelPlayVars, 12 bytes).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Status {
     pub enabled: bool,
     pub buffer_update: bool,
@@ -444,6 +462,23 @@ impl Voice {
         self.decoded_from = Some(AdpcmSource { data: copy, count, coefficients: self.coefficients, start, end: self.history });
     }
 
+    /// statesnd: after a saved state, the ADPCM buffer playing is decoded
+    /// again from guest memory, from the history it was decoded from, as
+    /// `dequeue` decoded it.
+    fn decode_again(&mut self, memory: &mut Memory) {
+        let (Some(buffer), Some(source)) = (self.playing, self.decoded_from.as_mut()) else { return };
+        if buffer.format != Format::Adpcm || !source.data.is_empty() {
+            return;
+        }
+        source.data.resize((source.count as u32).div_ceil(14) as usize * 8, 0);
+        memory.read_bytes(buffer.address, &mut source.data);
+        let mut history = source.start;
+        decode_adpcm(&source.data, source.count, &source.coefficients, &mut history, &mut self.decoded);
+        if history != source.end {
+            log::warn!("audio: a voice's ADPCM buffer at {:08X} decodes differently from the saved state's", buffer.address);
+        }
+    }
+
     fn forget_decoded(&mut self) {
         self.decoded.clear();
         self.decoded_from = None;
@@ -602,7 +637,7 @@ pub fn decode_adpcm(data: &[u8], count: usize, coefficients: &[i16; 16], history
 }
 
 /// the final mix's settings.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PendingMaster {
     pub master_volume: Option<f32>,
     pub aux_return: [Option<f32>; 2],
@@ -621,6 +656,9 @@ pub struct Scratch {
 /// bytes of one aux bus's four channels.
 pub const AUX_BYTES: u32 = 4 * FRAME_SAMPLES as u32 * 4;
 
+// pulse2: a rewind keeps the voices with each moment; statesnd: and a
+// saved state's file has them in a section of its own
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Mixer {
     pub voices: Vec<Voice>,
     pub pending: Vec<Pending>,
@@ -659,6 +697,13 @@ impl Default for Mixer {
 impl Mixer {
     pub fn pending(&mut self, voice: usize) -> Option<&mut Pending> {
         self.pending.get_mut(voice)
+    }
+
+    /// statesnd: the voices from a saved state decode their ADPCM again.
+    pub fn decode_again(&mut self, memory: &mut Memory) {
+        for voice in &mut self.voices {
+            voice.decode_again(memory);
+        }
     }
 
     pub fn voice_buffer_id(&self, voice: usize) -> Option<u16> {

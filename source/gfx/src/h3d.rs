@@ -226,7 +226,7 @@ pub struct Mesh {
 /// multiplier in its literal 0x0051E258 (smlal, then >> 5).
 fn culling_index(system: &mut System, addr: u32, model: u32) -> u32 {
     let diff = addr.wrapping_sub(r32(system, model + 0x40)) as i32 as i64;
-    let magic = r32(system, 0x0051_E258) as i32 as i64;
+    let magic = r32(system, zakuro_core::region::us(0x0051_E258)) as i32 as i64;
     let hi = (((diff << 32) + magic * diff) >> 32) as i32;
     (((hi >> 5) - (hi >> 31)) as u32) & 0xFFFF
 }

@@ -214,7 +214,7 @@ struct PersonAt {
 }
 
 fn persons(m: &mut Memory) -> Vec<PersonAt> {
-    let node = word(m, PERSON_LIST);
+    let node = word(m, crate::region::us(PERSON_LIST));
     let section = word(m, node);
     if section == 0 || !m.is_readable(section, 0x10) {
         return Vec::new();
@@ -236,7 +236,7 @@ fn persons(m: &mut Memory) -> Vec<PersonAt> {
 
 /// GameData's reliance lists: (address, reliance id, count)
 fn lists(m: &mut Memory) -> Vec<(u32, u16, u16)> {
-    let node = word(m, PERSON_LIST);
+    let node = word(m, crate::region::us(PERSON_LIST));
     let section = word(m, node);
     let table = word(m, section + 8);
     if table == 0 {
@@ -282,7 +282,7 @@ fn conversation(m: &mut Memory, e: u32) -> u32 {
 
 /// the units in the forces' lists: (unit, its person's PID)
 fn units(m: &mut Memory) -> Vec<(u32, Vec<u8>)> {
-    let forces = word(m, FORCES);
+    let forces = word(m, crate::region::us(FORCES));
     let mut out = Vec::new();
     if forces == 0 {
         return out;
@@ -301,6 +301,14 @@ fn units(m: &mut Memory) -> Vec<(u32, Vec<u8>)> {
         }
     }
     out
+}
+
+/// tones: Corrin's unit::Edit (looks, voice, speaking style), which the
+/// unit in the army points at (+0xB0, as ProcTalkManager::Initialize reads it)
+pub(crate) fn corrin_edit(m: &mut Memory) -> Option<u32> {
+    let (unit, _) = units(m).into_iter().find(|(_, pid)| pid == PID_MALE || pid == PID_FEMALE)?;
+    let edit = word(m, unit + 0xB0);
+    (edit != 0 && m.is_readable(edit, 0x30)).then_some(edit)
 }
 
 /// whether Corrin (the unit in the army) is female
@@ -383,7 +391,7 @@ fn kana_in_army(m: &mut Memory) -> Option<bool> {
 }
 
 fn chapter(m: &mut Memory) -> Vec<u8> {
-    let gud = word(m, GAME_USER_DATA);
+    let gud = word(m, crate::region::us(GAME_USER_DATA));
     let chapter = word(m, gud + 0xC);
     let name = word(m, chapter);
     cstr(m, name, 32)
@@ -501,7 +509,18 @@ pub unsafe extern "C" fn hook(ctx: *mut std::ffi::c_void, op: u32, a: u32, b: u3
             }
             0
         }
-        op::IDENT => ident_hook(state, &mut system.memory, a, b),
+        op::IDENT => {
+            let node = ident_hook(state, &mut system.memory, a, b);
+            // fanpatch: HAIKU_MSG_TRACE, the lines the game finds no message for
+            if crate::msgtrace::enabled() && a == word(&mut system.memory, crate::region::us(MESS_HASH)) {
+                let label = cstr(&mut system.memory, b, 128);
+                let found = if node != 0 { node } else { ident(&mut system.memory, a, &label) };
+                // SAFETY: as above, ctx is the running code's context
+                let lr = unsafe { (*(ctx as *mut Context)).r[14] };
+                crate::msgtrace::lookup(&label, lr, found);
+            }
+            node
+        }
         op::IS_PID => is_pid(state, &mut system.memory, a, b),
         op::CALL_C => call_c(state, system, a, b),
         op::ASK_TEXT => ask_text(state, system, a),
@@ -511,7 +530,7 @@ pub unsafe extern "C" fn hook(ctx: *mut std::ffi::c_void, op: u32, a: u32, b: u3
 
 /// GameData's reliance table (its address tells a GameData loaded anew)
 fn reliance_table(m: &mut Memory) -> u32 {
-    let node = word(m, PERSON_LIST);
+    let node = word(m, crate::region::us(PERSON_LIST));
     let section = word(m, node);
     word(m, section + 8)
 }
@@ -638,7 +657,7 @@ fn talk(state: &mut State, system: &mut System, proc_: u32) -> u32 {
 
 /// a label of Haiku's for one the game looks up
 fn ident_hook(state: &mut State, m: &mut Memory, hash: u32, label_at: u32) -> u32 {
-    if hash != word(m, MESS_HASH) {
+    if hash != word(m, crate::region::us(MESS_HASH)) {
         return 0;
     }
     let label = cstr(m, label_at, 128);
@@ -653,7 +672,13 @@ fn ident_hook(state: &mut State, m: &mut Memory, hash: u32, label_at: u32) -> u3
             log::info!("supports: lookup (rank C) {} -> {node:#x}", String::from_utf8_lossy(&c));
         }
     }
-    let ends_tone = label.ends_with(b"_PCM1") || label.ends_with(b"_PCF1");
+    // jpn: the Japanese game looks labels up in any of Corrin's three talk
+    // tones (_PCM1.._PCM3, _PCF1.._PCF3); Haiku's Japanese layer has the
+    // _HK variants of all three (dev/eur/text/make_text.py, x002)
+    let ends_tone = label.len() >= 5 && {
+        let t = &label[label.len() - 5..];
+        (t.starts_with(b"_PCM") || t.starts_with(b"_PCF")) && (t[4] == b'1' || (crate::region::is_jpn() && (t[4] == b'2' || t[4] == b'3')))
+    };
     // Kana's paralogue, for a Kana of Corrin's gender
     if label.starts_with(b"MID_X002_") && ends_tone {
         if kana_flipped(state, m) == Some(true) {
@@ -768,7 +793,7 @@ fn is_pid(state: &mut State, m: &mut Memory, unit: u32, pid_at: u32) -> u32 {
     if unit == 0 || unit > 0xFA {
         return ORIGINAL;
     }
-    let pool = word(m, UNIT_POOL);
+    let pool = word(m, crate::region::us(UNIT_POOL));
     let at = pool + (unit - 1) * UNIT_SIZE;
     let person = word(m, at + 0x9C);
     let name = word(m, person + 8);
@@ -805,7 +830,7 @@ fn decide(state: &mut State, m: &mut Memory, corrin_female: bool) -> bool {
                 return corrin_female;
             }
             state.asked = false;
-            let gud = word(m, GAME_USER_DATA);
+            let gud = word(m, crate::region::us(GAME_USER_DATA));
             let vm = word(m, gud + 0x20);
             let values = word(m, vm + 0xC);
             let count = word(m, vm + 8);
@@ -848,6 +873,7 @@ const EV_TALK: u32 = 0x003A_F36C;
 /// a native the script calls: hold back Kana's first line for the question
 fn call_c(state: &mut State, system: &mut System, function: u32, first: u32) -> u32 {
     let m = &mut system.memory;
+    let function = crate::region::to_us(function); // eur: the USA one, to compare
     if function != CUT_SCENE && function != EV_TALK {
         return 0;
     }
@@ -864,7 +890,7 @@ fn call_c(state: &mut State, system: &mut System, function: u32, first: u32) -> 
     if KanaGender::from_code(KANA.load(Ordering::Relaxed)) != KanaGender::Ask || kana_in_army(m).is_some() {
         return 0;
     }
-    let hash = word(m, MESS_HASH);
+    let hash = word(m, crate::region::us(MESS_HASH));
     if ident(m, hash, ASK_LABELS[0].as_bytes()) == 0 {
         log::warn!("supports: the Kana question's text is not loaded; Kana is the game's own");
         return 0;

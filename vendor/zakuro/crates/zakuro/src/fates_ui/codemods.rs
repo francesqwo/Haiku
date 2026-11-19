@@ -107,6 +107,17 @@ impl App {
         list.code_notes.clear();
         list.left_out.clear();
         zakuro_core::codemods::set_running(Vec::new(), None);
+        zakuro_core::codemods::set_replaced(Vec::new()); // codemods2
+        codemods::set_saves(&[]); // codemods2: the game's own saves unless a code patch runs
+        // codemods2: every mod that patches the code says it keeps saves
+        // of its own, on or off
+        for index in 0..list.mods.len() {
+            if list.mods[index].code_files.as_ref().is_some_and(|files| files.changes_code()) {
+                let id = list.mods[index].id.clone();
+                let text = codemods::own_saves_note(&id);
+                list.code_notes.entry(id).or_default().push(Note { warning: false, text });
+            }
+        }
         // the code mods the last run turned off
         if let Some((names, at)) = codemods::take_failed(data_dir.as_deref()) {
             for index in 0..list.mods.len() {
@@ -129,6 +140,13 @@ impl App {
                 list.code_notes.entry(id).or_default().push(Note { warning: true, text: why.to_owned() });
                 log::warn!("codemods: {} is left out: {why}", list.mods[index].name);
             }
+        };
+        // codemods2: a failed build's note goes on the mods it is about, and
+        // the others are left out with them (never half the code mods)
+        let leave_out_failed = |list: &mut crate::haiku_mods::ModList, indices: &[usize], failure: &codemods::Failure, more: &str| {
+            let (about, rest): (Vec<usize>, Vec<usize>) = indices.iter().partition(|&&index| failure.about(&list.mods[index].name));
+            leave_out(list, &about, &format!("{}{more}", codemods::failure_note(failure)));
+            leave_out(list, &rest, "It is left out with the other code mods this time: one of them can't be used.");
         };
         let Some(linked) = self.linked else {
             leave_out(&mut self.fates.mods, &using, "Code mods need the recompiled game, which this build doesn't have.");
@@ -168,12 +186,19 @@ impl App {
                 Some(compiler) => {
                     log::info!("codemods: compiling {} with {}", plan.names().join(", "), compiler.describe());
                     let never = std::sync::atomic::AtomicBool::new(false);
-                    if let Err(error) = codemods::build(&plan, &game, &base, &compiler, &|stage| log::debug!("codemods: {stage:?}"), &never) {
-                        leave_out(list, &patching, &format!("Its code couldn't be compiled: {error}."));
+                    if let Err(failure) = codemods::build(&plan, &game, &base, &compiler, &|stage| log::debug!("codemods: {stage:?}"), &never) {
+                        log::warn!("codemods: the code mods could not be compiled: {failure}");
+                        codemods::record_failure(plan.key, &failure);
+                        leave_out_failed(list, &patching, &failure, "");
                     }
                 }
-                None if build_now => leave_out(list, &patching, "Its code isn't compiled, and there is no compiler: open the Mods screen and choose Apply and Restart."),
-                None => leave_out(list, &patching, "Its code isn't compiled yet: choose Apply and Restart to compile it."),
+                // codemods2: why it failed last time, rather than "not
+                // compiled yet", until the player tries again
+                None => match codemods::last_failure(plan.key) {
+                    Some(failure) => leave_out_failed(list, &patching, &failure, " Choose Apply and Restart to try again."),
+                    None if build_now => leave_out(list, &patching, "Its code isn't compiled, and there is no compiler: open the Mods screen and choose Apply and Restart."),
+                    None => leave_out(list, &patching, "Its code isn't compiled yet: choose Apply and Restart to compile it."),
+                },
             }
         }
         let list = &mut self.fates.mods;
@@ -185,11 +210,17 @@ impl App {
             CodeMods { plugins: plan.plugins.clone(), ..CodeMods::default() }
         } else {
             match codemods::prepare(&plan, digest) {
-                Ok(mods) => {
+                Ok(mut mods) => {
+                    // codemods2: their files, which the loader leaves out
+                    // with their code if it can't use it
+                    mods.content = patching.iter().filter_map(|&index| list.mods[index].content.clone()).collect();
                     if let Some(built) = codemods::built(plan.key).filter(|_| plan.patches()) {
+                        // codemods2: where they overlap the mod's code wins
+                        zakuro_core::codemods::set_replaced(built.replaced.clone());
+                        codemods::log_overlaps(&plan.names(), &built.replaced);
                         for &index in &patching {
                             let id = list.mods[index].id.clone();
-                            list.code_notes.entry(id).or_default().extend(codemods::built_notes(&built).into_iter().map(|text| Note { warning: text.contains("Haiku has its own"), text }));
+                            list.code_notes.entry(id).or_default().extend(codemods::built_notes(&built).into_iter().map(|text| Note { warning: text.contains("Off while it runs"), text }));
                         }
                     }
                     mods
@@ -206,6 +237,11 @@ impl App {
         let mut mods = mods;
         mods.plugins.retain(|plugin| !left.contains(&plugin.id));
         let running: Vec<String> = patching.iter().filter(|index| !list.left_out.contains(&list.mods[**index].id)).map(|index| list.mods[*index].name.clone()).chain(mods.plugins.iter().map(|plugin| plugin.name.clone())).collect();
+        // codemods2: the code patches that run have saves of their own
+        if mods.code.is_some() {
+            let ids: Vec<String> = patching.iter().filter(|index| !list.left_out.contains(&list.mods[**index].id)).map(|&index| list.mods[index].id.clone()).collect();
+            codemods::set_saves(&ids);
+        }
         zakuro_core::codemods::set_running(running, codemods::failed_path(data_dir.as_deref()));
         list.check();
         mods
@@ -307,17 +343,30 @@ impl App {
             }
             Stage::Failed(error) => {
                 let names = job.names.clone();
+                // codemods2: the note, in plain words, on the mods it is
+                // about; the toast names them
+                let failure = job.failure.lock().ok().and_then(|failure| failure.clone()).unwrap_or(codemods::Failure { text: error, mods: Vec::new() });
                 self.fates.code.job = None;
                 self.fates.code.restart_after = false;
                 let list = &mut self.fates.mods;
+                let mut about = Vec::new();
                 for index in 0..list.mods.len() {
                     if names.contains(&list.mods[index].name) {
                         let id = list.mods[index].id.clone();
-                        list.code_notes.entry(id).or_default().push(Note { warning: true, text: format!("Its code couldn't be compiled: {error}.") });
+                        let text = if failure.text == "cancelled" {
+                            "Compiling its code was cancelled; it stays as it was.".to_owned()
+                        } else if failure.about(&list.mods[index].name) {
+                            about.push(list.mods[index].name.clone());
+                            codemods::failure_note(&failure)
+                        } else {
+                            "It can't run this time: another code mod turned on with it can't be compiled.".to_owned()
+                        };
+                        list.code_notes.entry(id).or_default().push(Note { warning: true, text });
                     }
                 }
                 list.check();
-                self.menus.toast = Some(("The code mods couldn't be compiled".to_owned(), std::time::Instant::now()));
+                let toast = if about.is_empty() { "The code mods couldn't be compiled".to_owned() } else { format!("{} couldn't be compiled: see its note", about.join(", ")) };
+                self.menus.toast = Some((toast, std::time::Instant::now()));
                 self.fates_code_view();
             }
             _ => {

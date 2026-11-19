@@ -417,6 +417,17 @@ pub fn poll() {
 /// other player must share.
 fn compat_now() -> Compat {
     let mut compat = compat();
+    // eur: the EUR build only plays the EUR build: it shows to the other
+    // side as a gameplay mod the USA build doesn't have, so the two never
+    // match (their code and data differ; nothing says a battle between them
+    // would stay in step)
+    if crate::region::is_eur() {
+        compat.gameplay_mods.push(ModStamp { id: "haiku.region.eur".into(), name: "EUR Special Edition (CTR-P-BFZP)".into(), hash: crate::region::EUR });
+    }
+    // jpprep: the Japanese build only plays the same Japanese build
+    if crate::region::is_jpn() {
+        compat.gameplay_mods.push(ModStamp { id: "haiku.region.jpn".into(), name: format!("Japanese build, Fire Emblem if ({:016X})", crate::region::title()), hash: crate::region::title() });
+    }
     if let Some(choice) = crate::randomizer::current() {
         compat.gameplay_mods.push(ModStamp {
             id: "haiku.randomizer".into(),

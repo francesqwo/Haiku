@@ -66,6 +66,29 @@ enum Core {
     Off,
 }
 
+/// quiet: a headless run (tests, the bench, agents' checks) is a background
+/// job: it neither claims one of the cores a player's game keeps for itself
+/// nor runs at normal priority, so a game being played beside it keeps its
+/// sound and its pace. FATES_THREAD_CORE still chooses, when it is set.
+static BACKGROUND: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// quiet: marks this process a background job (a headless run), before the
+/// game's threads start: below-normal priority, no claimed core.
+pub fn background() {
+    BACKGROUND.store(true, Ordering::Relaxed);
+    #[cfg(windows)]
+    {
+        unsafe extern "system" {
+            fn GetCurrentProcess() -> isize;
+            fn SetPriorityClass(process: isize, class: u32) -> i32;
+        }
+        const BELOW_NORMAL_PRIORITY_CLASS: u32 = 0x0000_4000;
+        // SAFETY: this process's own pseudo-handle and a valid class
+        unsafe { SetPriorityClass(GetCurrentProcess(), BELOW_NORMAL_PRIORITY_CLASS) };
+    }
+    log::info!("quiet: a headless run, so a background job: below-normal priority, no game core claimed");
+}
+
 fn core_mode() -> Core {
     static MODE: std::sync::OnceLock<Core> = std::sync::OnceLock::new();
     *MODE.get_or_init(|| match std::env::var("FATES_THREAD_CORE").as_deref() {
@@ -73,6 +96,7 @@ fn core_mode() -> Core {
         Ok("off") => Core::Off,
         Ok("follow") => Core::Follow,
         Ok("ideal") => Core::Ideal,
+        _ if BACKGROUND.load(Ordering::Relaxed) => Core::Off, // quiet
         _ => Core::Pin,
     })
 }

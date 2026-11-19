@@ -87,6 +87,8 @@ pub struct Game {
     /// the IVFC tree of the RomFS, for verify_romfs.
     pub romfs_offset: u64,
     pub romfs_size: u64,
+    /// eurdlc: which game it is (the DLC picked must fit it)
+    pub region: crate::jpn::GameRegion,
 }
 
 fn u16_at(b: &[u8], at: usize) -> u16 {
@@ -196,6 +198,15 @@ pub fn judge_title(program_id: u64, product: &str, wanted_game: bool) -> Result<
     if program_id == TITLE_ID && product == PRODUCT {
         return Ok(());
     }
+    // eur: the EUR Special Edition is built with its own address map
+    if crate::eur::is_eur(program_id, product) {
+        return Ok(());
+    }
+    // jpprep: so is a Japanese build (Fire Emblem if), when this Haiku has
+    // the map for its code (checked with the code's hash, check_game)
+    if crate::jpn::is_jpn(program_id, product) {
+        return Ok(());
+    }
     if product.starts_with("CTR-P-BF") && product.len() == 10 {
         let letter = product.chars().last().unwrap_or('?');
         if letter != 'E' {
@@ -297,7 +308,15 @@ pub fn check_game(path: &Path) -> Result<Game, Problem> {
     let hex: String = code_hash.iter().map(|b| format!("{b:02x}")).collect();
     let exheader = dump.read(ncch_offset + 0x200, 0x400)?;
     let remaster = u16_at(&exheader, 0x0E);
-    if hex != CODE_SHA256 {
+    // eur: the EUR cartridge's code is the one its map is made for
+    let eur = crate::eur::is_eur(program_id, &product);
+    // jpprep: a Japanese build's code must be the one this Haiku's map is
+    // made for (setup/jpn/build.txt), said before anything is installed
+    let jpn = crate::jpn::is_jpn(program_id, &product);
+    if jpn {
+        crate::jpn::check_code(&crate::jpn::setup_dir(), program_id, &product, &hex)?;
+    }
+    if !jpn && ((!eur && hex != CODE_SHA256) || (eur && hex != crate::eur::CODE_SHA256)) {
         return Err(Problem::WrongVersion(format!(
             "This is Fire Emblem Fates Special Edition (USA), but its code is not the version Haiku is made for (it reports version {remaster}). The dump may have an update or a code mod merged into it, or come from a different printing. Dump the original Special Edition cartridge."
         )));
@@ -314,7 +333,8 @@ pub fn check_game(path: &Path) -> Result<Game, Problem> {
     if dump.read(romfs_offset, 4)? != b"IVFC" {
         return Err(Problem::Encrypted(format!("The game's data (RomFS) is still encrypted. {DECRYPT_HINT}")));
     }
-    Ok(Game { path, kind, size: dump.len, ncch_offset, remaster, romfs_offset, romfs_size })
+    let region = if jpn { crate::jpn::GameRegion::Jpn } else if eur { crate::jpn::GameRegion::Eur } else { crate::jpn::GameRegion::Usa }; // eurdlc
+    Ok(Game { path, kind, size: dump.len, ncch_offset, remaster, romfs_offset, romfs_size, region })
 }
 
 /// a CIA's executable content: where it starts, after checking it is the

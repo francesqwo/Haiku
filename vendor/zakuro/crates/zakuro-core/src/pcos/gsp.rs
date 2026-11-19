@@ -531,6 +531,12 @@ mod tests {
     use super::*;
     use crate::memory::{MemoryState, Permission};
     use crate::{Config, System};
+    // pulsefix: what the tests of the emulated service's requests use (they
+    // build with the emulation feature, as the rest of the crate's tests)
+    #[cfg(feature = "emulation")]
+    use crate::kernel::ipc::{CommandBuffer, Header};
+    #[cfg(feature = "emulation")]
+    use crate::services::gsp::{command, handle};
 
     /// maps the GSP shared memory block and points shared_memory_address
     /// at it, the way svcMapMemoryBlock does for a real title, so a test

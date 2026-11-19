@@ -13,6 +13,8 @@ pub const RASTER_FRAG: &[u8] = include_bytes!("../shaders/raster.frag.spv");
 /// depth map out itself (scale and offset from the Draw block's flags),
 /// for a depth map a Vulkan viewport can't hold (a polygon offset past 0)
 pub const RASTER_FRAG_DEPTH: &[u8] = include_bytes!("../shaders/raster_depth.frag.spv");
+/// skybg: raster.frag's source, which fates-gfx builds again for cube maps
+pub const RASTER_FRAG_SOURCE: &str = include_str!("../shaders/raster.frag");
 /// shade.vert's source: the vertex program interpreted per vertex.
 pub const SHADE_VERT: &str = include_str!("../shaders/shade.vert");
 

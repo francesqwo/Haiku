@@ -116,6 +116,12 @@ pub fn action_held(action: PcAction) -> bool {
     with(|state| state.snapshot.actions[index(action)])
 }
 
+/// statesnd: an action pressed as its key or button would press it (the UI
+/// script's `quick save` and `quick load`).
+pub fn press_action(action: PcAction) {
+    with(|state| state.latched[index(action)] = true);
+}
+
 /// whether the action was pressed since the last call for it.
 pub fn take_action(action: PcAction) -> bool {
     with(|state| std::mem::take(&mut state.latched[index(action)]))

@@ -193,16 +193,16 @@ impl Recorder {
         // its uniform registers at +0x12900 (world) and +0x1290C (texture
         // matrix), as BatchCallback reads them
         let shape = r32(system, state) & 7;
-        let table = r32(system, 0x0053_A4B0);
+        let table = r32(system, zakuro_core::region::us(0x0053_A4B0));
         let index = r32(system, table + shape * 4);
         let shader = r32(system, prim_ctx + index * 4 + 0x29E4);
         let (world_reg, tex_reg) = if shader != 0 { (r32(system, shader + 0x12900) & 0xFF, r32(system, shader + 0x1290C) & 0xFF) } else { (u32::MAX, u32::MAX) };
-        let batch = r32(system, 0x004F_43A8);
+        let batch = r32(system, zakuro_core::region::us(0x004F_43A8));
         let vb = r32(system, batch + 100);
         if tracing() {
             // gfx-units: dev, the field camera (FieldWorld::GetCamera
             // 0x001782F8: *(*(lit 0x00178308) + 0x34)) and its matrices
-            let lit = r32(system, 0x0017_8308);
+            let lit = r32(system, zakuro_core::region::us(0x0017_8308));
             let world = r32(system, lit);
             let camera = r32(system, world + 0x34);
             if camera != 0 {
@@ -311,7 +311,7 @@ impl Recorder {
             _ => None,
         };
         if let Some((lit, off)) = replayed {
-            let object = r32(system, lit);
+            let object = r32(system, zakuro_core::region::us(lit)); // eur
             let command = r32(system, object + off);
             // empty: the function builds it now, through observed calls
             let _ = transfer(system, command, &mut self.cur.combiner);
@@ -454,7 +454,7 @@ pub fn draw_callback(system: &mut System, prim_ctx: u32, w2: u32, c: &mut Combin
     let (first, lit, off) = if gray { (0usize, 0x004F_4BCC, 0x5C) } else { (2usize, 0x004F_487C, 0x58) };
     c.stages[first].konst = c1;
     c.stages[5].konst = c2;
-    let object = r32(system, lit);
+    let object = r32(system, zakuro_core::region::us(lit)); // eur
     let command = r32(system, object + off);
     if !transfer(system, command, c) {
         // not built yet: the stages as the functions build them

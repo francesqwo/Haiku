@@ -1,0 +1,11 @@
+# eur: hand-made USA -> EUR addresses, for what dev/eur/map.py can't map (or
+# maps to something that isn't what the override means). Read by
+# dev/eur/translate.py after map-eur.tsv; a line here wins.
+us	eur	why
+# TalkExpander::ExpandMessage(const wchar_t*) became, in the EUR build, a
+# wrapper (0x001C0478) that reads Corrin's gender and tail-calls the new
+# ExpandMessage(const wchar_t*, unit::Edit::Gender::Type) at 0x001C0500 with
+# r0 (this) and r1 (the line) unchanged. randomizer.c rewrites r1 before the
+# expansion, so it replaces the gendered one: every line passes through it,
+# from the wrapper and from callers that give a gender themselves.
+0x001C009C	0x001C0500	ExpandMessage(const wchar_t*) -> ExpandMessage(const wchar_t*,Gender)

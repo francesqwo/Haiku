@@ -313,6 +313,24 @@ pub(crate) fn clip_points(s: &Shaded, most: usize) -> Option<Vec<[f32; 4]>> {
     Some(outputs.iter().map(|o| [sem(o, 1), sem(o, 0), sem(o, 2), sem(o, 3)]).collect())
 }
 
+/// skybg: dev, every vertex of a draw: its first four input registers and
+/// its outputs (position x, y, z, w; texture 0 u, v, w; 1 u, v; 2 u, v), as the GPU runs them.
+pub(crate) fn dev_vertices(s: &Shaded) -> Option<Vec<([Vec4; 4], [f32; 11])>> {
+    let mut used: Vec<u32> = s.indices.to_vec();
+    used.sort_unstable();
+    used.dedup();
+    if used.is_empty() {
+        return None;
+    }
+    let inputs: Vec<[Vec4; INPUT_REGISTERS]> = used.iter().map(|&i| std::array::from_fn(|r| input(s, r, i))).collect();
+    let outputs = with_unit(s, |unit| shader::run_vertices(unit, &inputs));
+    let sem = |o: &[Vec4; 16], which: usize| -> f32 {
+        let slot = s.shading[SEMANTICS + which];
+        if slot == u32::MAX || slot >= 64 { f32::NAN } else { o[(slot >> 2) as usize][(slot & 3) as usize] }
+    };
+    Some(inputs.iter().zip(outputs.iter()).map(|(i, o)| ([i[0], i[1], i[2], i[3]], [sem(o, 0), sem(o, 1), sem(o, 2), sem(o, 3), sem(o, 8), sem(o, 9), sem(o, 21), sem(o, 10), sem(o, 11), sem(o, 12), sem(o, 13)])).collect())
+}
+
 /// mapjit: dev, the given vertices run through the draw's own program, as
 /// `projected` places them: (long axis, short axis, w); behind the eye left
 /// out.

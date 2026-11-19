@@ -34,11 +34,75 @@ struct Queue {
     underruns: u64,
     /// how much a queue that ran dry waits for before it plays again.
     refill: usize,
+    /// pulse2: Divine Pulse's time stopping and starting again
+    time: TimeFx,
+    /// pulse2: FATES_OUTPUT_WAV: the output is pulled by the app, a
+    /// presented frame's worth at a time, not by the device
+    pulled: bool,
+}
+
+/// pulse2: Divine Pulse's sound. When the rewind screen opens, what is
+/// queued plays on slowing down to a stop, as a tape stopping (the time
+/// stopping, under the picture's wave), and nothing more plays while time
+/// is stopped (the game is held). When the screen closes the queue starts
+/// over with the sound of the moment time went back to (the music going on
+/// from there), fading in.
+#[derive(Default)]
+struct TimeFx {
+    /// winding down: how fast the queued sound plays now (1 to 0), and how
+    /// much slower it gets each output sample
+    stopping: Option<(f64, f64)>,
+    /// stopped: nothing plays and nothing is taken in
+    stopped: bool,
+    /// fading back in: the gain, and how much it rises each output sample
+    fading_in: Option<(f32, f32)>,
+}
+
+impl TimeFx {
+    fn holds(&self) -> bool {
+        self.stopping.is_some() || self.stopped
+    }
 }
 
 impl Queue {
     /// the next output sample, between two of the console's.
     fn next(&mut self) -> [f32; 2] {
+        // pulse2: time winding down, then stopped
+        if let Some((rate, slope)) = self.time.stopping {
+            if self.samples.len() < 2 || rate <= 0.0 {
+                self.time.stopping = None;
+                self.time.stopped = true;
+            } else {
+                let (a, b) = (self.samples[0], self.samples[1]);
+                let t = self.fraction as f32;
+                let gain = (rate as f32).powf(0.6);
+                let out = [(a[0] + (b[0] - a[0]) * t) * gain, (a[1] + (b[1] - a[1]) * t) * gain];
+                self.last = out;
+                self.fraction += self.step * rate;
+                while self.fraction >= 1.0 && self.samples.len() > 1 {
+                    self.samples.pop_front();
+                    self.fraction -= 1.0;
+                }
+                self.time.stopping = Some((rate - slope, slope));
+                return out;
+            }
+        }
+        if self.time.stopped {
+            self.last = self.last.map(|v| v * 0.995);
+            return self.last;
+        }
+        let out = self.next_plain();
+        // pulse2: the sound after a rewind fading in
+        match self.time.fading_in {
+            Some((gain, slope)) if !self.starved => {
+                self.time.fading_in = (gain + slope < 1.0).then_some((gain + slope, slope));
+                out.map(|v| v * gain)
+            }
+            _ => out,
+        }
+    }
+
+    fn next_plain(&mut self) -> [f32; 2] {
         if !self.starved && self.samples.len() < 2 {
             self.starved = true;
             self.underruns += 1;
@@ -69,6 +133,9 @@ impl Queue {
     /// dry, and has it fill all the way up before it plays again, so the
     /// first frames after do not run it dry either.
     fn hold(&mut self) {
+        if self.time.holds() {
+            return; // pulse2: winding down, or stopped
+        }
         self.starved = true;
         self.refill = TARGET;
         self.underruns = 0;
@@ -77,6 +144,9 @@ impl Queue {
     /// drops what is queued, holding as above, fading out from what played
     /// last.
     fn clear(&mut self) {
+        if self.time.holds() {
+            return; // pulse2: winding down, or stopped
+        }
         self.samples.clear();
         self.fraction = 0.0;
         self.hold();
@@ -198,6 +268,15 @@ pub struct Audio {
     /// qol: the game speed: the sound comes in this many times as fast and
     /// is time-stretched (made shorter, at its own pitch) to play in time.
     speed: std::cell::Cell<f64>,
+    /// pace: the sound's flow over the last stretch of wall time: samples
+    /// the game made, samples queued after stretching, since when.
+    flow: std::cell::Cell<(u64, u64, Option<std::time::Instant>)>,
+    rate: f64,
+    /// pulse2: the output's samples a second
+    out_rate: f64,
+    /// pulse2: FATES_OUTPUT_WAV, what the speakers play, pulled a presented
+    /// frame at a time (see record_frame)
+    recording: Option<std::cell::RefCell<OutWav>>,
     _stream: cpal::Stream,
 }
 
@@ -233,6 +312,8 @@ impl Audio {
             last: [0.0; 2],
             underruns: 0,
             refill: RESUME,
+            time: TimeFx::default(),
+            pulled: false,
         }));
         let stream = match format {
             SampleFormat::F32 => stream::<f32>(&device, &config, queue.clone()),
@@ -243,7 +324,22 @@ impl Audio {
         }?;
         stream.play().map_err(|e| e.to_string())?;
         let speed = std::cell::Cell::new(crate::qol::speed()); // qol
-        Ok(Audio { queue, volume: std::cell::Cell::new(1.0), stretch: std::cell::RefCell::new(Stretch::new()), speed, _stream: stream })
+        let out_rate = config.sample_rate.0 as f64;
+        // pulse2: FATES_OUTPUT_WAV records the output instead of playing it
+        let recording = std::env::var_os("FATES_OUTPUT_WAV").and_then(|path| match OutWav::create(std::path::Path::new(&path), out_rate as u32) {
+            Ok(wav) => {
+                if let Ok(mut queue) = queue.lock() {
+                    queue.pulled = true;
+                }
+                log::info!("pulse2: recording the output to {}", std::path::Path::new(&path).display());
+                Some(std::cell::RefCell::new(wav))
+            }
+            Err(error) => {
+                log::warn!("pulse2: cannot record the output, {error}");
+                None
+            }
+        });
+        Ok(Audio { queue, volume: std::cell::Cell::new(1.0), stretch: std::cell::RefCell::new(Stretch::new()), speed, flow: std::cell::Cell::new((0, 0, None)), rate, out_rate, recording, _stream: stream })
     }
 
     /// how many times the sound ran dry since the last call.
@@ -267,6 +363,63 @@ impl Audio {
         self.stretch.borrow_mut().clear();
     }
 
+    /// pulse2: time stops (Divine Pulse opened): what is queued winds down
+    /// to a stop in about twice its length (0.15 to 0.5 s), and nothing new
+    /// is taken in until time_resume.
+    pub fn time_stop(&self) {
+        let Ok(mut queue) = self.queue.lock() else { return };
+        let console = queue.step * self.out_rate;
+        let queued = queue.samples.len() as f64 / console.max(1.0);
+        let length = (2.0 * queued).clamp(0.15, 0.5);
+        queue.time.stopping = Some((1.0, 1.0 / (length * self.out_rate)));
+        queue.time.stopped = false;
+        queue.time.fading_in = None;
+        queue.starved = false;
+    }
+
+    /// pulse2: time goes on (a rewind made or cancelled): the queue starts
+    /// over with what comes next, fading in over 0.3 s.
+    pub fn time_resume(&self) {
+        if let Ok(mut queue) = self.queue.lock() {
+            queue.time = TimeFx { fading_in: Some((0.0, (1.0 / (0.3 * self.out_rate)) as f32)), ..TimeFx::default() };
+            queue.clear();
+        }
+        self.stretch.borrow_mut().clear();
+    }
+
+    /// statesnd: a saved state was loaded: what was queued of the moment
+    /// before goes, and the loaded moment's sound (the music going on from
+    /// it, the state keeping the voices) fades in over 0.3 s, as after a
+    /// rewind, rather than starting with a click.
+    pub fn state_loaded(&self) {
+        self.time_resume();
+    }
+
+    /// pulse2: FATES_OUTPUT_WAV: the output of `seconds` (a presented
+    /// frame) pulled from the queue and written, as the device would have
+    /// played it.
+    pub fn record_frame(&self, seconds: f64) {
+        let Some(recording) = &self.recording else { return };
+        let mut wav = recording.borrow_mut();
+        let wanted = self.out_rate * seconds + wav.carry;
+        let count = wanted.floor() as usize;
+        wav.carry = wanted - count as f64;
+        let Ok(mut queue) = self.queue.lock() else { return };
+        let samples: Vec<[f32; 2]> = (0..count).map(|_| queue.next()).collect();
+        drop(queue);
+        wav.write(&samples);
+    }
+
+    /// whether the output is recorded (FATES_OUTPUT_WAV).
+    pub fn recording(&self) -> bool {
+        self.recording.is_some()
+    }
+
+    /// the samples recorded so far (FATES_OUTPUT_WAV), none when not.
+    pub fn recorded(&self) -> Option<u64> {
+        self.recording.as_ref().map(|wav| wav.borrow().samples)
+    }
+
     /// qol: the game speed the sound comes in at.
     pub fn set_speed(&self, speed: f64) {
         self.speed.set(speed.max(1.0));
@@ -282,8 +435,100 @@ impl Audio {
         let scale = self.volume.get() / 32768.0;
         let samples: Vec<[f32; 2]> = samples.iter().map(|s| s.map(|v| v as f32 * scale)).collect();
         let Ok(mut queue) = self.queue.lock() else { return };
+        if queue.time.holds() {
+            return; // pulse2: time stopped
+        }
+        let before = queue.samples.len();
         enqueue(&mut queue, &mut self.stretch.borrow_mut(), &samples, self.speed.get());
+        // pace: what came in and what was queued (trimming aside)
+        let added = queue.samples.len().saturating_sub(before) as u64;
+        let (fed, queued, since) = self.flow.get();
+        self.flow.set((fed + samples.len() as u64, queued + added, since.or_else(|| Some(std::time::Instant::now()))));
     }
+
+    /// pace: every ten seconds or more, how the sound kept up: wall seconds,
+    /// the game's sound seconds made in them (its speed against real time),
+    /// and how much longer stretching made it (1.0 is none).
+    pub fn take_flow(&self) -> Option<(f64, f64, f64)> {
+        let (fed, queued, since) = self.flow.get();
+        let wall = since?.elapsed().as_secs_f64();
+        if wall < 10.0 || fed == 0 {
+            return None;
+        }
+        self.flow.set((0, 0, None));
+        Some((wall, fed as f64 / self.rate, queued as f64 / fed as f64))
+    }
+}
+
+/// pulse2: FATES_OUTPUT_WAV's file: 16-bit stereo at the output's rate, its
+/// header brought up to date every second and at the end.
+struct OutWav {
+    file: std::io::BufWriter<std::fs::File>,
+    rate: u32,
+    samples: u64,
+    since_header: u64,
+    carry: f64,
+}
+
+impl OutWav {
+    fn create(path: &std::path::Path, rate: u32) -> std::io::Result<OutWav> {
+        use std::io::Write;
+        let mut file = std::io::BufWriter::new(std::fs::File::create(path)?);
+        file.write_all(&wav_header(rate, 0))?;
+        Ok(OutWav { file, rate, samples: 0, since_header: 0, carry: 0.0 })
+    }
+
+    fn write(&mut self, samples: &[[f32; 2]]) {
+        use std::io::{Seek, SeekFrom, Write};
+        let mut bytes = Vec::with_capacity(samples.len() * 4);
+        for s in samples {
+            for v in s {
+                bytes.extend_from_slice(&((v.clamp(-1.0, 1.0) * 32767.0) as i16).to_le_bytes());
+            }
+        }
+        let _ = self.file.write_all(&bytes);
+        self.samples += samples.len() as u64;
+        self.since_header += samples.len() as u64;
+        if self.since_header >= self.rate as u64 {
+            self.since_header = 0;
+            let _ = self.file.flush();
+            let file = self.file.get_mut();
+            if let Ok(at) = file.stream_position() {
+                let _ = file.seek(SeekFrom::Start(0));
+                let _ = file.write_all(&wav_header(self.rate, self.samples));
+                let _ = file.seek(SeekFrom::Start(at));
+            }
+        }
+    }
+}
+
+impl Drop for OutWav {
+    fn drop(&mut self) {
+        use std::io::{Seek, SeekFrom, Write};
+        let _ = self.file.flush();
+        let file = self.file.get_mut();
+        let _ = file.seek(SeekFrom::Start(0));
+        let _ = file.write_all(&wav_header(self.rate, self.samples));
+    }
+}
+
+fn wav_header(rate: u32, samples: u64) -> [u8; 44] {
+    let data = (samples * 4).min(u32::MAX as u64 - 36) as u32;
+    let mut h = [0u8; 44];
+    h[0..4].copy_from_slice(b"RIFF");
+    h[4..8].copy_from_slice(&(36 + data).to_le_bytes());
+    h[8..12].copy_from_slice(b"WAVE");
+    h[12..16].copy_from_slice(b"fmt ");
+    h[16..20].copy_from_slice(&16u32.to_le_bytes());
+    h[20..22].copy_from_slice(&1u16.to_le_bytes());
+    h[22..24].copy_from_slice(&2u16.to_le_bytes());
+    h[24..28].copy_from_slice(&rate.to_le_bytes());
+    h[28..32].copy_from_slice(&(rate * 4).to_le_bytes());
+    h[32..34].copy_from_slice(&4u16.to_le_bytes());
+    h[34..36].copy_from_slice(&16u16.to_le_bytes());
+    h[36..40].copy_from_slice(b"data");
+    h[40..44].copy_from_slice(&data.to_le_bytes());
+    h
 }
 
 /// ui: the names of the sound output devices, for the options.
@@ -330,7 +575,8 @@ fn stream<T: SizedSample + FromSample<f32>>(
                 }
                 let Ok(mut queue) = queue.lock() else { return };
                 for frame in out.chunks_mut(channels) {
-                    let [left, right] = queue.next();
+                    // pulse2: a recording pulls the queue itself
+                    let [left, right] = if queue.pulled { [0.0; 2] } else { queue.next() };
                     match frame {
                         [mono] => *mono = T::from_sample((left + right) / 2.0),
                         [l, r, rest @ ..] => {
@@ -386,6 +632,8 @@ mod tests {
             last: [0.0; 2],
             underruns: 0,
             refill: RESUME,
+            time: TimeFx::default(),
+            pulled: false,
         }
     }
 
@@ -562,6 +810,33 @@ mod tests {
     }
 
     /// a game starting or stopping drops what the last one queued, and the
+    /// pulse2: time stopping plays what is queued slowing down to silence,
+    /// takes nothing in while stopped (clear and hold leave it be), and the
+    /// sound after time goes on fades in.
+    #[test]
+    fn time_winds_down_stays_stopped_and_fades_back_in() {
+        let mut queue = queue(0, 32728.0 / 48000.0);
+        queue.samples.extend(tone(4096));
+        queue.time.stopping = Some((1.0, 1.0 / (0.25 * 48000.0)));
+        let wound: Vec<f32> = (0..12500).map(|_| queue.next()[0].abs()).collect();
+        let early = wound[..2000].iter().cloned().fold(0.0, f32::max);
+        let late = wound[9000..11000].iter().cloned().fold(0.0, f32::max);
+        assert!(early > 0.4 && late < early * 0.5, "{early} {late}");
+        assert!(queue.time.stopped);
+        queue.clear();
+        queue.hold();
+        assert!(queue.time.stopped);
+        let quiet = (0..4000).map(|_| queue.next()[0].abs()).fold(0.0, f32::max);
+        assert!(quiet < 0.01);
+        // time goes on: a fresh queue, fading in
+        queue.time = TimeFx { fading_in: Some((0.0, 1.0 / (0.3 * 48000.0))), ..TimeFx::default() };
+        queue.clear();
+        queue.samples.extend(tone(TARGET * 3));
+        let first = (0..400).map(|_| queue.next()[0].abs()).fold(0.0, f32::max);
+        let later: f32 = (0..20000).map(|_| queue.next()[0].abs()).fold(0.0, f32::max);
+        assert!(first < 0.05 && later > 0.4, "{first} {later}");
+    }
+
     /// new sound plays once there is enough of it.
     #[test]
     fn a_cleared_queue_plays_none_of_the_old_sound() {

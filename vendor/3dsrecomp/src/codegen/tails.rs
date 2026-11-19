@@ -126,4 +126,54 @@ RECOMP_EXPORT void recomp_tails_forget(uint32_t tls) {
         recomp_tails_pending--;
     }
 }
+
+/* pulsefix: the tails waiting are part of the console's state, as the
+   threads' registers they wait on are: a host that keeps the console to go
+   back to (a rewind's moment, a saved state) keeps them with it, and puts
+   them back in place of those waiting now. A record is the waiting slot as
+   it is; tail and name are this program's addresses (a host writing them
+   into a file gives them relative to something of its own). keep returns
+   how many waited, at most max of them written. */
+typedef struct {
+    uint64_t tail, name;
+    uint32_t tls, ret, sp;
+    uint32_t words[RECOMP_TAIL_WORDS];
+} RecompKeptTail;
+
+RECOMP_EXPORT uint32_t recomp_tails_keep(RecompKeptTail *out, uint32_t max) {
+    uint32_t n = 0;
+    for (uint32_t i = 0; i < RECOMP_TAILS; i++) {
+        const RecompWaiting *w = &recomp_waiting[i];
+        if (!w->tail) continue;
+        if (n < max) {
+            RecompKeptTail *k = &out[n];
+            k->tail = (uint64_t)(uintptr_t)w->tail;
+            k->name = (uint64_t)(uintptr_t)w->name;
+            k->tls = w->tls;
+            k->ret = w->ret;
+            k->sp = w->sp;
+            memcpy(k->words, w->words, sizeof k->words);
+        }
+        n++;
+    }
+    return n;
+}
+
+/* every tail waiting now is dropped (as recomp_tails_forget(0) does), and
+   the kept ones wait again */
+RECOMP_EXPORT void recomp_tails_put(const RecompKeptTail *in, uint32_t count) {
+    recomp_tails_forget(0);
+    for (uint32_t i = 0; i < count && i < RECOMP_TAILS; i++) {
+        RecompWaiting *w = &recomp_waiting[i];
+        if (!in[i].tail) continue;
+        w->tail = (RecompTail)(uintptr_t)in[i].tail;
+        w->name = (const char *)(uintptr_t)in[i].name;
+        w->tls = in[i].tls;
+        w->ret = in[i].ret;
+        w->sp = in[i].sp;
+        memcpy(w->words, in[i].words, sizeof w->words);
+        recomp_tails_pending++;
+        if (recomp_tails_pending > recomp_tails_most) recomp_tails_most = recomp_tails_pending;
+    }
+}
 "#;

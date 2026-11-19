@@ -12,6 +12,7 @@
 #   setup/w64devkit/       the part of w64devkit's GCC 16.2 the build uses
 #   setup/overrides/       Haiku's game-function overrides (C source)
 #   setup/derived.pack     the recipes for Haiku's game-derived files
+#   setup/derived-eur.pack the same for the EUR game (eur2)
 #   setup/assets/          Haiku's own assets that hold no game data
 #   setup/SDL3.dll, setup/payload.txt
 # and no game code or data; then <out dir>/Haiku.zip.
@@ -95,6 +96,17 @@ if step setup; then
   # made from the dump (derived.pack)
   rm -rf "$SETUP/overrides"; mkdir -p "$SETUP/overrides"
   for f in "$HERE"/overrides/*.c; do [ "$(basename "$f")" = amiibo_icons.c ] || cp "$f" "$SETUP/overrides/"; done
+  # eur: the USA -> EUR address map the setup translates them with for the
+  # EUR Special Edition (addresses only)
+  rm -rf "$SETUP/eur"; mkdir -p "$SETUP/eur"
+  cp "$HERE/dev/region/eur/map-eur.tsv" "$HERE/dev/region/eur/manual.tsv" "$SETUP/eur/"
+  # jpprep: the Japanese build's, once dev/region/bringup.sh jpn made it
+  # (the map, its manual lines, and build.txt: the code hash it is made for)
+  rm -rf "$SETUP/jpn"
+  if [ -f "$HERE/dev/region/jpn/map-jpn.tsv" ] && [ -f "$HERE/dev/region/jpn/build.txt" ]; then
+    mkdir -p "$SETUP/jpn"
+    cp "$HERE/dev/region/jpn/map-jpn.tsv" "$HERE/dev/region/jpn/manual.tsv" "$HERE/dev/region/jpn/build.txt" "$SETUP/jpn/"
+  fi
   # Haiku's own assets: the HD sunglasses layer (drawn by Haiku) and the
   # pipeline keys
   rm -rf "$SETUP/assets"; mkdir -p "$SETUP/assets/builtin"
@@ -115,6 +127,23 @@ if step derived; then
   fi
   [ -f "$PACK" ] || { echo "no $PACK"; exit 1; }
   cp "$PACK" "$SETUP/derived.pack"
+  # eur2: the EUR game's recipes (Haiku's text in its five languages, its
+  # button prompt sheets); REMAKE_DERIVED_EUR=1 makes them again from
+  # EUR_FILES (dev/eur/text/make_text.py's and dev/eur/glyphs.py's output,
+  # default WORK/eur-files) and EUR_ROMFS
+  EPACK="$HERE/dev/builder/derived-eur.pack"
+  if [ "${REMAKE_DERIVED_EUR:-0}" = 1 ]; then
+    "$REL/Haiku Setup.exe" --make-derived-eur "$(wpath "${EUR_FILES:-$WORK/eur-files}")" "$(wpath "${EUR_ROMFS:?set EUR_ROMFS to the EUR RomFS}")" "$(wpath "$EPACK")" "$(wpath "$WORK/release-derived-eur-report.tsv")"
+  fi
+  if [ -f "$EPACK" ]; then cp "$EPACK" "$SETUP/derived-eur.pack"; else rm -f "$SETUP/derived-eur.pack"; fi
+  # jpprep: the Japanese game's (Haiku's text in Japanese), made with
+  # REMAKE_DERIVED_JPN=1 from JPN_FILES (dev/eur/text/make_text.py's J
+  # output, default WORK/jpn-files) and JPN_ROMFS
+  JPACK="$HERE/dev/builder/derived-jpn.pack"
+  if [ "${REMAKE_DERIVED_JPN:-0}" = 1 ]; then
+    "$REL/Haiku Setup.exe" --make-derived-jpn "$(wpath "${JPN_FILES:-$WORK/jpn-files}")" "$(wpath "${JPN_ROMFS:?set JPN_ROMFS to the Japanese RomFS}")" "$(wpath "$JPACK")"
+  fi
+  if [ -f "$JPACK" ]; then cp "$JPACK" "$SETUP/derived-jpn.pack"; else rm -f "$SETUP/derived-jpn.pack"; fi
 fi
 
 if step rest; then

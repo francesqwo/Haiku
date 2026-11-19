@@ -4,7 +4,7 @@
 
 <p align="center"><b>Fire Emblem Fates, recompiled for PC.</b></p>
 
-Haiku is a native Windows port of Fire Emblem Fates (Special Edition, USA). The game's own ARM code is statically recompiled to x86-64, and everything around it, from graphics and audio to files, saves, input and the system services, is native PC code. Nothing is emulated. On top of that it adds what a PC version should have: an options menu, controllers, widescreen and ultrawide, high frame rates, the bottom screen on one display, mods, a randomizer and online battles.
+Haiku is a native Windows port of Fire Emblem Fates Special Edition: the US release, the European release in five languages, and the Japanese release, *Fire Emblem if*. The game's own ARM code is statically recompiled to x86-64, and everything around it, from graphics and audio to files, saves, input and the system services, is native PC code. Nothing is emulated. On top of that it adds what a PC version should have: an options menu, controllers, widescreen and ultrawide, high frame rates, the bottom screen on one display, mods, a randomizer and online battles.
 
 > [!IMPORTANT]
 > **This repository and its downloads contain no game files.** There is no part of Fire Emblem Fates here: no code, art, audio, text or keys. To play, you need your own legally obtained copy of the game, dumped by you. Haiku builds itself on your PC from that dump. See [No game files included](#no-game-files-included).
@@ -24,6 +24,13 @@ The Haiku Setup launcher, which checks your dump and builds the game:
 - **Static recompilation, no emulation.** The game's code is recompiled ahead of time to native x86-64 code. There is no CPU interpreter, emulated GPU, sound chip, kernel or system service in Haiku.exe: each run ends by checking that nothing emulated ran.
 - **Native Vulkan renderer.** The game's draw lists are rendered directly on your GPU, including 3D models, lighting, terrain, shadows, effects, particles and movies.
 - **Native audio**: the game's own sound driver feeds a native mixer. **Native files and saves**: the game is installed as a plain folder, and saves are plain files.
+
+### Three versions of the game
+
+- **US** (`CTR-P-BFZE`), **European** (`CTR-P-BFZP`) and **Japanese** (*Fire Emblem if*, `CTR-P-BFZJ`) Special Editions. Haiku Setup recognises which one your dump is and builds that version; each has its own DLC and its own saves.
+- **The European release** plays in English, French, German, Spanish or Italian (Options > Interface > Game Language). Haiku's own menus and added text come in every language, made from your dump.
+- **The Japanese release** runs with its own script and voices, and Haiku's menus in Japanese (or English: Options > Interface > Menu Language). It keeps what the Western releases don't have: **My Room's petting minigame** (drag with the mouse), the **Festival of Bonds** and **Cipher** DLC, and **Corrin's three speaking styles** per gender.
+- **Japanese voices** for the US and European releases: on Haiku Setup's Play screen, **Add Japanese voices…** takes the voice files from a dump that has them, the Japanese release or an undub, and the DLC's from the Japanese DLC. Switch between English and Japanese on the Play screen or in Options > Audio.
 
 ### Graphics
 
@@ -66,6 +73,7 @@ The Haiku Setup launcher, which checks your dump and builds the game:
 - **Skip Story**: skipped story scenes aren't shown at all, while battles, boss quotes and enemy phases stay untouched.
 - **Enemy Targeting Lines**: on the map, a line from each enemy to the unit its own AI will attack next enemy phase.
 - **Growth Rates button** on the bottom screen's unit status.
+- **Divine Pulse**, off by default: turn back time on a battle map, as in Three Houses and Engage. A timeline of the battle's moments (your actions and the enemy's) shows the map at each one as you scroll, and you confirm the one to return to. Charges grow with the story as in Three Houses (up to 13, 10 on Lunatic), or set a fixed number or unlimited; they refill every map. It's in the map menu, on a rebindable key, and it offers itself before a defeat.
 - **Boon/bane stats** shown when you choose Corrin's boon and bane.
 - **S-supports with anyone**: Corrin can S-support any partner, of either gender, using the game's own scenes with Corrin's lines regendered.
 - **Choose Kana's gender**: ask when Kana appears, keep the game's own, male, female or random.
@@ -96,6 +104,7 @@ A **Cheats** tab, off by default:
 - **Battle**: 100% critical or hit, enemies always miss, no damage, one-hit kills, move again, unlimited movement, Dragon Veins for anyone, a frozen turn count, an EXP multiplier, perfect level-ups, any class using any weapon.
 - **Items & Resources**: gold, a full convoy, unlimited seals, My Castle's resources.
 - **Story & Supports**: every support conversation, support ranks, and Chapter Select.
+- **Save States**: eight slots with a thumbnail, the date and where you were (the chapter and turn, or My Castle), plus quick save and quick load keys. They're kept beside Haiku.exe and never touch the game's own saves.
 
 ### Mods
 
@@ -105,6 +114,20 @@ A **Cheats** tab, off by default:
 - **Code mods**: `code.ips`, IPS32, `code.bps`, `code.bin` and `exheader.bin` patches are **recompiled to native code**, not interpreted. Haiku needs a C compiler for that and asks before downloading one.
 - **Native plugins** in C (or anything that makes a DLL), with hooks before and after the game's functions, per-frame callbacks, memory access and options: see [`sdk/haiku_mod.h`](sdk/haiku_mod.h).
 - **No mods come with Haiku.** Mods made by others, HD texture packs for example, belong to their authors; get them from them.
+- **Haiku's own text is kept under text mods.** When a mod replaces a message file, Haiku adds its own lines to it (Kana's chosen gender, same-gender S-supports, End Turn, the Sunglasses) and fills in any line the mod's file lacks from the game's, so nothing shows up blank.
+- **A code patch made for another release** (US, European or Japanese) is never applied to the build of a different one: the Mods screen says it's left out, and the mod's files are still used. A mod can name its game in `mod.toml` (`title = "0004000000179800"`).
+
+#### Fan translations of the Japanese game
+
+Haiku can use the fan translations made for the Japanese release, *Fire Emblem if*: **Team If's translation** (the [Fire Emblem if fan translation project](https://github.com/TeamIf/FireEmblemIf-FanTranslation)) and **cris1010's "Fire Emblem Fates Uncensored Patch"** (Team If's work continued, released on the Varis Hangout forum). Neither comes with Haiku; get them from their own pages.
+
+- **Team If:** put the release's zip in the `mods` folder as it is, then turn it on in the Mods screen.
+- **Uncensored Patch:** it comes as a RAR, which Haiku can't open. Extract it with 7-Zip (the password is on the patch's own page), and put the extracted folder (or just its `rom` folder) in `mods`.
+- The patcher (IfPatcher.exe) is never run.
+- **On the Japanese release** (the best fit, since the translations were made for it): the files go in as they are, and the patch's `dlc` folders are laid over your own Japanese DLC, so its patched DLC file isn't needed. You get the whole translated game with the Japan-only content: the petting minigame, the Festival of Bonds, the original script and Corrin's speaking styles. Haiku's menus and its added lines (Kana's question, same-gender S-supports) switch to English, made from the translation's own lines.
+- **On the US or European release:** Haiku lays the files out as Team If's patcher does (`m/X` becomes `m/@E/X`) and trims them to what that game reads. The patch's Japanese fonts are left out: the game's own fonts draw the translation, and the few signs they can't show (such as ō, or the ≪ ≫ around dragon speech) are written as the nearest ones they can. To use the patch's fonts anyway, add `options = { fonts = 1 }` to the mod's entry in `userdata/haiku/mods.toml`. What stays as that game has it: the petting minigame is cut from its code, the Japan-only DLC can't run, DLC maps keep their English text, and a line the translation doesn't have is the game's own. **Speaking Style** (Options > Gameplay, or the avatar creator's voice) gives Corrin the Japanese script's three speaking styles. The translations work with **Voices: Japanese**; on the European release the translation shows when the Game Language is English.
+- The patch's title logo is used.
+- A save state remembers the mods it was made with, and won't load once a translation has been turned on or off since; the game's own saves are fine either way.
 
 ### Online battles
 
@@ -114,7 +137,7 @@ A **Cheats** tab, off by default:
 
 ## Getting started
 
-1. **Dump your game.** You need your own Fire Emblem Fates **Special Edition (USA)** cartridge, dumped and **decrypted** with GodMode9 on your own 3DS: a `.3ds`/`.cci`, `.cia` or `.cxi`, or the sdmc folder of Citra or Azahar with the game installed. Optionally dump your DLC the same way (a decrypted `.cia`). Haiku never needs or asks for console keys.
+1. **Dump your game.** You need your own Fire Emblem Fates **Special Edition** cartridge (US, European or Japanese), dumped and **decrypted** with GodMode9 on your own 3DS: a `.3ds`/`.cci`, `.cia` or `.cxi`, or the sdmc folder of Citra or Azahar with the game installed. Optionally dump your DLC the same way (a decrypted `.cia`). Haiku never needs or asks for console keys.
 2. **Download** `Haiku.zip` from the [Releases](https://github.com/tyle-beep/Haiku/releases) page and extract it somewhere you can write to, for example `C:\Games\Haiku`. No administrator rights are needed.
 3. **Run `Haiku Setup.exe`**, select your dump, then your DLC (or continue without it).
 4. **Build.** Haiku Setup checks your dump against its own hashes, installs the game's files, makes Haiku's own files from them, recompiles the game's code and compiles it with the bundled compiler. It takes **about 10 to 30 minutes**, once, and runs at low priority. If it stops, start it again and it carries on.
@@ -146,7 +169,7 @@ The dev scripts take their paths from the environment (`dev/env.sh`: `HAIKU_WORK
 From your own cartridge. Haiku only works with a dump you made yourself of a copy you own. This project does not provide ROMs, keys or game files, and won't help you find them. Issues asking for them are closed.
 
 **Which version of the game works?**
-Fire Emblem Fates Special Edition, USA (`CTR-P-BFZE`). Haiku Setup tells you if a dump is a different version, region or edition, still encrypted, or incomplete.
+Fire Emblem Fates Special Edition: the US release (`CTR-P-BFZE`), the European release (`CTR-P-BFZP`) and the Japanese release, *Fire Emblem if* (`CTR-P-BFZJ`). The DLC must be the one for the same release (the region-free DLC also works with the European game, in English). Haiku Setup tells you if a dump is a different version or edition, still encrypted, or incomplete, and if a DLC doesn't fit your game.
 
 **Is it emulation?**
 No. The game's code is recompiled into a native program ahead of time, and the 3DS's graphics, sound and system are replaced by native PC code.

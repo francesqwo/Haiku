@@ -2,8 +2,38 @@
 //! file holds a header, then the state of everything but memory as
 //! postcard writes it, then each memory, all of them in LZ4. a state is for
 //! the game it was saved from and the version of Zakuro that saved it.
+//!
+//! statesnd: after memory, a section of its own holds the native sound
+//! layer (`pcos::snd::NativeSnd::saved`: the mixer's voices, their queues
+//! and play positions), so the music and the sounds playing go on from the
+//! saved moment when it is loaded, in this process or another. A state
+//! from before has no such section and loads as it always did (the voices
+//! start again with the game's next sound); a build from before reads the
+//! five sections it knows and leaves the last one.
+//!
+//! statecheck: after that, when the frontend gave one (`set_tag`), a
+//! section saying what the console was started with: for Haiku, the file
+//! layer under the game (its mods, voices, own files, language). The
+//! frontend reads it back with `tag` before loading and refuses a state
+//! made with another layer. A state without it loads as before; a build
+//! from before reads the sections it knows and leaves this one.
 
 pub(crate) mod arrays;
+// pulse: Divine Pulse's snapshots, kept in memory as the pages that changed
+pub mod rewind;
+// pulsefix: the overrides' own part of the console's state, and the check
+// that a moment or a state came back whole
+pub mod check;
+pub mod keep;
+
+/// pulsefix, tests: the tests that put a console back (states, moments) run
+/// one at a time, since what the overrides keep (keep.rs) is the program's,
+/// shared by every test of the process.
+#[cfg(test)]
+pub(crate) fn serial() -> std::sync::MutexGuard<'static, ()> {
+    static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    SERIAL.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 use std::sync::Arc;
 
@@ -34,6 +64,26 @@ struct SavedRef<'a> {
     gpu: zakuro_gpu::state::GpuState,
     map: MapState,
     console: Console,
+}
+
+/// pulsefix (the check): the parts of a rest as `save_rest` wrote it, each
+/// as a JSON value, whose maps are in key order: two equal consoles give
+/// equal values, whatever order their HashMaps keep.
+pub(crate) fn rest_parts(bytes: &[u8]) -> Result<Vec<(&'static str, serde_json::Value)>, String> {
+    let saved: Saved = postcard::from_bytes(bytes).map_err(|error| format!("the rest could not be read, {error}"))?;
+    fn value<T: Serialize>(part: &T) -> serde_json::Value {
+        serde_json::to_value(part).unwrap_or_else(|error| serde_json::Value::String(format!("not comparable: {error}")))
+    }
+    Ok(vec![
+        ("cpu", value(&saved.cpu)),
+        ("kernel", value(&saved.kernel)),
+        ("services", value(&saved.services)),
+        ("files", value(&saved.files)),
+        ("cro", value(&saved.cro)),
+        ("gpu", value(&saved.gpu)),
+        ("map", value(&saved.map)),
+        ("console", value(&saved.console)),
+    ])
 }
 
 /// the same, as it is read back.
@@ -95,6 +145,40 @@ fn images(system: &System) -> Images {
 impl System {
     /// the console as it is, between frames, as a saved state.
     pub fn save_state(&mut self) -> Result<Vec<u8>, String> {
+        let state = self.save_rest()?;
+        let mut out = Vec::new();
+        out.extend_from_slice(MAGIC);
+        out.extend_from_slice(&(VERSION.len() as u32).to_le_bytes());
+        out.extend_from_slice(VERSION.as_bytes());
+        out.extend_from_slice(&self.kernel.program_id.to_le_bytes());
+        section(&mut out, &state);
+        let phys = &self.memory.phys;
+        for memory in [&phys.fcram, &phys.vram, &phys.dsp_ram, &phys.axi_wram] {
+            section(&mut out, memory);
+        }
+        // statesnd: the native sound layer, after memory
+        section(&mut out, &self.services.dsp.native.saved()?);
+        // statecheck: what the console was started with, last
+        let tag = TAG.lock().map(|tag| tag.clone()).unwrap_or_default();
+        if !tag.is_empty() {
+            let mut bytes = TAG_MAGIC.to_vec();
+            bytes.extend_from_slice(&tag);
+            section(&mut out, &bytes);
+        }
+        // pulsefix: the overrides' own state (their records of guest calls
+        // under way, the guest objects they hold) and the tails waiting,
+        // last: a build from before reads the sections it knows
+        if keep::active() {
+            section(&mut out, &keep::section(&keep::keep())?);
+        }
+        Ok(out)
+    }
+
+    /// pulse: everything of a saved state but memory, as postcard writes it
+    /// (what the host's GPU drew comes down into memory first, so that
+    /// memory as it stands goes with it). `state::rewind` keeps memory
+    /// itself, as the pages that changed.
+    pub fn save_rest(&mut self) -> Result<Vec<u8>, String> {
         // what the host's GPU drew comes down first, so that memory holds
         // all of it
         let linear_base = self.kernel.linear_base;
@@ -105,6 +189,9 @@ impl System {
             let saved = file.save((&images, &layers)).ok_or_else(|| format!("the open file {} reads from no image of the game's", file.path))?;
             files.push((handle, saved));
         }
+        // pulsefix: in the handles' order, not the HashMap's, so the same
+        // console writes the same bytes
+        files.sort_by_key(|(handle, _)| *handle);
         let console = Console {
             exited: self.exited,
             broke: self.broke,
@@ -137,25 +224,12 @@ impl System {
             map: self.memory.save_map(),
             console,
         };
-        let state = postcard::to_allocvec(&saved).map_err(|error| format!("the state could not be written, {error}"))?;
-
-        let mut out = Vec::new();
-        out.extend_from_slice(MAGIC);
-        out.extend_from_slice(&(VERSION.len() as u32).to_le_bytes());
-        out.extend_from_slice(VERSION.as_bytes());
-        out.extend_from_slice(&self.kernel.program_id.to_le_bytes());
-        section(&mut out, &state);
-        let phys = &self.memory.phys;
-        for memory in [&phys.fcram, &phys.vram, &phys.dsp_ram, &phys.axi_wram] {
-            section(&mut out, memory);
-        }
-        Ok(out)
+        postcard::to_allocvec(&saved).map_err(|error| format!("the state could not be written, {error}"))
     }
 
     /// puts the console back as a saved state had it. nothing changes when
     /// the state is not one this game and this Zakuro can take.
     pub fn load_state(&mut self, bytes: &[u8]) -> Result<(), String> {
-        self.idle_interrupted(true);
         let mut reader = Reader(bytes);
         if reader.take(MAGIC.len())? != MAGIC {
             return Err("it is not a saved state".into());
@@ -169,13 +243,91 @@ impl System {
             return Err("it was saved from another game".into());
         }
         let state = reader.section()?;
-        let saved: Saved = postcard::from_bytes(&state).map_err(|error| format!("the state could not be read, {error}"))?;
         let memories = [reader.section()?, reader.section()?, reader.section()?, reader.section()?];
         let phys = &self.memory.phys;
         let sizes = [phys.fcram.len(), phys.vram.len(), phys.dsp_ram.len(), phys.axi_wram.len()];
         if memories.iter().zip(sizes).any(|(memory, size)| memory.len() != size) {
             return Err("the console's memory is not the size the state has".into());
         }
+        // statesnd: the native sound layer's section, when the state has one
+        let sound = if reader.0.is_empty() {
+            log::info!("audio: the loaded state has no sound section (saved before statesnd); the voices playing start again with the game's next sound");
+            None
+        } else {
+            match reader.section().and_then(|bytes| crate::pcos::snd::NativeSnd::read_saved(&bytes)) {
+                Ok(saved) => Some(saved),
+                Err(error) => {
+                    log::warn!("audio: the loaded state's sound section was left out ({error}); the voices playing start again with the game's next sound");
+                    None
+                }
+            }
+        };
+        // pulsefix: the overrides' own state, after the setup tag when there
+        // is one; a state from before has none, and the overrides start
+        // from nothing of their own (as when the program started), never
+        // from what this moment left in them
+        let mut kept = None;
+        while !reader.0.is_empty() {
+            let Ok(bytes) = reader.section() else { break };
+            if bytes.starts_with(keep::SECTION_MAGIC) {
+                match keep::read_section(&bytes) {
+                    Ok(read) => kept = Some(read),
+                    Err(error) => log::warn!("pulsefix: the loaded state's overrides section was left out ({error})"),
+                }
+            }
+        }
+        if kept.is_none() && keep::active() {
+            log::info!("pulsefix: the loaded state keeps none of the overrides' own state (saved before pulsefix); they start from nothing of their own");
+        }
+        self.load_rest(&state, &mut |phys| {
+            for (memory, store) in memories.iter().zip([&mut phys.fcram, &mut phys.vram, &mut phys.dsp_ram, &mut phys.axi_wram]) {
+                store.copy_from_slice(memory);
+            }
+        })?;
+        // statesnd: load_rest left the native layer new; the voices come
+        // back as the state had them, going on from the saved moment (the
+        // sound already made for the old moment went with the services)
+        if let Some(saved) = sound {
+            self.services.dsp.native.put_back_saved(saved, &mut self.memory);
+        }
+        // pulsefix: and the overrides' own state with it
+        // (FATES_STATE_HOSTKEEP=0, tests: left as it is, as before pulsefix)
+        if !std::env::var_os("FATES_STATE_HOSTKEEP").is_some_and(|v| v == "0") {
+            keep::put_back(&kept.unwrap_or_else(keep::initial));
+        }
+        crate::pcos::snd::wav::state_loaded();
+        Ok(())
+    }
+
+    /// pulsefix (tests, FATES_STATE_VERIFY=1): right after `load_state(bytes)`,
+    /// whether the console is the state's, everything of it (state/check.rs).
+    pub fn check_loaded_state(&mut self, bytes: &[u8]) -> Result<check::Report, String> {
+        let mut reader = Reader(bytes);
+        reader.take(MAGIC.len())?;
+        let length = reader.u32()? as usize;
+        reader.take(length)?;
+        reader.u64()?;
+        let rest = reader.section()?;
+        let memories = [reader.section()?, reader.section()?, reader.section()?, reader.section()?];
+        let sound = if reader.0.is_empty() { None } else { Some(reader.section()?) };
+        let mut host = None;
+        while !reader.0.is_empty() {
+            let section = reader.section()?;
+            if section.starts_with(keep::SECTION_MAGIC) {
+                host = Some(keep::read_section(&section)?);
+            }
+        }
+        check::compare_state(self, &check::StateParts { rest, memories, sound, host })
+    }
+
+    /// pulse: the half of load_state after memory: the rest of a state as
+    /// save_rest wrote it. `memory` puts memory back first, once the rest
+    /// is known to be readable (`state::rewind` passes one that does
+    /// nothing, having put the pages back itself). nothing changes on an
+    /// error.
+    pub fn load_rest(&mut self, state: &[u8], memory: &mut dyn FnMut(&mut crate::memory::PhysicalMemory)) -> Result<(), String> {
+        self.idle_interrupted(true);
+        let saved: Saved = postcard::from_bytes(state).map_err(|error| format!("the state could not be read, {error}"))?;
         let (images, layers) = images(self);
         let mut files = std::collections::HashMap::new();
         for (handle, file) in saved.files {
@@ -184,10 +336,7 @@ impl System {
         }
 
         // all of it read, the console takes it
-        let phys = &mut self.memory.phys;
-        for (memory, store) in memories.iter().zip([&mut phys.fcram, &mut phys.vram, &mut phys.dsp_ram, &mut phys.axi_wram]) {
-            store.copy_from_slice(memory);
-        }
+        memory(&mut self.memory.phys);
         self.memory.load_map(saved.map)?;
         self.cpu = saved.cpu;
         self.kernel = saved.kernel;
@@ -250,6 +399,76 @@ impl System {
     }
 }
 
+/// statecheck: the tag section's first bytes, changed when its layout does.
+const TAG_MAGIC: &[u8; 8] = b"HKSETUP1";
+
+/// statecheck: what the frontend says the console was started with, written
+/// in every state saved from now on.
+static TAG: std::sync::Mutex<Vec<u8>> = std::sync::Mutex::new(Vec::new());
+
+/// statecheck: the tag every state saved from now on carries (empty: none).
+pub fn set_tag(tag: Vec<u8>) {
+    if let Ok(mut current) = TAG.lock() {
+        *current = tag;
+    }
+}
+
+/// statecheck: a state's tag, read without loading it: none for a state
+/// saved without one (every state from before statecheck). The memories
+/// are skipped over, not unpacked, so this is quick.
+pub fn tag(bytes: &[u8]) -> Result<Option<Vec<u8>>, String> {
+    let mut reader = Reader(bytes);
+    if reader.take(MAGIC.len())? != MAGIC {
+        return Err("it is not a saved state".into());
+    }
+    let length = reader.u32()? as usize;
+    reader.take(length)?;
+    reader.u64()?;
+    // the rest, the four memories and the sound
+    for _ in 0..6 {
+        if reader.0.is_empty() {
+            return Ok(None);
+        }
+        reader.skip_section()?;
+    }
+    // the tag, then (pulsefix) the overrides' state, which is not a tag
+    while !reader.0.is_empty() {
+        let section = reader.section()?;
+        if section.starts_with(keep::SECTION_MAGIC) {
+            continue;
+        }
+        return match section.strip_prefix(TAG_MAGIC.as_slice()) {
+            Some(tag) => Ok(Some(tag.to_vec())),
+            None => Err("its setup section is of a layout this build doesn't know".into()),
+        };
+    }
+    Ok(None)
+}
+
+/// statecheck: the game's files as the console sees them: for the game, its
+/// update and each DLC, the size of its image and, where mods or a folder
+/// install laid a RomFS of its own over it, that RomFS's layout
+/// (`Layered::layout_digest`: every file's name, offset and size). Two
+/// consoles with the same list read every file at the same place.
+pub fn file_layout(system: &System) -> Vec<(String, u64)> {
+    let mut out = Vec::new();
+    let layered = |layered: &Option<Arc<zakuro_fs::layered::Layered>>| layered.as_ref().map_or(0, |layered| layered.layout_digest());
+    if let Some(title) = &system.title {
+        out.push(("game".to_owned(), title.shared_image().len() as u64 ^ layered(&title.layered).rotate_left(1)));
+        if let Some(update) = title.update() {
+            out.push(("update".to_owned(), update.title.shared_image().len() as u64 ^ layered(&update.title.layered).rotate_left(1)));
+        }
+    }
+    for dlc in &system.dlc {
+        let mut digest = dlc.image().len() as u64;
+        for (index, folder) in &dlc.folders {
+            digest = digest.rotate_left(5) ^ (*index as u64) ^ folder.layout_digest().rotate_left(17);
+        }
+        out.push((format!("dlc {:016X}", dlc.title_id), digest));
+    }
+    out
+}
+
 /// a part of the file, how long it is in LZ4 and its bytes in LZ4.
 fn section(out: &mut Vec<u8>, bytes: &[u8]) {
     let compressed = lz4_flex::compress_prepend_size(bytes);
@@ -278,6 +497,13 @@ impl<'a> Reader<'a> {
         Ok(u64::from_le_bytes(self.take(8)?.try_into().unwrap()))
     }
 
+    /// statecheck: past a section without unpacking it.
+    fn skip_section(&mut self) -> Result<(), String> {
+        let length = self.u64()?;
+        self.take(usize::try_from(length).map_err(|_| "a part of the state is too long")?)?;
+        Ok(())
+    }
+
     fn section(&mut self) -> Result<Vec<u8>, String> {
         let length = self.u64()?;
         let compressed = self.take(usize::try_from(length).map_err(|_| "a part of the state is too long")?)?;
@@ -295,6 +521,7 @@ mod tests {
     /// is loaded, registers, memory, the memory map and the kernel's objects.
     #[test]
     fn a_state_puts_everything_back() {
+        let _serial = crate::state::serial();
         let (mut system, _) = system_with_thread();
         let page = system.memory.phys.allocate(MemoryRegion::Application, 0x2000).unwrap();
         system.memory.map(0x0800_0000, page.addr, 0x2000, Permission::RW, MemoryState::Private);
@@ -324,6 +551,7 @@ mod tests {
     /// in another session, puts back what it overwrote.
     #[test]
     fn a_state_keeps_what_an_enhancement_overwrote() {
+        let _serial = crate::state::serial();
         let (mut system, _) = system_with_thread();
         let page = system.memory.phys.allocate(MemoryRegion::Application, 0x1000).unwrap();
         system.memory.map(0x0800_0000, page.addr, 0x1000, Permission::RW, MemoryState::Private);
@@ -351,6 +579,7 @@ mod tests {
     /// nothing changes.
     #[test]
     fn a_state_of_another_game_is_turned_down() {
+        let _serial = crate::state::serial();
         let (mut system, _) = system_with_thread();
         let state = system.save_state().unwrap();
         system.cpu.regs[0] = 5;
@@ -358,5 +587,73 @@ mod tests {
         assert!(system.load_state(&state).is_err());
         assert!(system.load_state(b"nothing").is_err());
         assert_eq!(system.cpu.regs[0], 5);
+    }
+
+    /// statesnd: the native sound layer comes back with a state, its voices
+    /// as they were; a state from before (no sound section) still loads,
+    /// with the layer new, as it always did.
+    #[test]
+    fn a_state_keeps_the_sound_and_one_without_it_still_loads() {
+        let _serial = crate::state::serial();
+        let (mut system, _) = system_with_thread();
+        let snd = &mut system.services.dsp.native;
+        snd.initialized = true;
+        snd.mixer.frames = 4321;
+        snd.mixer.voices[5].enabled = true;
+        snd.mixer.pending[7].rate = Some(0.75);
+        let state = system.save_state().unwrap();
+        let sound_section = {
+            let mut out = Vec::new();
+            super::section(&mut out, &system.services.dsp.native.saved().unwrap());
+            out.len()
+        };
+        system.services.dsp.native = Default::default();
+
+        system.load_state(&state).unwrap();
+        let snd = &system.services.dsp.native;
+        assert!(snd.initialized);
+        assert_eq!(snd.mixer.frames, 4321);
+        assert!(snd.mixer.voices[5].enabled);
+        assert_eq!(snd.mixer.pending[7].rate, Some(0.75));
+
+        // the same state as a build from before wrote it
+        let before = &state[..state.len() - sound_section];
+        system.load_state(before).unwrap();
+        let snd = &system.services.dsp.native;
+        assert!(!snd.initialized);
+        assert_eq!(snd.mixer.frames, 0);
+        // and a damaged section is left out, the rest loads
+        let mut damaged = before.to_vec();
+        super::section(&mut damaged, b"SNDNAT01 not postcard");
+        system.load_state(&damaged).unwrap();
+        assert!(!system.services.dsp.native.initialized);
+    }
+
+    /// statecheck: a state's setup tag is read back without loading it; a
+    /// state without one (every state from before) has none and still
+    /// loads; a state with one loads as before.
+    #[test]
+    fn a_state_keeps_its_setup_tag() {
+        let _serial = crate::state::serial();
+        let (mut system, _) = system_with_thread();
+        let saved_r2 = system.cpu.regs[2];
+        let plain = system.save_state().unwrap();
+        assert_eq!(super::tag(&plain).unwrap(), None);
+        // the tag section as save_state writes it with a tag set (the tag
+        // itself is a global, which other tests running at once must not see)
+        let mut tagged = plain.clone();
+        let mut bytes = super::TAG_MAGIC.to_vec();
+        bytes.extend_from_slice(b"{\"mods\":1}");
+        super::section(&mut tagged, &bytes);
+        assert_eq!(super::tag(&tagged).unwrap().as_deref(), Some(&b"{\"mods\":1}"[..]));
+        system.cpu.regs[2] = 11;
+        system.load_state(&tagged).unwrap();
+        assert_eq!(system.cpu.regs[2], saved_r2);
+        system.load_state(&plain).unwrap();
+        assert!(super::tag(b"nothing").is_err());
+        // a section of another layout is an error, not a tag
+        let mut other = plain.clone();
+        super::section(&mut other, b"HKSETUP9 later");
+        assert!(super::tag(&other).is_err());
     }
 }

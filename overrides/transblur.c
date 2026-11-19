@@ -92,3 +92,9 @@ RECOMP_OVERRIDE(0x001AAAA0) {
     }
     CALL(RECOMP_ORIGINAL(0x001AAAA0));
 }
+
+/* pulsefix: what of this file is the console's state, kept with Divine
+   Pulse's moments and saved states (overrides/keep.c) */
+void transblur_keep(void (*add)(const char *, void *, uint32_t)) {
+    add("transblur.tb", &tb, sizeof tb);
+}

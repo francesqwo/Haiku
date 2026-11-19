@@ -137,6 +137,8 @@ struct Scene {
 
 fn options_at(fates: &mut FatesUi, tab: usize, page: Page, row: usize) {
     super::cheats::snapshot_reset(); // cheats: no question left from a scene before
+    crate::haiku_voices::set_asking(false); // jpvoice: nor the voices' restart question
+    super::states::snapshot_reset(); // statecheck: nor a save state's dialog
     fates.options.show(0.0);
     fates.options.select(tab, page, row);
 }
@@ -156,6 +158,28 @@ const SCENES: &[Scene] = &[
     } },
     Scene { name: "options-bottom", setup: |f, _, _| options_at(f, 1, Page::Main, 0) },
     Scene { name: "options-audio", setup: |f, _, _| options_at(f, 2, Page::Main, 2) },
+    // jpvoice: Voices (with the voice layer installed), as the game runs;
+    // then changed, with the restart row, and the restart's question
+    Scene { name: "options-voices", setup: |f, _, s| {
+        s.pc.voices = crate::haiku_voices::running();
+        crate::haiku_voices::chosen(s.pc.voices);
+        options_at(f, 2, Page::Main, 4);
+        s.pc.glyphs = crate::settings::Glyphs::Xbox;
+    } },
+    Scene { name: "options-voices-pending", setup: |f, _, s| {
+        s.pc.voices = crate::haiku_voices::other(crate::haiku_voices::running());
+        crate::haiku_voices::chosen(s.pc.voices);
+        options_at(f, 2, Page::Main, 5);
+        s.pc.glyphs = crate::settings::Glyphs::Xbox;
+    } },
+    Scene { name: "options-voices-confirm", setup: |f, _, s| {
+        s.pc.voices = crate::haiku_voices::other(crate::haiku_voices::running());
+        crate::haiku_voices::chosen(s.pc.voices);
+        options_at(f, 2, Page::Main, 5);
+        crate::haiku_voices::set_asking(true);
+        f.options.ask_restart();
+        s.pc.glyphs = crate::settings::Glyphs::Xbox;
+    } },
     Scene { name: "options-controls", setup: |f, _, _| options_at(f, 3, Page::Main, 5) },
     Scene { name: "options-keyboard", setup: |f, _, _| options_at(f, 3, Page::Keyboard, 9) },
     Scene { name: "options-controller-pad", setup: |f, _, s| {
@@ -173,6 +197,13 @@ const SCENES: &[Scene] = &[
         options_at(f, 4, Page::Main, 0);
         s.pc.glyphs = crate::settings::Glyphs::Xbox;
     } },
+    // tones: Speaking Style (with a translation on), the row on each style
+    // of the loaded game's Corrin (as it is when the run ends, gender kept)
+    Scene { name: "options-tones-1", setup: |f, _, _| tones_scene(f, 1) },
+    Scene { name: "options-tones-2", setup: |f, _, _| tones_scene(f, 2) },
+    Scene { name: "options-tones-3", setup: |f, _, _| tones_scene(f, 3) },
+    // tones: the Gameplay tab on Kana's Gender (row 10): what follows it
+    Scene { name: "options-gameplay-kana", setup: |f, _, _| options_at(f, 4, Page::Main, 10) },
     Scene { name: "options-gameplay-skip", setup: |f, _, s| {
         options_at(f, 4, Page::Main, 2);
         s.pc.skip_story = true;
@@ -278,6 +309,35 @@ const SCENES: &[Scene] = &[
         options_at(f, 6, Page::Main, 3);
         s.pc.glyphs = crate::settings::Glyphs::Xbox;
     } },
+    // codemods2: a code mod that can't be compiled, its note in plain words
+    Scene { name: "mods-code-failed", setup: |f, _, s| {
+        let failure = crate::haiku_codemods::Failure {
+            text: "It uses 1 instruction the PC can't run (the first at 0x00419A48).".into(),
+            mods: vec!["Broken Mod".into()],
+        };
+        f.env.mods.rows.push(super::mods::ModRow {
+            name: "Broken Mod".into(),
+            version: "1.0".into(),
+            author: "Someone".into(),
+            description: "A code mod Haiku can't compile.".into(),
+            enabled: true,
+            can_enable: true,
+            notes: vec![crate::haiku_mods::Note { warning: true, text: crate::haiku_codemods::failure_note(&failure) }],
+        });
+        options_at(f, 6, Page::Main, 4);
+        s.pc.glyphs = crate::settings::Glyphs::Xbox;
+    } },
+    // fanpatch: Team If's translation, and a Japanese code patch left out
+    Scene { name: "mods-fanpatch", setup: |f, _, s| {
+        f.env.mods.rows.extend(crate::haiku_fanpatch::sample_rows());
+        options_at(f, 6, Page::Main, 4);
+        s.pc.glyphs = crate::settings::Glyphs::Xbox;
+    } },
+    Scene { name: "mods-fanpatch-code", setup: |f, _, s| {
+        f.env.mods.rows.extend(crate::haiku_fanpatch::sample_rows());
+        options_at(f, 6, Page::Main, 5);
+        s.pc.glyphs = crate::settings::Glyphs::Xbox;
+    } },
     Scene { name: "mods-download", setup: |f, _, s| {
         options_at(f, 6, Page::Main, 5);
         f.options.ask_download(96);
@@ -330,6 +390,40 @@ const SCENES: &[Scene] = &[
         options_at(f, 7, Page::Cheats(1), 0);
     } },
     Scene { name: "cheats-items", setup: |f, _, _| options_at(f, 7, Page::Cheats(2), 0) },
+    // pulse: Divine Pulse's rows, the Save States section and a slot's
+    // dialog, and the rewind screen (as the run left it) and its question
+    Scene { name: "options-pulse", setup: |f, _, s| {
+        s.pc.divine_pulse = true;
+        options_at(f, 4, Page::Main, 11);
+    } },
+    Scene { name: "cheats-states-group", setup: |f, _, _| options_at(f, 7, Page::Main, 4) },
+    Scene { name: "cheats-states", setup: |f, _, s| {
+        s.pc.save_states = true;
+        options_at(f, 7, Page::Cheats(4), 2);
+    } },
+    Scene { name: "cheats-states-dialog", setup: |f, _, s| {
+        s.pc.save_states = true;
+        options_at(f, 7, Page::Cheats(4), 2);
+        super::states::snapshot_menu(0);
+    } },
+    // statecheck: a slot made with another file layer (its "!" and card),
+    // one made before Haiku checked, and why it can't be loaded: on the
+    // page, and in the game's message box (quick load during play)
+    Scene { name: "cheats-states-old", setup: |f, _, s| {
+        s.pc.save_states = true;
+        options_at(f, 7, Page::Cheats(4), 4);
+    } },
+    Scene { name: "cheats-states-refused", setup: |f, _, s| {
+        s.pc.save_states = true;
+        options_at(f, 7, Page::Cheats(4), 2);
+        super::states::snapshot_info(0);
+    } },
+    Scene { name: "states-refused", setup: |_, v, _| {
+        let first = crate::states::slots("", "").into_iter().flatten().find_map(|slot| slot.mismatch.and(slot.problem));
+        v.message = Some(first.unwrap_or_else(|| crate::statecheck::message(&[crate::statecheck::Change::Off("Team If translation".into())])));
+    } },
+    Scene { name: "pulse", setup: |_, _, _| crate::pulse::set_asking(None) },
+    Scene { name: "pulse-confirm", setup: |_, _, _| crate::pulse::set_asking(Some(true)) },
     // cheats2: the Battle page's last rows (Dragon Veins: Reuse, Capture Without a Prison)
     Scene { name: "cheats-battle-more", setup: |f, _, s| {
         s.pc.cheats.vein_reuse = true;
@@ -403,6 +497,13 @@ const SCENES: &[Scene] = &[
     } },
 ];
 
+/// tones: the Gameplay tab on Speaking Style (after Kana's Gender: row 11),
+/// Corrin's style shown as `style`.
+fn tones_scene(f: &mut FatesUi, style: u8) {
+    zakuro_core::tones::show(style);
+    options_at(f, 4, Page::Main, 11);
+}
+
 /// writes each scene at each size into dir.
 pub fn run(dir: &Path, system: &mut System) {
     let _ = std::fs::create_dir_all(dir);
@@ -441,7 +542,8 @@ fn picture(size: [usize; 2], top: &Shot, bottom: &Shot, scene: &Scene, chara: &O
     crate::haiku_import::snapshot_progress(scene.name == "mods-unpacking"); // hdpacks
     (scene.setup)(&mut fates, &mut view, &mut settings);
     // qol: the top screen where backdrop puts it, and the panel
-    if scene.name == "boonbane" {
+    // (pulse: the rewind screen sits on it too)
+    if scene.name == "boonbane" || scene.name.starts_with("pulse") {
         let (top_view, _) = zakuro_gpu::layout(size[0] as u32, size[1] as u32, Screens::LargeTop.screens(), zakuro_gpu::ScreenOrientation::North, top_width(top), false);
         view.top_screen = top_view.map(|v| Rect::from_min_size(Pos2::new(v.x, v.y), Vec2::new(v.width, v.height)));
         view.chara = chara.clone();

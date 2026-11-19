@@ -28,6 +28,8 @@
 //!   waitframe N        qol4: waits until the game's frame N (a loaded machine
 //!                      presents fewer pictures, the game's frames stay the game's)
 //!   capture NAME       qol4: the next frame presented, read back by the app itself
+//!   quick save|load    statesnd: the quick save or quick load key pressed (the
+//!                      Hotkey Slot, with Save States on)
 //!                      to NAME.png beside the script (Vulkan)
 //!   quit
 
@@ -233,6 +235,17 @@ impl App {
                     break;
                 }
                 // qol4: a key as the window's keyboard gives it
+                // pulse: Divine Pulse opened as its key opens it
+                "pulse" => crate::pulse::request_open(),
+                // pulsefix, tests: Enemy Targeting Lines on or off in the
+                // middle of a map, as Options turns them
+                "lines" => crate::info_ui::write(crate::info_ui::word::MODE, arg(1).parse().unwrap_or(1)),
+                // statesnd: the quick save and quick load keys
+                "quick" => match arg(1) {
+                    "save" => crate::input_api::press_action(crate::controls::PcAction::QuickSave),
+                    "load" => crate::input_api::press_action(crate::controls::PcAction::QuickLoad),
+                    other => log::warn!("ui script: no quick {other}"),
+                },
                 "winkey" => {
                     match toml::Value::String(arg(1).to_owned()).try_into::<winit::keyboard::KeyCode>() {
                         Ok(code) => winkey = Some(code),
@@ -264,6 +277,10 @@ impl App {
         self.fates.script = Some(script);
         if let Some(path) = capture {
             log::info!("ui script: capture {}", path.display());
+            // pulse2: where the output's recording is, to line its sound up
+            if let Some(samples) = self.audio.as_ref().and_then(|audio| audio.recorded()) {
+                println!("pulse2: capture {} at output sample {samples}", path.file_stem().map(|s| s.to_string_lossy()).unwrap_or_default());
+            }
             if let Some(crate::present::Backend::Vulkan(presenter)) = &mut self.backend {
                 presenter.request_capture(path);
             }

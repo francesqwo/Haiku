@@ -304,11 +304,16 @@ pub enum PcAction {
     /// info-ui: show or hide the growth rates on the lower screen's unit
     /// status.
     GrowthRates,
+    /// pulse: open Divine Pulse's rewind on a battle map.
+    DivinePulse,
+    /// pulse: save states (Cheats): save to, and load from, the chosen slot.
+    QuickSave,
+    QuickLoad,
 }
 
 impl PcAction {
     /// cameras: how many there are, for the arrays of them
-    pub const COUNT: usize = 9; // info-ui: was 8
+    pub const COUNT: usize = 12; // info-ui: was 8; pulse: was 9
     pub const ALL: [PcAction; PcAction::COUNT] = [
         PcAction::TouchClick,
         PcAction::Options,
@@ -319,6 +324,9 @@ impl PcAction {
         PcAction::CameraZoomIn,
         PcAction::CameraZoomOut,
         PcAction::GrowthRates, // info-ui
+        PcAction::DivinePulse, // pulse
+        PcAction::QuickSave,
+        PcAction::QuickLoad,
     ];
 }
 
@@ -496,6 +504,12 @@ pub struct Keys {
     // qol4: the key that opens and closes the options menu (Escape; files
     // without it get it, through serde(default) on the struct)
     pub options: Binds<KeyCode>,
+    // pulse: Divine Pulse's rewind (P), and the save states' quick save and
+    // quick load (F5 and F8, as the dev keys were; they work while the
+    // Cheats tab's Save States is on)
+    pub divine_pulse: Binds<KeyCode>,
+    pub quick_save: Binds<KeyCode>,
+    pub quick_load: Binds<KeyCode>,
 }
 
 impl Default for Keys {
@@ -537,6 +551,10 @@ impl Default for Keys {
             // info-ui: R for growth rates (G is the free camera's)
             growth_rates: Binds::of(&[KeyR]),
             options: Binds::of(&[Escape]), // qol4
+            // pulse
+            divine_pulse: Binds::of(&[KeyP]),
+            quick_save: Binds::of(&[F5]),
+            quick_load: Binds::of(&[F8]),
         }
     }
 }
@@ -612,6 +630,9 @@ impl Keys {
             ("Camera zoom in", &mut self.camera_zoom_in),
             ("Camera zoom out", &mut self.camera_zoom_out),
             ("Growth rates", &mut self.growth_rates), // info-ui
+            ("Divine Pulse", &mut self.divine_pulse), // pulse
+            ("Quick save state", &mut self.quick_save),
+            ("Quick load state", &mut self.quick_load),
             (OPTIONS_ROW, &mut self.options), // qol4: last, so the rows above keep their places
         ]
     }
@@ -697,6 +718,9 @@ impl Keys {
             PcAction::CameraZoomIn => Some(&self.camera_zoom_in),
             PcAction::CameraZoomOut => Some(&self.camera_zoom_out),
             PcAction::GrowthRates => Some(&self.growth_rates), // info-ui
+            PcAction::DivinePulse => Some(&self.divine_pulse), // pulse
+            PcAction::QuickSave => Some(&self.quick_save),
+            PcAction::QuickLoad => Some(&self.quick_load),
         }
     }
 }
@@ -735,6 +759,11 @@ pub struct PadButtons {
     // info-ui: unbound, as Game Speed: the 3DS uses every button; the
     // touch pointer presses the on-screen button
     pub growth_rates: Binds<PadButton>,
+    // pulse: unbound too (the System Menu has Divine Pulse); bind them in
+    // Controller Controls
+    pub divine_pulse: Binds<PadButton>,
+    pub quick_save: Binds<PadButton>,
+    pub quick_load: Binds<PadButton>,
 }
 
 impl Default for PadButtons {
@@ -771,6 +800,10 @@ impl Default for PadButtons {
             camera_zoom_in: Binds::none(),
             camera_zoom_out: Binds::none(),
             growth_rates: Binds::none(), // info-ui
+            // pulse
+            divine_pulse: Binds::none(),
+            quick_save: Binds::none(),
+            quick_load: Binds::none(),
         }
     }
 }
@@ -815,6 +848,9 @@ impl PadButtons {
             ("Camera zoom in", &mut self.camera_zoom_in),
             ("Camera zoom out", &mut self.camera_zoom_out),
             ("Growth rates", &mut self.growth_rates), // info-ui
+            ("Divine Pulse", &mut self.divine_pulse), // pulse
+            ("Quick save state", &mut self.quick_save),
+            ("Quick load state", &mut self.quick_load),
         ]
     }
 
@@ -850,6 +886,9 @@ impl PadButtons {
             PcAction::CameraZoomIn => &self.camera_zoom_in,
             PcAction::CameraZoomOut => &self.camera_zoom_out,
             PcAction::GrowthRates => &self.growth_rates, // info-ui
+            PcAction::DivinePulse => &self.divine_pulse, // pulse
+            PcAction::QuickSave => &self.quick_save,
+            PcAction::QuickLoad => &self.quick_load,
         }
     }
 

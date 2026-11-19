@@ -66,6 +66,10 @@ const GROWTH_BUTTON: &str = "ui/info-ui/GrowthButton.png";
 /// and PlayStation, at four times the size.
 const GLYPHS_XBOX: &str = "glyphs/xbox/tex1_512x256_E6F746B2E422F774_13_mip0.png";
 const GLYPHS_PS: &str = "glyphs/playstation/tex1_512x256_E6F746B2E422F774_13_mip0.png";
+/// jpn2: the Japanese game's atlas (its START button reads 閉じる), so
+/// its hash differs: Haiku Setup makes these sets from it (derived-jpn.pack)
+const GLYPHS_XBOX_JPN: &str = "glyphs/xbox/tex1_512x256_D24A377DDFA5BE67_13_mip0.png";
+const GLYPHS_PS_JPN: &str = "glyphs/playstation/tex1_512x256_D24A377DDFA5BE67_13_mip0.png";
 
 /// every piece of art the kit draws, by name.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -146,6 +150,8 @@ fn source(art: Art) -> Src {
         Art::ScrollDown => src(SW2, 129, 207, 28, 31),
         Art::Glyph(set, slot) => {
             let sheet = match set {
+                1 if zakuro_core::region::is_jpn() => GLYPHS_XBOX_JPN, // jpn2
+                2 if zakuro_core::region::is_jpn() => GLYPHS_PS_JPN,
                 1 => GLYPHS_XBOX,
                 2 => GLYPHS_PS,
                 _ => SW2,
@@ -282,7 +288,8 @@ struct Metric {
 /// the decoded sheets, kept to rebuild the textures at another factor.
 struct Sources {
     sheets: HashMap<&'static str, RgbaImage>,
-    font: RgbaImage,
+    /// jpprep: the font's sheets (the USA font has one; the Japanese, two)
+    font: Vec<RgbaImage>,
     metrics: Vec<Metric>,
 }
 
@@ -378,7 +385,11 @@ impl Kit {
             }
         }
         let font_path = dir.join("font/System_L_0.png");
-        let font = image::open(&font_path).map_err(|error| format!("{}: {error}", font_path.display()))?.to_rgba8();
+        let mut font = vec![image::open(&font_path).map_err(|error| format!("{}: {error}", font_path.display()))?.to_rgba8()];
+        // jpprep: the Japanese font's further sheets
+        while let Ok(sheet) = image::open(dir.join(format!("font/System_L_{}.png", font.len()))) {
+            font.push(sheet.to_rgba8());
+        }
         let metrics_path = dir.join("font/System_L-metrics.json");
         let text = std::fs::read_to_string(&metrics_path).map_err(|error| format!("{}: {error}", metrics_path.display()))?;
         let metrics: Vec<Metric> = serde_json::from_str(&text).map_err(|error| format!("{}: {error}", metrics_path.display()))?;
@@ -478,6 +489,7 @@ impl Kit {
 
     /// width of text in units at scale.
     pub fn measure(&self, text: &str, scale: f32) -> f32 {
+        let text = super::ja::tr(text); // jpprep
         text.chars().map(|c| self.glyph(c).map_or(0.0, |g| g.advance)).sum::<f32>() * scale
     }
 
@@ -504,6 +516,11 @@ impl Kit {
 
     /// splits text into lines no wider than width units.
     pub fn wrap(&self, text: &str, width: f32, scale: f32) -> Vec<String> {
+        // jpprep: Haiku's Japanese, which breaks between any two characters
+        let text = super::ja::tr(text);
+        if super::ja::is_cjk(&text) {
+            return self.wrap_cjk(&text, width, scale);
+        }
         let mut lines = Vec::new();
         for paragraph in text.split('\n') {
             let mut line = String::new();
@@ -515,6 +532,40 @@ impl Kit {
                 } else {
                     line = candidate;
                 }
+            }
+            lines.push(line);
+        }
+        lines
+    }
+}
+
+impl Kit {
+    /// jpprep: Japanese text in lines no wider than width: a line may break
+    /// between any two characters, never before closing punctuation (、。」)
+    /// nor after an opening one (「), and at the spaces of Latin words.
+    fn wrap_cjk(&self, text: &str, width: f32, scale: f32) -> Vec<String> {
+        let mut lines = Vec::new();
+        for paragraph in text.split('\n') {
+            let mut line = String::new();
+            let mut last_break = None::<usize>;
+            for c in paragraph.chars() {
+                let candidate = format!("{line}{c}");
+                if !line.is_empty() && self.measure(&candidate, scale) > width && !super::ja::no_break_before(c) {
+                    // a Latin word goes whole to the next line
+                    match last_break.filter(|_| c.is_ascii_alphanumeric()) {
+                        Some(at) if at > 0 => {
+                            let rest = line.split_off(at);
+                            lines.push(line.trim_end().to_owned());
+                            line = rest.trim_start().to_owned();
+                        }
+                        _ => lines.push(std::mem::take(&mut line)),
+                    }
+                    last_break = None;
+                }
+                if c == ' ' || !c.is_ascii() {
+                    last_break = Some(line.len() + c.len_utf8());
+                }
+                line.push(c);
             }
             lines.push(line);
         }
@@ -622,6 +673,8 @@ impl<'a> Canvas<'a> {
     /// returns the width in units.
     pub fn text(&self, x: f32, y: f32, text: &str, scale: f32, color: Color32) -> f32 {
         let Some(font) = &self.kit.font else { return 0.0 };
+        let translated = super::ja::tr(text); // jpprep
+        let text: &str = &translated;
         let mut mesh = Mesh::with_texture(font.id());
         let color = self.tint(color);
         let snap = |v: f32| (v * self.ppp).round() / self.ppp;
@@ -677,13 +730,22 @@ fn upscale(piece: &RgbaImage, width: u32, height: u32) -> ColorImage {
 /// the font's glyphs, each upscaled on its own with a pixel of space so
 /// they never bleed into each other, packed into one texture. The sheet
 /// holds coverage as luminance.
-fn font_atlas(sheet: &RgbaImage, metrics: &[Metric], factor: u32) -> (ColorImage, HashMap<char, Glyph>) {
+fn font_atlas(sheets: &[RgbaImage], metrics: &[Metric], factor: u32) -> (ColorImage, HashMap<char, Glyph>) {
     const WIDTH: u32 = 2048;
     let pad = 1u32;
+    // jpprep: a glyph's sheet is its codepoint's high half (the Japanese
+    // font's 7,089 glyphs on two sheets); a font that large is packed with
+    // only the letters Haiku's menus use (ja::wanted: Latin, kana and the
+    // kanji of Haiku's Japanese text), so the atlas stays one texture
+    let large = metrics.len() > 1024;
+    let metrics: Vec<&Metric> = metrics
+        .iter()
+        .filter(|m| !large || char::from_u32(m.codepoint & 0xFFFF).is_some_and(super::ja::wanted))
+        .collect();
     // place the glyphs in rows
     let mut placed = Vec::new();
     let (mut x, mut y, mut row) = (0u32, 0u32, 0u32);
-    for metric in metrics {
+    for metric in &metrics {
         let w = (metric.width + 2 * pad) * factor;
         let h = (metric.height + 2 * pad) * factor;
         if x + w > WIDTH {
@@ -699,7 +761,8 @@ fn font_atlas(sheet: &RgbaImage, metrics: &[Metric], factor: u32) -> (ColorImage
     let mut atlas = vec![Color32::TRANSPARENT; (WIDTH * height) as usize];
     let mut glyphs = HashMap::new();
     for (metric, &(ax, ay)) in metrics.iter().zip(&placed) {
-        let Some(c) = char::from_u32(metric.codepoint) else { continue };
+        let Some(c) = char::from_u32(metric.codepoint & 0xFFFF) else { continue };
+        let Some(sheet) = sheets.get((metric.codepoint >> 16) as usize) else { continue };
         let (w, h) = (metric.width + 2 * pad, metric.height + 2 * pad);
         let mut cell = RgbaImage::new(w, h);
         for gy in 0..metric.height {

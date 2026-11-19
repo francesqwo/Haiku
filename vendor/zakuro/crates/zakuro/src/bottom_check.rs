@@ -236,8 +236,8 @@ impl crate::App {
                 // a saved state (FATES_SAVE_AT's or F5's), the game frame
                 // going on from the one it was saved at
                 let Some(game) = &mut self.game else { return };
-                match std::fs::read(arg(1)).map_err(|error| error.to_string()).and_then(|bytes| game.system.load_state(&bytes)) {
-                    Ok(()) => {
+                match std::fs::read(arg(1)).map_err(|error| error.to_string()).and_then(|bytes| crate::statecheck::load_raw(&mut game.system, &bytes, arg(1))) {
+                    Ok(_) => { // statecheck: the layer checked first
                         game.frame = game.system.frames;
                         log::info!("bottom check: loaded {} at frame {}", arg(1), game.frame);
                     }

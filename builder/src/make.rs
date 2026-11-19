@@ -557,3 +557,255 @@ pub fn make_all(repo: &Path, romfs: &Path) -> Vec<Made> {
     made.push(amiibo_entry(repo, &rom));
     made
 }
+
+// ---- eur2: the EUR game's own files -----------------------------------------
+
+/// eur2: the recipes of derived-eur.pack, from files made for the EUR game
+/// (`<dir>` laid out as an install root: assets/builtin/romfs/... from
+/// dev/eur/text/make_text.py, assets/glyphs/source/ and assets/glyphs/<set>/
+/// from dev/eur/glyphs.py) and the EUR game's RomFS. Text archives are byte
+/// recipes from the same RomFS path (each language's own); the glyph
+/// sources are textures found in the EUR UI sheets, and each set is made
+/// from its source as derived.pack's are.
+/// jpprep: the recipes of Haiku's Japanese files (setup/derived-jpn.pack):
+/// its own text in the Japanese game's layout (dir/assets/builtin/romfs/m/X,
+/// made by dev/eur/text/make_text.py's J profile from the Japanese dump),
+/// each from the same archive and the archives naming the same people, as
+/// make_eur's text. The menus' font is made from the dump at install
+/// (jpn::make_font), so it needs no recipe; the button prompt sheets of the
+/// Japanese UI are left for when its atlases are known.
+pub fn make_jpn(dir: &Path, romfs: &Path) -> Vec<Made> {
+    let rom = Rom { root: romfs.to_path_buf() };
+    let mut made = Vec::new();
+    let builtin = dir.join("assets/builtin/romfs");
+    let mut files = Vec::new();
+    walk(&builtin, &mut files);
+    for file in &files {
+        let path = rel(file, &builtin);
+        let mut candidates = Vec::new();
+        if rom.exists(&path) {
+            candidates.push(path.clone());
+        }
+        let common = ["親子", "兄弟", "プレイヤー男", "プレイヤー女"];
+        let tokens = |p: &str| -> Vec<String> {
+            let stem = p.rsplit('/').next().unwrap_or(p).trim_end_matches(".bin.lz");
+            stem.split('_').filter(|t| !common.contains(t)).map(|t| t.replace("カンナ女", "カンナ").replace("カンナ男", "カンナ")).collect()
+        };
+        let mine = tokens(&path);
+        candidates.extend(rom.pool(&path).into_iter().filter(|other| tokens(other).iter().any(|t| mine.contains(t))));
+        made.push(bytes_entry(&format!("assets/builtin/romfs/{path}"), &std::fs::read(file).unwrap(), &rom, &candidates));
+    }
+    // jpn2: the button prompts' sets of the Japanese UI atlas (its START
+    // button reads 閉じる, so its hash differs from the USA one's): the
+    // source found exact in the Japanese UI sheets, each set its upscale
+    // with a residual (dev/eur/glyphs.py's drawing), as make_eur's
+    let mut sheets = Vec::new();
+    for dir in ["ui", "icon"] {
+        if let Ok(entries) = std::fs::read_dir(romfs.join(dir)) {
+            let mut names: Vec<String> = entries.flatten().filter(|e| e.path().is_file()).map(|e| format!("{dir}/{}", e.file_name().to_string_lossy())).collect();
+            names.sort();
+            sheets.extend(names);
+        }
+    }
+    let assets = dir.join("assets");
+    let mut sources_found: HashMap<String, (String, Picture)> = HashMap::new();
+    let mut glyph_files = Vec::new();
+    walk(&assets.join("glyphs/source"), &mut glyph_files);
+    for file in &glyph_files {
+        let path = rel(file, &assets);
+        let target = format!("assets/{path}");
+        let picture = derive::read_png(&std::fs::read(file).unwrap()).unwrap();
+        let name = file.file_name().unwrap().to_string_lossy().into_owned();
+        let format = name.split('_').nth(3).and_then(|f| f.parse::<u8>().ok());
+        let Some((m, _)) = decoded_entry(&target, &picture, &sheets, &rom, format).filter(|(m, _)| m.note.contains("exact")) else {
+            eprintln!("jpn: no Japanese UI texture is {path}; its glyph sets left out");
+            continue;
+        };
+        sources_found.insert(name, (target.clone(), picture));
+        made.push(m);
+    }
+    for set in ["keyboard", "playstation", "xbox"] {
+        let mut set_files = Vec::new();
+        walk(&assets.join("glyphs").join(set), &mut set_files);
+        for file in &set_files {
+            let path = rel(file, &assets);
+            let picture = derive::read_png(&std::fs::read(file).unwrap()).unwrap();
+            let name = file.file_name().unwrap().to_string_lossy().into_owned();
+            let Some((source_target, src)) = sources_found.get(&name).cloned() else { continue };
+            let blits = vec![Blit { source: 0, filter: 1, sx: 0, sy: 0, sw: src.w, sh: src.h, dx: 0, dy: 0, dw: picture.w, dh: picture.h }];
+            let sources = vec![Source { path: source_target.clone(), how: How::Derived, hash: src.hash() }];
+            made.push(image_entry(&format!("assets/{path}"), &picture, sources, blits, &[Some(&src)], format!("{source_target} at {}x (make_glyphs.py's upscale)", picture.w / src.w.max(1))));
+        }
+    }
+    made
+}
+
+pub fn make_eur(dir: &Path, romfs: &Path) -> Vec<Made> {
+    let rom = Rom { root: romfs.to_path_buf() };
+    let mut made = Vec::new();
+    let builtin = dir.join("assets/builtin/romfs");
+    let mut files = Vec::new();
+    walk(&builtin, &mut files);
+    for file in &files {
+        let path = rel(file, &builtin);
+        // the same file (a message archive with Haiku's added) and the
+        // files of its folder that name the same people (Haiku's messages
+        // are made of their lines): not the whole folder, 1,200 archives
+        // each, and so every line of the game's is a copy, not carried
+        let mut candidates = Vec::new();
+        if rom.exists(&path) {
+            candidates.push(path.clone());
+        }
+        {
+            let common = ["親子", "兄弟", "プレイヤー男", "プレイヤー女"];
+            let tokens = |p: &str| -> Vec<String> {
+                let stem = p.rsplit('/').next().unwrap_or(p).trim_end_matches(".bin.lz");
+                stem.split('_').filter(|t| !common.contains(t)).map(|t| t.replace("カンナ女", "カンナ").replace("カンナ男", "カンナ")).collect()
+            };
+            let mine = tokens(&path);
+            candidates.extend(rom.pool(&path).into_iter().filter(|other| tokens(other).iter().any(|t| mine.contains(t))));
+        }
+        made.push(bytes_entry(&format!("assets/builtin/romfs/{path}"), &std::fs::read(file).unwrap(), &rom, &candidates));
+    }
+    // the glyph sources: textures of the EUR UI sheets (every language's)
+    let mut sheets = Vec::new();
+    for dir in ["ui", "ui/@U", "ui/@F", "ui/@G", "ui/@S", "ui/@I", "icon", "icon/@U", "icon/@F", "icon/@G", "icon/@S", "icon/@I"] {
+        if let Ok(entries) = std::fs::read_dir(romfs.join(dir)) {
+            let mut names: Vec<String> = entries.flatten().filter(|e| e.path().is_file()).map(|e| format!("{dir}/{}", e.file_name().to_string_lossy())).collect();
+            names.sort();
+            sheets.extend(names);
+        }
+    }
+    let assets = dir.join("assets");
+    let mut sources_found: HashMap<String, (String, Picture)> = HashMap::new();
+    let mut glyph_files = Vec::new();
+    walk(&assets.join("glyphs/source"), &mut glyph_files);
+    for file in &glyph_files {
+        let path = rel(file, &assets);
+        let target = format!("assets/{path}");
+        let picture = derive::read_png(&std::fs::read(file).unwrap()).unwrap();
+        let name = file.file_name().unwrap().to_string_lossy().into_owned();
+        let format = name.split('_').nth(3).and_then(|f| f.parse::<u8>().ok());
+        let (m, _) = decoded_entry(&target, &picture, &sheets, &rom, format)
+            .filter(|(m, _)| m.note.contains("exact"))
+            .unwrap_or_else(|| panic!("no EUR UI texture is {path}"));
+        sources_found.insert(name, (target.clone(), picture));
+        made.push(m);
+    }
+    for set in ["keyboard", "playstation", "xbox"] {
+        let mut set_files = Vec::new();
+        walk(&assets.join("glyphs").join(set), &mut set_files);
+        for file in &set_files {
+            let path = rel(file, &assets);
+            let picture = derive::read_png(&std::fs::read(file).unwrap()).unwrap();
+            let name = file.file_name().unwrap().to_string_lossy().into_owned();
+            let (source_target, src) = sources_found.get(&name).unwrap_or_else(|| panic!("no source picture for {path}")).clone();
+            let blits = vec![Blit { source: 0, filter: 1, sx: 0, sy: 0, sw: src.w, sh: src.h, dx: 0, dy: 0, dw: picture.w, dh: picture.h }];
+            let sources = vec![Source { path: source_target.clone(), how: How::Derived, hash: src.hash() }];
+            made.push(image_entry(&format!("assets/{path}"), &picture, sources, blits, &[Some(&src)], format!("{source_target} at {}x (make_glyphs.py's upscale)", picture.w / src.w.max(1))));
+        }
+    }
+    made
+}
+
+// ---- jpn: the Japanese game's own UI sheets ----------------------------------
+
+/// jpn: recipes for Haiku's decoded UI files (assets/ui, assets/font) whose
+/// source file in the Japanese game differs from the USA game's, so that
+/// derived.pack's recipe can't make them there (the sheets with text:
+/// SystemWindow, SystemWindow2, status, the UI font...). Each is made from
+/// the Japanese file alone: a picture is the Japanese texture of the same
+/// size closest to the USA picture, decoded with no residual (so the pack
+/// carries no USA pixels and no Japanese ones, only where to read them); a
+/// decompressed .bch/.bfnt copy is the Japanese file's bytes; a font's
+/// metrics are the Japanese font's glyph records. The growth button is
+/// Status1's book button as derived.pack draws it, over the Japanese sheet.
+pub fn make_jpn_ui(repo: &Path, romfs: &Path, us_romfs: &Path) -> Vec<Made> {
+    let rom = Rom { root: romfs.to_path_buf() };
+    let us = Rom { root: us_romfs.to_path_buf() };
+    let assets = repo.join("assets");
+    let differs = |path: &str| -> bool { rom.exists(path) && us.exists(path) && rom.raw(path) != us.raw(path) };
+    let mut made = Vec::new();
+    let mut files = Vec::new();
+    walk(&assets.join("ui"), &mut files);
+    walk(&assets.join("font"), &mut files);
+    files.sort();
+    let mut decoded: HashMap<String, Picture> = HashMap::new();
+    for file in &files {
+        let path = rel(file, &assets);
+        let target = format!("assets/{path}");
+        let ext = file.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+        let dir = path.rsplit_once('/').map_or("", |(d, _)| d);
+        let name = path.rsplit_once('/').map_or(path.as_str(), |(_, f)| f);
+        match ext.as_str() {
+            "bch" | "bfnt" => {
+                let source = format!("{path}.lz");
+                if differs(&source) {
+                    if let Some((_, plain)) = rom.source(&source) {
+                        made.push(bytes_entry(&target, &plain, &rom, &[source]));
+                    }
+                }
+            }
+            "png" if path != "ui/info-ui/GrowthButton.png" => {
+                // ui/<sheet>_/<name>.png from ui/<sheet>.bch; the fonts' own
+                // sheets (System_L) are jpn::make_font's
+                let Some(sheet) = dir.strip_suffix('_') else { continue };
+                let source = format!("{sheet}.bch.lz");
+                if !differs(&source) {
+                    continue;
+                }
+                let Ok(us_picture) = derive::read_png(&std::fs::read(file).unwrap()) else { continue };
+                let Some((src, _)) = find_texture(&us_picture, &[source.clone()], &rom, None) else {
+                    eprintln!("jpn: no texture of {}x{} in the Japanese {source} for {path}", us_picture.w, us_picture.h);
+                    continue;
+                };
+                let How::Texture { lz, tex: t, flip, shift4, .. } = src.how.clone() else { continue };
+                let raw = rom.raw(&src.path);
+                let bytes = if lz { lz11::decompress(&raw).unwrap() } else { raw };
+                let mut rgba = tex::decode_with(&bytes[t.offset..], t.w, t.h, t.format, shift4).unwrap();
+                if flip {
+                    rgba = tex::flip(&rgba, t.w, t.h);
+                }
+                let picture = Picture { w: t.w, h: t.h, rgba };
+                let blits = vec![Blit { source: 0, filter: 0, sx: 0, sy: 0, sw: t.w, sh: t.h, dx: 0, dy: 0, dw: t.w, dh: t.h }];
+                let changed = diff_count(&picture.rgba, &us_picture.rgba);
+                let note = format!("the Japanese {source}'s texture (format {}, at 0x{:X}), as it is ({changed} pixels differ from the USA one)", t.format, t.offset);
+                made.push(image_entry(&target, &picture, vec![src], blits, &[Some(&picture)], note));
+                decoded.insert(target.clone(), picture);
+                let _ = name;
+            }
+            "json" => {
+                // a font's metrics: its glyph records
+                if let Some(font) = path.strip_suffix("-metrics.json") {
+                    let source = format!("{font}.bfnt.lz");
+                    if differs(&source) {
+                        if let Some((how, bfnt)) = rom.source(&source) {
+                            let wanted = std::fs::read(file).unwrap();
+                            let crlf = wanted.windows(2).any(|w| w == b"\r\n");
+                            if let Some(text) = derive::font_metrics(&bfnt, crlf) {
+                                made.push(Made {
+                                    entry: Entry { target: target.clone(), sources: vec![Source { path: source.clone(), how, hash: derive::sha(&bfnt) }], body: Body::Metrics { crlf }, hash: derive::sha(text.as_bytes()) },
+                                    size: text.len(),
+                                    own: 0,
+                                    note: format!("the glyph records of the Japanese {source}, as JSON"),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    // the growth button, over the Japanese Status1
+    let status = "assets/ui/status_/Status1.png";
+    if let Some(src) = decoded.get(status) {
+        let target = "assets/ui/info-ui/GrowthButton.png";
+        if let Ok(picture) = std::fs::read(repo.join(target)).map_err(|e| e.to_string()).and_then(|b| derive::read_png(&b)) {
+            let blits: Vec<Blit> = (0..3).map(|i| Blit { source: 0, filter: 0, sx: 244, sy: 4 + 32 * i, sw: 39, sh: 23, dx: 0, dy: 25 * i, dw: 39, dh: 23 }).collect();
+            let sources = vec![Source { path: status.into(), how: How::Derived, hash: src.hash() }];
+            made.push(image_entry(target, &picture, sources, blits, &[Some(src)], "the three states of the Japanese Status1.png's book button".into()));
+        }
+    }
+    made
+}

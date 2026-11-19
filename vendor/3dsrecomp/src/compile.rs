@@ -133,13 +133,44 @@ fn quiet_flags(command: &mut Command, background: bool) {
         if background {
             flags |= BELOW_NORMAL_PRIORITY_CLASS;
         }
-        if QUIET.get().is_some() {
+        // nowindow: and whenever this program has no console of its own
+        // (Haiku.exe compiling code mods): a console tool started from a
+        // windowed program would open a console window on the desktop
+        if QUIET.get().is_some() || without_console() {
             flags |= CREATE_NO_WINDOW;
         }
         command.creation_flags(flags);
     }
     #[cfg(not(windows))]
     let _ = (command, background);
+}
+
+/// nowindow: whether this process has no console window, as a windowed
+/// program (Haiku.exe, Haiku Setup) has none; a console tool it starts
+/// would then get a console window of its own.
+#[cfg(windows)]
+fn without_console() -> bool {
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetConsoleWindow() -> *mut std::ffi::c_void;
+    }
+    // SAFETY: takes nothing, returns this process's console window or null
+    unsafe { GetConsoleWindow().is_null() }
+}
+
+/// nowindow: for any other program's commands (Haiku's zig download and
+/// unpacking): no console window when this process has no console. Users
+/// must never see a command prompt window.
+pub fn no_window(command: &mut Command) -> &mut Command {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        if QUIET.get().is_some() || without_console() {
+            command.creation_flags(CREATE_NO_WINDOW);
+        }
+    }
+    command
 }
 
 /// runs command to its end; when quiet, with its output read and logged

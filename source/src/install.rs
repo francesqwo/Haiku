@@ -42,10 +42,26 @@ pub fn run(root: &Path) -> Option<i32> {
         }
     }
     for cia in dlc {
+        // eurdlc: the European DLC is not the USA game's
+        if let Some(why) = zakuro_fs::eur::dlc_misfit(&out, cia) {
+            eprintln!("could not {} DLC {}: {why}", if check { "check" } else { "install" }, cia.display());
+            return Some(1);
+        }
         match datadir::install_dlc(cia, &out, check) {
             Ok(tally) => bad += tally.bad,
             Err(error) => {
                 eprintln!("could not {} DLC {}: {error}", if check { "check" } else { "install" }, cia.display());
+                return Some(1);
+            }
+        }
+    }
+    // eur: the DLC next to the EUR game, filed as it asks and with its
+    // text in every EUR language folder
+    if !check && !dlc.is_empty() {
+        match zakuro_fs::eur::adapt_dlc(&out) {
+            Ok(done) => done.iter().for_each(|line| println!("eur: {line}")),
+            Err(error) => {
+                eprintln!("could not fit the DLC to the EUR game: {error}");
                 return Some(1);
             }
         }

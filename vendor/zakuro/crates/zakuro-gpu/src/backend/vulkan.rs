@@ -168,6 +168,9 @@ pub struct VulkanPresenter {
     crossfade: Option<(GpuScreen, f32)>,
     fading: Option<f32>,
     fading_area: [f32; 8],
+    /// pulse2: Divine Pulse's effects over the top screen (vulkan_pulse.rs)
+    pulse_fx: Option<super::vulkan_pulse::PulseFx>,
+    pulse_effect: Option<super::PulseEffect>,
 }
 
 impl VulkanPresenter {
@@ -315,6 +318,16 @@ impl VulkanPresenter {
             )
         }
         .map_err(vk_fail("creating the sampler"))?;
+
+        // pulse2: Divine Pulse's effects; without them the rewind screen's
+        // own tint still shows
+        let pulse_fx = match super::vulkan_pulse::PulseFx::new(&device, memory_properties, surface_format.format, FRAMES_IN_FLIGHT) {
+            Ok(fx) => Some(fx),
+            Err(error) => {
+                log::warn!("pulse2: no rewind effects, {error}");
+                None
+            }
+        };
 
         let descriptor_pool = unsafe {
             // a screen whose size changes is made again before the old one
@@ -497,6 +510,8 @@ impl VulkanPresenter {
             crossfade: None,
             fading: None,
             fading_area: WHOLE,
+            pulse_fx, // pulse2
+            pulse_effect: None,
         };
 
         presenter.build_swapchain()?;
@@ -789,6 +804,17 @@ impl VulkanPresenter {
         self.crossfade = crossfade;
     }
 
+    /// pulse2: Divine Pulse's effect for the next present (none: the top
+    /// screen as it is).
+    pub fn set_pulse_effect(&mut self, effect: Option<super::PulseEffect>) {
+        self.pulse_effect = effect;
+    }
+
+    /// pulse2: whether Divine Pulse's effects can be drawn.
+    pub fn pulse_effects(&self) -> bool {
+        self.pulse_fx.is_some()
+    }
+
     /// smooth: when the next present goes out, none for at once.
     pub fn set_present_at(&mut self, at: Option<std::time::Instant>) {
         self.present_at = at;
@@ -963,6 +989,11 @@ impl VulkanPresenter {
                     float32: [0.0, 0.0, 0.0, 1.0],
                 },
             }];
+            // pulse2: the effect's images ready to read
+            if let Some(fx) = &self.pulse_fx {
+                fx.before_pass(command_buffer);
+            }
+            let mut pulse_top = None;
             device.cmd_begin_render_pass(
                 command_buffer,
                 &vk::RenderPassBeginInfo::default()
@@ -1043,6 +1074,11 @@ impl VulkanPresenter {
                     device.cmd_push_constants(command_buffer, self.translucent_layout, vk::ShaderStageFlags::FRAGMENT, FRAG_CONSTANTS_OFFSET, &constants);
                     device.cmd_draw(command_buffer, 3, 1, 0, 0);
                 }
+                // pulse2: Divine Pulse's effect over the top screen
+                if let (Shown::Top, Some(fx)) = (shown, self.pulse_fx.as_ref().filter(|fx| fx.effect.is_some())) {
+                    fx.draw(command_buffer, self.frame, viewport, area, angle, self.filter.mode());
+                    pulse_top = Some((viewport, area));
+                }
             }
 
             // bottom: the composition's frames and cursor, then the interface
@@ -1051,6 +1087,10 @@ impl VulkanPresenter {
             }
             painter.draw_one(device, command_buffer, self.frame, overlays, overlays.len() - 1, self.extent);
             device.cmd_end_render_pass(command_buffer);
+            // pulse2: the top screen as shown kept, for the next change
+            if let (Some(fx), Some((viewport, area))) = (&self.pulse_fx, pulse_top) {
+                fx.keep(command_buffer, self.frame, viewport, area, angle, self.filter.mode());
+            }
             // bottom: the frame read back, when asked
             if let Some(capture) = &self.capture {
                 capture.record(device, command_buffer);
@@ -1214,6 +1254,17 @@ impl Presenter for VulkanPresenter {
         if has_right && matches!(self.stereo.mode, StereoMode::Anaglyph | StereoMode::Interlaced) {
             self.write_stereo_set(&sources);
         }
+        // pulse2: the effect's set, at the top screen's picture and the old one
+        let live = match sources[0] {
+            Source::Gpu(gpu) => Some((gpu.view, vk::ImageLayout::GENERAL)),
+            Source::Own => Some((self.screens[0].view, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)),
+            Source::Nothing => None,
+        };
+        let effect = self.pulse_effect.take().filter(|_| !has_right);
+        let (extent, frame_index, sampler) = (self.extent, self.frame, self.sampler);
+        if let Some(fx) = &mut self.pulse_fx {
+            fx.prepare(effect, extent, frame_index, live, sampler);
+        }
 
         let command_buffer = self.command_buffers[frame];
         unsafe {
@@ -1363,6 +1414,7 @@ impl Drop for VulkanPresenter {
         // smooth: the present thread and the waiter go before the swapchain
         drop(self.pacer.take());
         drop(self.timing.take());
+        drop(self.pulse_fx.take()); // pulse2: before the device goes
         unsafe {
             let _ = crate::wait_idle(&self.device);
             for screen in std::mem::replace(&mut self.screens, [Screen::null(), Screen::null(), Screen::null()]) {

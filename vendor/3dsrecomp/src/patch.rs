@@ -30,7 +30,9 @@ use crate::image::Segment;
 use crate::rom::ExHeader;
 
 /// the version of what this module writes, part of every cache key.
-pub const VERSION: u32 = 1;
+/// codemods2: 2, the entries a patch left no code at (recomp_patch_gone),
+/// and the analysis that guesses what changed code still is.
+pub const VERSION: u32 = 2;
 
 /// a function of the program, as its tables describe it.
 #[derive(Debug, Clone, PartialEq)]
@@ -100,6 +102,51 @@ impl Base {
         }
         hash.value()
     }
+
+    /// codemods2: the tables as text, one function a line (start, thumb,
+    /// spans) then one entry a line, for looking at a mod's plan away from
+    /// the program (examples/patch_plan.rs, HAIKU_CODEMODS_DUMP).
+    pub fn to_text(&self) -> String {
+        let mut text = String::new();
+        for function in &self.functions {
+            write!(text, "f {:08X} {}", function.start, function.thumb as u8).unwrap();
+            for (start, end) in &function.spans {
+                write!(text, " {start:08X}-{end:08X}").unwrap();
+            }
+            text.push('\n');
+        }
+        for (key, owner) in &self.entries {
+            match owner {
+                Some(owner) => writeln!(text, "e {key:08X} {owner}").unwrap(),
+                None => writeln!(text, "e {key:08X} -").unwrap(),
+            }
+        }
+        text
+    }
+
+    /// codemods2: the tables to_text wrote.
+    pub fn from_text(text: &str) -> Option<Base> {
+        let hex = |word: &str| u32::from_str_radix(word, 16).ok();
+        let mut base = Base::default();
+        for line in text.lines() {
+            let mut words = line.split_whitespace();
+            match words.next()? {
+                "f" => {
+                    let start = hex(words.next()?)?;
+                    let thumb = words.next()? == "1";
+                    let spans = words.map(|span| span.split_once('-').and_then(|(a, b)| Some((hex(a)?, hex(b)?)))).collect::<Option<Vec<_>>>()?;
+                    base.functions.push(BaseFunction { start, thumb, spans });
+                }
+                "e" => {
+                    let key = hex(words.next()?)?;
+                    let owner = words.next()?;
+                    base.entries.insert(key, if owner == "-" { None } else { Some(owner.parse().ok()?) });
+                }
+                _ => return None,
+            }
+        }
+        Some(base)
+    }
 }
 
 /// the places of a byte image where two images differ, as address ranges,
@@ -149,10 +196,13 @@ fn mode_of(key: u32) -> Mode {
 
 /// the executable of a patched code image as discovery reads it: the image
 /// the way the program's own was read (Image::into_program), except that
-/// code a patch put after .text, in .rodata or .data or in what an exheader
-/// added, is code too: .text runs on to the end of the last changed range
-/// there, and the pointers in the data that lead to changed code are seeds,
-/// as those leading into .text are.
+/// code a patch put after .text in its last page, or in what an exheader
+/// added to it, is code too: .text runs on to the end of the last changed
+/// range there, and the pointers in the data that lead to changed code are
+/// seeds, as those leading into .text are. codemods2: only .text's pages
+/// run: the console maps .rodata and .data without execute permission, so
+/// what a patch changes there is data (FE1 changes tables in .rodata, which
+/// were read as code before and made Thumb guesses of strings).
 pub fn program(exheader: &ExHeader, code: &[u8], changed: &[(u32, u32)]) -> Program {
     let image = crate::image::Image::from_code(exheader, code);
     let text_start = exheader.text.address;
@@ -172,7 +222,8 @@ pub fn program(exheader: &ExHeader, code: &[u8], changed: &[(u32, u32)]) -> Prog
         }
         0
     };
-    let end = changed.iter().map(|&(_, end)| end).filter(|&end| end > text_end).max().unwrap_or(text_end);
+    let runs_to = text_start + exheader.text.num_pages.max((exheader.text.size + 0xFFF) / 0x1000) * 0x1000;
+    let end = changed.iter().map(|&(start, end)| (start, end.min(runs_to))).filter(|&(start, end)| start < runs_to && end > text_end).map(|(_, end)| end).max().unwrap_or(text_end);
     let mut text = image.text;
     if end > text_end {
         text.bytes.extend((text_end..(end + 3) & !3).map(byte_at));
@@ -186,6 +237,23 @@ pub fn program(exheader: &ExHeader, code: &[u8], changed: &[(u32, u32)]) -> Prog
             .filter(|&(_, value)| in_code(value) && text.contains(value & !1))
             .map(|(_, value)| (value, Source::Pointer)),
     );
+    // codemods2: and the words a patch wrote in .text: a patch that keeps
+    // its data in .text (FE1 puts vtables, jump tables and pointer tables
+    // there) has pointers into code there that nothing else leads to. they
+    // are guesses, as pointers in data are; instructions seldom pass for one
+    let mut written: Vec<(u32, Source)> = Vec::new();
+    for &(start, end) in changed {
+        let mut at = start & !3;
+        while at < end.min(text.end()) {
+            if let Some(value) = text.read32(at).filter(|&value| at >= text_start && text.contains(value & !1)) {
+                written.push((value, Source::Pointer));
+            }
+            at += 4;
+        }
+    }
+    written.sort_unstable();
+    written.dedup();
+    seeds.extend(written);
     Program { text, seeds, slots: None }
 }
 
@@ -206,8 +274,17 @@ pub struct Plan {
     /// code, in free space or in what a patch took over.
     pub new_instructions: usize,
     /// places the module's code goes to directly that neither the program
-    /// nor the module has code for, which a module must have none of.
-    pub holes: Vec<u32>,
+    /// nor the module has code for, which a module must have none of, with
+    /// the instruction going there (codemods2: and the function holding it).
+    pub holes: Vec<discover::Gap>,
+    /// codemods2: places the module's code goes to directly that are no
+    /// instruction in the mode it goes there in (an undefined encoding, the
+    /// middle of one, a Thumb-2 half the ARM11 doesn't have): the CPU could
+    /// not run them either, so they are left to the host, as the program's
+    /// own analysis leaves its gaps (Analysis::gaps_left). they come from
+    /// code a function of the program was only guessed to be, a pointer in
+    /// data taken for Thumb code, say, which a patch then wrote over.
+    pub dead_ends: Vec<discover::Gap>,
 }
 
 /// works out the functions of a patch module for program, the patched
@@ -244,10 +321,17 @@ pub fn plan(base: &Base, mut program: Program, changed: &[(u32, u32)]) -> (Plan,
         *spans = merged;
     }
 
-    for &index in &stale {
-        let function = &base.functions[index];
-        program.seeds.push((function.start | function.thumb as u32, Source::Hint));
-    }
+    // codemods2: the changed functions' starts are guesses, judged as
+    // discovery judges pointers in data, not code for sure: the program's
+    // functions include what its analysis only guessed was code (Thumb read
+    // over ARM code, string tables a guess ran into), and a patch may write
+    // data over a function it no longer uses (FE1 writes strings and tables
+    // over several). code that is code still is reached for sure where the
+    // program's code calls or branches to it, as when the program was
+    // analysed, and passes as a guess where only pointers lead to it
+    let seed = |key: u32| (key, Source::Pointer);
+    let seeds: Vec<(u32, Source)> = stale.iter().map(|&index| seed(base.functions[index].start | base.functions[index].thumb as u32)).collect();
+    program.seeds.extend(seeds);
     let mut analysis = discover::analyze(&program);
     // entries of changed functions nothing in the patched code holds start
     // functions of their own, when they are instructions
@@ -257,7 +341,8 @@ pub fn plan(base: &Base, mut program: Program, changed: &[(u32, u32)]) -> (Plan,
     };
     let unheld: Vec<u32> = stale_entries.iter().copied().filter(|&key| !holds(&analysis, key)).collect();
     if !unheld.is_empty() {
-        program.seeds.extend(unheld.iter().map(|&key| (key, Source::Hint)));
+        let seeds: Vec<(u32, Source)> = unheld.iter().map(|&key| seed(key)).collect();
+        program.seeds.extend(seeds);
         analysis = discover::analyze(&program);
     }
     label_entered(&mut analysis, &stale_entries);
@@ -311,6 +396,7 @@ pub fn plan(base: &Base, mut program: Program, changed: &[(u32, u32)]) -> (Plan,
         module_labels.extend(function.labels.iter().map(|&label| key(label, function.mode)));
     }
     let mut holes = BTreeSet::new();
+    let mut dead_ends = BTreeSet::new();
     while let Some(entry) = work.pop() {
         let function = &analysis.functions[&entry];
         for transfer in discover::transfers(&program.text, function) {
@@ -332,7 +418,12 @@ pub fn plan(base: &Base, mut program: Program, changed: &[(u32, u32)]) -> (Plan,
                     }
                 }
                 None => {
-                    holes.insert(to);
+                    let gap = discover::Gap { to: transfer.to, mode: transfer.mode, from: transfer.from, function: entry, way: transfer.way };
+                    if discover::decodes(&program.text, transfer.to, transfer.mode) {
+                        holes.insert(gap);
+                    } else {
+                        dead_ends.insert(gap);
+                    }
                 }
             }
         }
@@ -346,19 +437,64 @@ pub fn plan(base: &Base, mut program: Program, changed: &[(u32, u32)]) -> (Plan,
         .filter(|&key| stale.iter().any(|&index| base.functions[index].start == key & !1 && base.functions[index].thumb == (key & 1 != 0)))
         .collect();
     let functions = selected.into_iter().map(|entry| (entry, analysis.functions[&entry].clone())).collect();
-    (Plan { functions, stale, replaced, missing, new_instructions, holes: holes.into_iter().collect() }, program)
+    (Plan { functions, stale, replaced, missing, new_instructions, holes: holes.into_iter().collect(), dead_ends: dead_ends.into_iter().collect() }, program)
 }
 
 /// instructions per source file, as codegen splits them.
 const FILE_SIZE: usize = 4_000;
 
-/// the C of a patch module for plan, as file names and contents: recomp.h,
-/// the functions in files of their own, and patch.c with the table of
-/// every entry the module has code for. key is what the host checks the
-/// module against: its base digest and the patched code. an error names an
-/// instruction the module's code would have left to the interpreter, which
-/// a host without one cannot run.
-pub fn source(plan: &Plan, program: &Program, base: &Base, base_digest: u64, code_key: u64) -> Result<Vec<(String, String)>, String> {
+/// codemods2: why a module can't be written: instructions the generator
+/// would leave to an interpreter, in code that is sure to be code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Unrecompilable {
+    pub count: usize,
+    /// the first of them.
+    pub first: u32,
+}
+
+impl std::fmt::Display for Unrecompilable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "the patched code has {} instructions Haiku can't recompile, the first at 0x{:08X}", self.count, self.first)
+    }
+}
+
+/// the C of a patch module, and what of it goes to the host.
+pub struct Module {
+    /// file names and contents.
+    pub files: Vec<(String, String)>,
+    /// codemods2: instructions the generator leaves to the interpreter in
+    /// what may not be code at all (maybe_data): a host without an
+    /// interpreter stops there, as it does in the program's own code, if
+    /// the game ever goes there. code a patch writes data over is guessed
+    /// again, and data read as code has such instructions.
+    pub left_to_host: Vec<u32>,
+}
+
+/// whether a function of the module may not be code at all: discovery only
+/// guessed it is (a pointer in data, a scan of a gap, a place such code
+/// goes to; not a call, even one a guess made, as most of the game's code
+/// is reached through vtables), or, read as ARM, its instructions are nearly all conditional,
+/// as text and tables read as ARM are and as code a compiler made never is
+/// (FE1 writes strings over functions whose callers it no longer runs).
+fn maybe_data(program: &Program, function: &Function) -> bool {
+    if matches!(function.source, Source::Pointer | Source::Scan | Source::Gap) {
+        return true;
+    }
+    if function.mode != Mode::Arm {
+        return false;
+    }
+    let conditional = function.instructions.iter().filter(|&&address| program.text.read32(address).is_some_and(|word| word >> 28 != 0xE)).count();
+    // the rule discovery judges guesses by (MOST_CONDITIONAL), the other way
+    conditional * 5 > function.instructions.len() * 4
+}
+
+/// the C of a patch module for plan: recomp.h, the functions in files of
+/// their own, and patch.c with the table of every entry the module has code
+/// for. key is what the host checks the module against: its base digest
+/// and the patched code. an error names an instruction the module's code
+/// would have left to the interpreter, which a host without one cannot run,
+/// in code that is sure to be code (codemods2: see Module::left_to_host).
+pub fn source(plan: &Plan, program: &Program, base: &Base, base_digest: u64, code_key: u64) -> Result<Module, Unrecompilable> {
     const PREFIX: &str = "p_";
     let mut names: BTreeMap<u32, String> = BTreeMap::new();
     for (&entry, function) in &plan.functions {
@@ -380,16 +516,28 @@ pub fn source(plan: &Plan, program: &Program, base: &Base, base_digest: u64, cod
     }
     header.push_str("#endif\n");
 
-    let mut files = vec![("recomp.h".to_owned(), codegen::HEADER.to_owned()), ("patch.h".to_owned(), header)];
+    // codemods2: recomp.h declares recomp_imports plainly, and patch.c
+    // defines it exported: gcc lets a definition add dllexport, clang (Zig,
+    // the compiler Haiku downloads) refuses it. the module's copy of the
+    // header declares it exported already (the program's own is unchanged)
+    let module_header = codegen::HEADER.replacen("extern RecompImports recomp_imports;", "extern RECOMP_EXPORT RecompImports recomp_imports;", 1);
+    debug_assert!(module_header != codegen::HEADER, "recomp.h declares recomp_imports another way now");
+    let mut files = vec![("recomp.h".to_owned(), module_header), ("patch.h".to_owned(), header)];
     let mut source = String::new();
     let mut size = 0;
     let mut sources = Vec::new();
     let mut interpreted = Vec::new();
+    let mut left_to_host = Vec::new();
     for (&entry, function) in &plan.functions {
         if source.is_empty() {
             source.push_str("#define RECOMP_IMPORTED 1\n#include \"recomp.h\"\n#include \"patch.h\"\n\n");
         }
-        interpreted.extend(codegen::write_patch_function(&mut source, program, &names, PREFIX, entry, function));
+        let left = codegen::write_patch_function(&mut source, program, &names, PREFIX, entry, function);
+        if maybe_data(program, function) {
+            left_to_host.extend(left);
+        } else {
+            interpreted.extend(left);
+        }
         size += function.instructions.len();
         if size >= FILE_SIZE {
             sources.push(std::mem::take(&mut source));
@@ -399,8 +547,8 @@ pub fn source(plan: &Plan, program: &Program, base: &Base, base_digest: u64, cod
     if !source.is_empty() {
         sources.push(source);
     }
-    if let Some(first) = interpreted.first() {
-        return Err(format!("the patched code has {} instructions Haiku can't recompile, the first at 0x{first:08X}", interpreted.len()));
+    if let Some(&first) = interpreted.first() {
+        return Err(Unrecompilable { count: interpreted.len(), first });
     }
     // every label, preferring the function it starts
     let mut entries: BTreeMap<u32, String> = BTreeMap::new();
@@ -428,9 +576,23 @@ pub fn source(plan: &Plan, program: &Program, base: &Base, base_digest: u64, cod
         table.push_str("    {0xFFFFFFFFu, 0},\n");
     }
     table.push_str("};\n");
+    // codemods2: the changed functions' entries the patched code has no
+    // instruction at (data now, say): the host accepts that the module has
+    // no code for them, and stops there as for any code it has none for
+    writeln!(table, "RECOMP_EXPORT const uint32_t recomp_patch_gone_count = {};", plan.missing.len()).unwrap();
+    writeln!(table, "RECOMP_EXPORT const uint32_t recomp_patch_gone[] = {{").unwrap();
+    for key in &plan.missing {
+        writeln!(table, "    0x{key:08X}u,").unwrap();
+    }
+    if plan.missing.is_empty() {
+        table.push_str("    0xFFFFFFFFu,\n");
+    }
+    table.push_str("};\n");
     files.push(("patch.c".to_owned(), table));
     files.extend(sources.into_iter().enumerate().map(|(i, source)| (format!("patch{i:03}.c"), source)));
-    Ok(files)
+    left_to_host.sort_unstable();
+    left_to_host.dedup();
+    Ok(Module { files, left_to_host })
 }
 
 #[cfg(test)]
@@ -491,7 +653,7 @@ mod tests {
         assert_eq!(plan.functions.keys().copied().collect::<Vec<_>>(), [BASE + 0x14]);
         assert_eq!(plan.stale.len(), 1);
         assert!(plan.holes.is_empty() && plan.missing.is_empty());
-        let files = source(&plan, &program, &base, base.digest(), 7).unwrap();
+        let files = source(&plan, &program, &base, base.digest(), 7).unwrap().files;
         let code: String = files.iter().filter(|(name, _)| name.starts_with("patch0")).map(|(_, c)| c.clone()).collect();
         assert!(code.contains("void p_f_00100014(Context *ctx)"), "{code}");
         assert!(!code.contains("STALE_CHECK"));
@@ -538,8 +700,132 @@ mod tests {
         let program = Program { text: segment(&patched), seeds: vec![(BASE, Source::Entry)], slots: None };
         let (plan, program) = plan(&base, program, &changed);
         assert_eq!(plan.replaced, [BASE + 8]);
-        let files = source(&plan, &program, &base, 0, 0).unwrap();
+        let files = source(&plan, &program, &base, 0, 0).unwrap().files;
         let header = &files.iter().find(|(name, _)| name == "patch.h").unwrap().1;
         assert!(header.contains("override_stub_00100008"));
+    }
+
+    /// codemods2: FE1 writes strings over functions whose callers it changed
+    /// too. the function is no code any more: the module builds, with the
+    /// entry gone or its data left to the host, never refused.
+    #[test]
+    fn a_function_a_patch_writes_data_over_does_not_refuse_the_module() {
+        let own = [
+            0xEB00_0003, // bl BASE + 0x14
+            0xEB00_0004, // bl BASE + 0x1C
+            0xE12F_FF1E, // bx lr
+            0xE320_F000, // nop
+            0xE320_F000, // nop
+            0xE3A0_0001, // mov r0, #1
+            0xE12F_FF1E, // bx lr
+            0xE3A0_0002, // mov r0, #2
+            0xE12F_FF1E, // bx lr
+        ];
+        let mut patched = own;
+        patched[1] = 0xE320_F000; // the call goes
+        patched[7] = 0x6E6F_425F; // "_Bon", mcrvs p2: no instruction Haiku recompiles
+        patched[8] = 0x6572_6966; // "fire"
+        let base = base_of(&own);
+        let changed = changed_ranges(BASE, &bytes(&own), &bytes(&patched));
+        let program = Program { text: segment(&patched), seeds: vec![(BASE, Source::Entry)], slots: None };
+        let (plan, program) = plan(&base, program, &changed);
+        assert!(plan.holes.is_empty(), "{:X?}", plan.holes);
+        let module = source(&plan, &program, &base, 0, 0).expect("data where code was doesn't refuse the module");
+        let gone = plan.missing.contains(&(BASE + 0x1C));
+        assert!(gone || !module.left_to_host.is_empty(), "the data is either no entry or left to the host");
+        let table = &module.files.iter().find(|(name, _)| name == "patch.c").unwrap().1;
+        assert!(table.contains("recomp_patch_gone_count"));
+    }
+
+    /// codemods2: a pointer a patch writes in .text (a vtable of its own)
+    /// leads to the new code it points to, which nothing else reaches.
+    #[test]
+    fn a_pointer_a_patch_writes_in_text_leads_to_its_code() {
+        let own = [
+            0xEB00_0001, // bl BASE + 0xC
+            0xE12F_FF1E, // bx lr
+            0xE320_F000, // nop
+            0xE3A0_0001, // mov r0, #1
+            0xE12F_FF1E, // bx lr
+            0x0000_0000, // free space
+            0x0000_0000,
+            0x0000_0000,
+        ];
+        let mut patched = own;
+        patched[3] = 0xE3A0_0002; // mov r0, #2: the function changes
+        patched[5] = BASE + 0x18; // a pointer to the new code
+        patched[6] = 0x03A0_0005; // moveq r0, #5: no scan of a gap starts here
+        patched[7] = 0xE12F_FF1E; // bx lr
+        let base = base_of(&own);
+        let code = bytes(&patched);
+        let changed = changed_ranges(BASE, &bytes(&own), &code);
+        let info = |address: u32, size: u32| crate::rom::CodeSetInfo { address, num_pages: 1, size };
+        let exheader = ExHeader {
+            title: String::new(),
+            compress_code: false,
+            text: info(BASE, code.len() as u32),
+            rodata: info(BASE + 0x1000, 0),
+            data: info(BASE + 0x2000, 0),
+            bss_size: 0,
+        };
+        let mut image = code.clone();
+        image.resize(0x1000, 0);
+        let (plan, _) = plan(&base, program(&exheader, &image, &changed), &changed);
+        let held: BTreeSet<u32> = plan.functions.values().flat_map(|f| f.instructions.iter().copied()).collect();
+        assert!(held.contains(&(BASE + 0x18)), "{held:X?}");
+        assert!(plan.holes.is_empty());
+    }
+
+    /// codemods2: .rodata and .data don't run on the console: what a patch
+    /// changes there is data, never code to recompile.
+    #[test]
+    fn changes_past_text_pages_are_data() {
+        let own = [0xE3A0_0001, 0xE12F_FF1E];
+        let code = bytes(&own);
+        let info = |address: u32, size: u32| crate::rom::CodeSetInfo { address, num_pages: 1, size };
+        let exheader = ExHeader {
+            title: String::new(),
+            compress_code: false,
+            text: info(BASE, code.len() as u32),
+            rodata: info(BASE + 0x1000, 8),
+            data: info(BASE + 0x2000, 0),
+            bss_size: 0,
+        };
+        let mut image = code.clone();
+        image.resize(0x1000, 0);
+        image.extend_from_slice(&bytes(&[0xE3A0_0002, 0xE12F_FF1E]));
+        let program = program(&exheader, &image, &[(BASE + 0x1000, BASE + 0x1008)]);
+        assert_eq!(program.text.end(), BASE + 8, ".text doesn't run on into .rodata");
+    }
+
+    /// codemods2: a module links into a library with the compiler CC names
+    /// (gcc, or Zig's clang, which Haiku downloads: it refused patch.c's
+    /// recomp_imports before), exporting what the host looks up.
+    #[test]
+    fn a_module_links_into_a_library() {
+        let own = [0xEB00_0000, 0xE12F_FF1E, 0xE3A0_0001, 0xE12F_FF1E];
+        let mut patched = own;
+        patched[2] = 0xE3A0_0002;
+        let base = base_of(&own);
+        let changed = changed_ranges(BASE, &bytes(&own), &bytes(&patched));
+        let program = Program { text: segment(&patched), seeds: vec![(BASE, Source::Entry)], slots: None };
+        let (plan, program) = plan(&base, program, &changed);
+        let module = source(&plan, &program, &base, 1, 2).unwrap();
+        let dir = std::env::temp_dir().join(format!("3dsrecomp-patch-module-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut sources = Vec::new();
+        for (name, text) in &module.files {
+            std::fs::write(dir.join(name), text).unwrap();
+            if name.ends_with(".c") {
+                sources.push(name.clone());
+            }
+        }
+        let compiler = crate::compile::check(None).expect("a C compiler");
+        let library = dir.join(if cfg!(windows) { "patch.dll" } else { "patch.so" });
+        let built = crate::compile::compile(&compiler, &dir, &sources, &library, &|_, _| true, false);
+        let exists = library.is_file();
+        std::fs::remove_dir_all(&dir).ok();
+        built.unwrap();
+        assert!(exists);
     }
 }

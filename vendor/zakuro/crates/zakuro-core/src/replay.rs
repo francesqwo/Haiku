@@ -101,6 +101,12 @@ impl Replay {
 
     /// the input of a frame, frames asked for in order.
     pub fn input(&mut self, frame: u64) -> InputState {
+        // pulse: a frame before those already asked for (Divine Pulse turned
+        // time back) goes through the changes from the start again
+        if self.next > 0 && self.changes.get(self.next - 1).is_some_and(|(start, _)| *start > frame) {
+            self.next = 0;
+            self.current = InputState::default();
+        }
         while let Some(&(start, input)) = self.changes.get(self.next) {
             if start > frame {
                 break;

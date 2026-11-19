@@ -107,21 +107,21 @@ pub fn virt(system: &System, phys: u32) -> u32 {
 
 impl Tables {
     pub fn read(system: &mut System) -> Tables {
-        let color_type = r32(system, lit::COLOR_FORMAT);
+        let color_type = r32(system, zakuro_core::region::us(lit::COLOR_FORMAT));
         Tables {
-            vb_selector_offset: r32(system, lit::VB_SELECTOR_OFFSET),
-            chunk_indices: r32(system, lit::CHUNK_INDICES),
-            chunk_quad_vertices: r32(system, lit::CHUNK_QUAD_VERTICES),
-            depth_func: r32(system, lit::DEPTH_FUNC),
-            alpha_func: r32(system, lit::ALPHA_FUNC),
-            shape_index_slot: r32(system, lit::SHAPE_INDEX_SLOT),
-            index_u16: r32(system, lit::INDEX_FORMAT) == 0x1403,
-            cull: r32(system, lit::CULL),
-            operands: r32(system, lit::OPERANDS),
-            tevop_vector_offset: r32(system, lit::TEVOP_VECTOR_OFFSET),
-            wrap: r32(system, lit::WRAP),
-            mag: r32(system, lit::MAG),
-            min: r32(system, lit::MIN),
+            vb_selector_offset: r32(system, zakuro_core::region::us(lit::VB_SELECTOR_OFFSET)),
+            chunk_indices: r32(system, zakuro_core::region::us(lit::CHUNK_INDICES)),
+            chunk_quad_vertices: r32(system, zakuro_core::region::us(lit::CHUNK_QUAD_VERTICES)),
+            depth_func: r32(system, zakuro_core::region::us(lit::DEPTH_FUNC)),
+            alpha_func: r32(system, zakuro_core::region::us(lit::ALPHA_FUNC)),
+            shape_index_slot: r32(system, zakuro_core::region::us(lit::SHAPE_INDEX_SLOT)),
+            index_u16: r32(system, zakuro_core::region::us(lit::INDEX_FORMAT)) == 0x1403,
+            cull: r32(system, zakuro_core::region::us(lit::CULL)),
+            operands: r32(system, zakuro_core::region::us(lit::OPERANDS)),
+            tevop_vector_offset: r32(system, zakuro_core::region::us(lit::TEVOP_VECTOR_OFFSET)),
+            wrap: r32(system, zakuro_core::region::us(lit::WRAP)),
+            mag: r32(system, zakuro_core::region::us(lit::MAG)),
+            min: r32(system, zakuro_core::region::us(lit::MIN)),
             color_unsigned: color_type == 0x1401,
         }
     }
@@ -333,7 +333,7 @@ pub fn decode(system: &mut System, t: &Tables, prim: u32, disp: u32, state: u32)
     if callback != 0 {
         // the callback's class, by its OnBegin (first virtual function)
         let vtable = r32(system, callback);
-        let on_begin = r32(system, vtable);
+        let on_begin = zakuro_core::region::to_us(r32(system, vtable)); // eur: the USA OnBegin
         let known = matches!(on_begin, FACE_CALLBACK_ON_BEGIN | FACE_OPTION_ON_BEGIN | LOCUS_ON_BEGIN | MOVIE_ON_BEGIN);
         // gfx-gaps: UnitIcon::DrawCallback sets the combiner for the state's own quad
         let known = known || (on_begin == crate::unit_icon::DRAW_ON_BEGIN && crate::unit_icon::enabled());
@@ -617,7 +617,7 @@ fn face_texture(system: &mut System, file: u32) -> u32 {
             return r32(system, object + 0xC0);
         }
     }
-    let null = r32(system, 0x004E_BBDC);
+    let null = r32(system, zakuro_core::region::us(0x004E_BBDC));
     r32(system, null)
 }
 
@@ -829,7 +829,7 @@ fn polygon_offset(system: &mut System, prim: u32, w2: u32) -> f32 {
     }
     let table = r32(system, prim + 0x2440);
     let f = f32::from_bits(r32(system, table + index * 4));
-    let k = |system: &mut System, at: u32| f32::from_bits(r32(system, at));
+    let k = |system: &mut System, at: u32| f32::from_bits(r32(system, zakuro_core::region::us(at))); // eur: USA literals
     let (k2, k1, k3) = (k(system, 0x0012_FE24), k(system, 0x0012_FE28), k(system, 0x0012_FE2C));
     if k3 == 0.0 || !f.is_finite() {
         return 0.0;

@@ -90,7 +90,7 @@ fn avatar_unit(state: &mut State, system: &mut System) -> Option<u32> {
         return Some(state.avatar_at);
     }
     state.avatar_at = 0;
-    let units = r32(m, UNIT_POOL);
+    let units = r32(m, crate::region::us(UNIT_POOL));
     if units == 0 || !m.is_readable(units, UNIT_SIZE) {
         return None;
     }

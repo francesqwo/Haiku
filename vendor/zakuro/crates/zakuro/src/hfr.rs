@@ -45,7 +45,7 @@ pub struct GameTime {
 impl GameTime {
     pub fn read(memory: &mut Memory) -> GameTime {
         let mut raw = [0u8; 32];
-        memory.read_bytes(GAME_TIME, &mut raw);
+        memory.read_bytes(zakuro_core::region::us(GAME_TIME), &mut raw);
         let word = |i: usize| u32::from_le_bytes(raw[i * 4..i * 4 + 4].try_into().unwrap());
         GameTime { ticks: word(0), vsyncs: word(1), step: word(4), slow: word(5), delta: word(6), total: word(7) }
     }
@@ -634,6 +634,7 @@ impl super::App {
         timed(1);
         self.poll_gamepads();
         self.qol_poll(); // qol: the Game Speed key, the speed, the boon/bane panel
+        self.states_poll(); // pulse: save states
         timed(2);
         if self.room.as_ref().is_some_and(|room| !room.open()) {
             self.leave_room();
@@ -660,7 +661,13 @@ impl super::App {
         }
 
         let typing = self.game.as_ref().is_some_and(|game| game.system.keyboard_request().is_some());
-        let playing = self.game.is_some() && !self.paused && !self.menus.over_game() && !typing;
+        let playing = self.game.is_some() && !self.paused && !self.menus.over_game() && !typing && !crate::pulse::holds(); // pulse: the rewind screen stops it
+        // pace: why the game counts as stopped, in the timing log (a: 1
+        // paused, 2 a menu over it, 4 typing, 8 Divine Pulse's screen)
+        if !playing && self.game.is_some() && zakuro_gpu::smooth::enabled() {
+            let why = self.paused as i64 | (self.menus.over_game() as i64) << 1 | (typing as i64) << 2 | (crate::pulse::holds() as i64) << 3;
+            zakuro_gpu::smooth::point("stopped", now, why, 0.0);
+        }
         if !playing {
             if let Some(audio) = &self.audio {
                 audio.hold();
@@ -1048,6 +1055,15 @@ impl super::App {
             if underruns > 0 && playing {
                 log::warn!("the sound ran dry {underruns} times, the emulation is falling behind");
             }
+            // pace: the game's sound against the wall clock, and the stretching
+            if let Some((wall, made, stretch)) = self.audio.as_ref().and_then(|audio| audio.take_flow()) {
+                let speed = made / wall;
+                if playing && (speed < 0.985 || stretch > 1.01) {
+                    log::warn!("pace: the game made {made:.2} s of sound in {wall:.2} s ({speed:.3}x real time), stretched {:.1}% to fill", (stretch - 1.0) * 100.0);
+                } else {
+                    log::info!("pace: the game made {made:.2} s of sound in {wall:.2} s ({speed:.3}x real time), stretched {:.1}%", (stretch - 1.0) * 100.0);
+                }
+            }
             if let Some(game) = &self.game {
                 let super::Spent { emulating, showing } = std::mem::take(&mut self.spent);
                 log::debug!(target: "zakuro::fps", "{:.1} frames emulated and {shown:.1} shown a second, emulating took {emulating}, showing {showing}", game.fps);
@@ -1088,7 +1104,7 @@ impl super::App {
             // rtpace: dev, the refresh's due time (a = the refresh's frame,
             // b = how late it was raised, ms), and the game's tick counter
             // for the `gtick` probe
-            zakuro_core::pcos::rtpace::set_probe(GAME_TIME);
+            zakuro_core::pcos::rtpace::set_probe(zakuro_core::region::us(GAME_TIME));
             if let Some(game) = &self.game {
                 zakuro_gpu::smooth::point("rtdue", scheduled, game.frame as i64, start.saturating_duration_since(scheduled).as_secs_f64() * 1e3);
             }

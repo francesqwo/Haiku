@@ -580,16 +580,16 @@ fn load_tables(s: &mut State, system: &mut System) {
     }
     let m = &mut system.memory;
     // the person table must be there (a game has started)
-    let pnode = r32(m, PERSON_LIST);
-    let jnode = r32(m, JOB_LIST);
-    let inode = r32(m, ITEM_LIST);
-    if pnode == 0 || jnode == 0 || inode == 0 || r32(m, SKILLS) == 0 || r32(m, CHAPTERS) == 0 {
+    let pnode = r32(m, zakuro_core::region::us(PERSON_LIST));
+    let jnode = r32(m, zakuro_core::region::us(JOB_LIST));
+    let inode = r32(m, zakuro_core::region::us(ITEM_LIST));
+    if pnode == 0 || jnode == 0 || inode == 0 || r32(m, zakuro_core::region::us(SKILLS)) == 0 || r32(m, zakuro_core::region::us(CHAPTERS)) == 0 {
         return;
     }
     if s.english.is_empty() {
         let rom = system.title.as_ref().and_then(zakuro_core::randomizer::rom::Rom::of);
         let Some(rom) = rom else { return };
-        for path in ["m/@E/GameData.bin.lz", "m/@E/Skill.bin.lz", "m/@E/System.bin.lz"] {
+        for path in ["m/@E/GameData.bin.lz", "m/@E/Skill.bin.lz", "m/@E/System.bin.lz", "m/@U/GameData.bin.lz", "m/@U/Skill.bin.lz", "m/@U/System.bin.lz", "m/GameData.bin.lz", "m/Skill.bin.lz", "m/System.bin.lz"] { // eur: @U, the EUR English; jpprep: m/, the Japanese
             if let Some(file) = rom.read(path).and_then(|f| zakuro_core::randomizer::rom::lz11(&f)) {
                 for (k, v) in zakuro_core::randomizer::rom::messages(&file) {
                     s.english.entry(k).or_insert(v);
@@ -671,8 +671,8 @@ fn load_tables(s: &mut State, system: &mut System) {
     }
 
     // skills
-    let table = r32(m, SKILLS);
-    let count = r32(m, SKILLS + 8).min(400);
+    let table = r32(m, zakuro_core::region::us(SKILLS));
+    let count = r32(m, zakuro_core::region::us(SKILLS) + 8).min(400);
     s.skills.clear();
     s.capture_skills.clear();
     for i in 1..count {
@@ -712,8 +712,8 @@ fn load_tables(s: &mut State, system: &mut System) {
     }
 
     // chapters
-    let table = r32(m, CHAPTERS);
-    let count = r32(m, CHAPTERS + 4).min(256);
+    let table = r32(m, zakuro_core::region::us(CHAPTERS));
+    let count = r32(m, zakuro_core::region::us(CHAPTERS) + 4).min(256);
     s.chapters.clear();
     for i in 0..count {
         let at = table + i * 0x1C;
@@ -763,7 +763,7 @@ fn load_tables(s: &mut State, system: &mut System) {
 }
 
 fn unit_list(m: &mut Memory, force: u32) -> Vec<u32> {
-    let forces = r32(m, FORCES);
+    let forces = r32(m, zakuro_core::region::us(FORCES));
     let mut out = Vec::new();
     if forces == 0 {
         return out;
@@ -777,7 +777,7 @@ fn unit_list(m: &mut Memory, force: u32) -> Vec<u32> {
 }
 
 fn refresh_roster(s: &mut State, m: &mut Memory) {
-    let pool = r32(m, UNIT_POOL);
+    let pool = r32(m, zakuro_core::region::us(UNIT_POOL));
     let mut roster = Vec::new();
     if pool != 0 {
         for force in [0u32, 3] {
@@ -841,12 +841,12 @@ fn refresh_roster(s: &mut State, m: &mut Memory) {
     if s.chosen == 0 || !s.roster.iter().any(|u| u.addr == s.chosen) {
         s.chosen = s.roster.first().map_or(0, |u| u.addr);
     }
-    let gud = r32(m, GAME_USER);
+    let gud = r32(m, zakuro_core::region::us(GAME_USER));
     s.in_game = gud != 0 && pool != 0 && !s.roster.is_empty();
     s.gold = if gud != 0 { r32(m, gud + 0x38) } else { 0 };
     s.route = if gud != 0 { r8(m, gud + 0x2E) } else { 0 };
-    s.on_map = r32(m, SITUATION) != 0;
-    s.in_castle = r32(m, CASTLE_MAIN) != 0 && r32(m, FREE_MOVE) != 0 && !s.on_map;
+    s.on_map = r32(m, zakuro_core::region::us(SITUATION)) != 0;
+    s.in_castle = r32(m, zakuro_core::region::us(CASTLE_MAIN)) != 0 && r32(m, zakuro_core::region::us(FREE_MOVE)) != 0 && !s.on_map;
 }
 
 fn read_view(s: &mut State) {
@@ -969,7 +969,7 @@ const BUILD_SEQ: u32 = 0x006D_29AC; // the building sequence running, or 0
 /// a building's record (castle::CastleBuilding::Data, 0x68 bytes: +0 unique
 /// index, +2 level, +3 type, +0x4C its Dragon Vein Point cost)
 fn building_record(m: &mut Memory, uid: u32) -> u32 {
-    let (index, base) = (r32(m, BUILDINGS), r32(m, BUILDINGS + 8));
+    let (index, base) = (r32(m, zakuro_core::region::us(BUILDINGS)), r32(m, zakuro_core::region::us(BUILDINGS) + 8));
     if index == 0 || base == 0 || uid >= 0x208 {
         return 0;
     }
@@ -987,7 +987,7 @@ fn building_record(m: &mut Memory, uid: u32) -> u32 {
 /// not built yet
 fn building_candidates(m: &mut Memory) -> Vec<(u16, u8)> {
     let mut out = Vec::new();
-    let castle = r32(m, CASTLE);
+    let castle = r32(m, zakuro_core::region::us(CASTLE));
     let data = if castle != 0 { r32(m, castle + 8) } else { 0 };
     let cud = r32(m, data);
     let dispos = if data != 0 { r32(m, data + 4) } else { 0 };
@@ -1019,7 +1019,7 @@ fn building_candidates(m: &mut Memory) -> Vec<(u16, u8)> {
 }
 
 fn castle_points(m: &mut Memory) -> (u32, u32) {
-    let castle = r32(m, CASTLE);
+    let castle = r32(m, zakuro_core::region::us(CASTLE));
     let cud = if castle != 0 { r32p(m, castle + 8) } else { 0 };
     (cud, if cud != 0 { r32(m, cud + 0xD0) } else { 0 })
 }
@@ -1027,7 +1027,7 @@ fn castle_points(m: &mut Memory) -> (u32, u32) {
 /// the next building's level-up, once the last one's sequence has ended
 fn buildings_step(s: &mut State, m: &mut Memory) {
     let Some(mut run) = s.buildings.take() else { return };
-    if r32(m, BUILD_SEQ) != 0 {
+    if r32(m, zakuro_core::region::us(BUILD_SEQ)) != 0 {
         run.idle = 0;
         s.buildings = Some(run);
         return;
@@ -1037,7 +1037,7 @@ fn buildings_step(s: &mut State, m: &mut Memory) {
         s.buildings = Some(run);
         return;
     }
-    let free_roam = r32(m, CASTLE_MAIN) != 0 && r32(m, FREE_MOVE) != 0 && r32(m, SITUATION) == 0;
+    let free_roam = r32(m, zakuro_core::region::us(CASTLE_MAIN)) != 0 && r32(m, zakuro_core::region::us(FREE_MOVE)) != 0 && r32(m, zakuro_core::region::us(SITUATION)) == 0;
     let next = building_candidates(m).into_iter().find(|(uid, _)| run.asked.get(uid).copied().unwrap_or(0) < 2);
     match next {
         Some((uid, level)) if free_roam => {
@@ -1216,7 +1216,7 @@ fn run(s: &mut State, system: &mut System, action: Action) {
             hand_marking(s, op::SUPPORT, &[a, b, level], format!("{na} and {nb}'s support is {rank}"), &[a, b]);
         }
         Action::MaxGold => {
-            let gud = r32(m, GAME_USER);
+            let gud = r32(m, zakuro_core::region::us(GAME_USER));
             if gud != 0 {
                 w32(m, gud + 0x38, 999_999);
                 notice(s, "Gold is 999,999.".to_string());
@@ -1227,10 +1227,10 @@ fn run(s: &mut State, system: &mut System, action: Action) {
             // bits at +0xDC, food at *(+0xD8) and its bits at +0xDE (as
             // AddGemstoneNum / AddFoodNum keep them, 99 at most); Dragon
             // Vein Points at +0xD0 (what a building's upgrade costs)
-            let castle = r32(m, CASTLE);
+            let castle = r32(m, zakuro_core::region::us(CASTLE));
             let cud = if castle != 0 { r32p(m, castle + 8) } else { 0 };
-            let gems = r32p(m, GEMSTONES + 4).min(32);
-            let foods = r32p(m, FOODS + 4).min(32);
+            let gems = r32p(m, zakuro_core::region::us(GEMSTONES) + 4).min(32);
+            let foods = r32p(m, zakuro_core::region::us(FOODS) + 4).min(32);
             if cud == 0 || gems == 0 {
                 notice(s, "My Castle's resources: load a save first.".to_string());
                 return;
@@ -1273,7 +1273,7 @@ fn run(s: &mut State, system: &mut System, action: Action) {
                 write(word::ITEMS + 1 + i, *id as u32);
             }
             write(word::ITEMS, ids.len().min(room) as u32);
-            let _ = r32(m, TRANSPORTER);
+            let _ = r32(m, zakuro_core::region::us(TRANSPORTER));
             hand_marking(s, op::CONVOY, &[99], "The convoy has 99 of every item".to_string(), &[]);
         }
         Action::Chapter { index } => {
@@ -1471,6 +1471,22 @@ fn script_command(system: &mut System, command: &str, frame: u64) {
                 let level = rest.parse().unwrap_or(1);
                 hand_marking(s, 9, &[level], "Records Hall".to_string(), &[]);
             }
+            // jpn tests: My Room's petting view (the Japanese build's Live2D
+            // skinship) for a unit: "live2d <unit> [support point 0-4]"
+            "live2d" => {
+                let (name, point) = match rest.rsplit_once(' ') {
+                    Some((n, p)) if p.parse::<u32>().is_ok() => (n.to_string(), p.parse().unwrap_or(0)),
+                    _ => (rest.clone(), 0),
+                };
+                if !zakuro_core::region::is_jpn() {
+                    println!("cheats: frame {frame} live2d: only the Japanese game has the petting view");
+                } else if let Some(u) = find_unit(s, &name) {
+                    // Live2DHandler::Create in the Japanese build (0x001CA624; not in the USA one)
+                    hand_marking(s, 12, &[u, point, 0x001C_A624], format!("My Room's petting view for {name}"), &[]);
+                } else {
+                    println!("cheats: frame {frame} live2d: no unit {name}");
+                }
+            }
             "chapters" => {
                 for c in &s.chapters {
                     println!("cheats:   chapter {} {} {}: {} (routes {})", c.cid, c.kind, c.prefix, c.name, c.routes);
@@ -1489,7 +1505,7 @@ fn script_command(system: &mut System, command: &str, frame: u64) {
 /// cheats2: the map's tricks (Dragon Veins are type 0xB), the castle's
 /// buildings and the Jail
 fn dump_cheats2(m: &mut Memory) {
-    let trick = r32(m, 0x006D_7FEC);
+    let trick = r32(m, zakuro_core::region::us(0x006D_7FEC));
     let mut d = if trick != 0 { r32(m, trick) } else { 0 };
     let mut guard = 0;
     while d != 0 && guard < 64 {
@@ -1526,7 +1542,7 @@ fn dump_cheats2(m: &mut Memory) {
             );
         }
     }
-    let castle = r32(m, CASTLE);
+    let castle = r32(m, zakuro_core::region::us(CASTLE));
     let data = if castle != 0 { r32(m, castle + 8) } else { 0 };
     let dispos = if data != 0 { r32(m, data + 4) } else { 0 };
     if dispos != 0 {
@@ -1549,13 +1565,13 @@ fn dump_cheats2(m: &mut Memory) {
 }
 
 fn dump_castle(m: &mut Memory) {
-    let castle = r32(m, CASTLE);
+    let castle = r32(m, zakuro_core::region::us(CASTLE));
     let cud = if castle != 0 { r32p(m, castle + 8) } else { 0 };
     if cud == 0 {
         return;
     }
-    let gems = r32p(m, GEMSTONES + 4).min(32);
-    let foods = r32p(m, FOODS + 4).min(32);
+    let gems = r32p(m, zakuro_core::region::us(GEMSTONES) + 4).min(32);
+    let foods = r32p(m, zakuro_core::region::us(FOODS) + 4).min(32);
     let (g, f) = (r32(m, cud + 0xD4), r32(m, cud + 0xD8));
     let gv: Vec<u8> = (0..gems).map(|i| r8(m, g + i)).collect();
     let fv: Vec<u8> = (0..foods).map(|i| r8(m, f + i)).collect();

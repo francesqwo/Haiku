@@ -146,7 +146,8 @@ fn index_path(romfs_dir: &Path) -> PathBuf {
 
 /// the files the index of a RomFS folder lists, when it has one that is
 /// complete: the first line is the file count.
-fn read_index(romfs_dir: &Path) -> Option<Vec<(String, u64)>> {
+/// eurdlc: also for eur::adapt_dlc, which reads what a DLC content holds.
+pub(crate) fn read_index(romfs_dir: &Path) -> Option<Vec<(String, u64)>> {
     let text = std::fs::read_to_string(index_path(romfs_dir)).ok()?;
     let mut lines = text.lines();
     let count: usize = lines.next()?.strip_prefix("files ")?.parse().ok()?;
@@ -160,7 +161,8 @@ fn read_index(romfs_dir: &Path) -> Option<Vec<(String, u64)>> {
 }
 
 /// writes the index of a RomFS folder from the files extracted to it.
-fn write_index(romfs_dir: &Path, list: &[(String, u64)]) -> std::io::Result<()> {
+/// eurdlc: also for eur::adapt_dlc, which adds the files it copies.
+pub(crate) fn write_index(romfs_dir: &Path, list: &[(String, u64)]) -> std::io::Result<()> {
     let mut text = format!("files {}\n", list.len());
     for (path, size) in list {
         text += &format!("{size}\t{path}\n");
@@ -423,6 +425,9 @@ pub fn install_dlc(cia_path: &Path, out: &Path, check: bool) -> Result<Tally, Fs
     }
     let dir = out.join(DLC_DIR).join(format!("{:016X}", cia.title_id));
     say(format!("{} DLC {:016X} v{}, {} contents", cia_path.display(), cia.title_id, cia.version, cia.contents.len()));
+    if !check {
+        fresh_dlc_dir(&dir)?; // eurdlc
+    }
     let mut list = format!("title {:016X}\nversion {}\n", cia.title_id, cia.version);
     let mut total = Tally::default();
     for content in &cia.contents {
@@ -465,6 +470,7 @@ pub fn install_dlc(cia_path: &Path, out: &Path, check: bool) -> Result<Tally, Fs
 /// the TMD lists, apps the files of those there are, by content index.
 pub fn install_dlc_apps(title_id: u64, version: u16, listed: &[Content], apps: &[(u16, PathBuf)], out: &Path) -> Result<Tally, FsError> {
     let dir = out.join(DLC_DIR).join(format!("{title_id:016X}"));
+    fresh_dlc_dir(&dir)?; // eurdlc
     let mut list = format!("title {title_id:016X}\nversion {version}\n");
     let mut total = Tally::default();
     for content in listed {
@@ -491,6 +497,17 @@ pub fn install_dlc_apps(title_id: u64, version: u16, listed: &[Content], apps: &
     std::fs::write(dir.join(DLC_FILE), list)?;
     say(format!("DLC: {} files, {} MiB in {}", total.files, total.bytes >> 20, dir.display()));
     Ok(total)
+}
+
+/// eurdlc: a DLC installed again starts from an empty folder, so no file of
+/// the copy it replaces stays behind (another dump of the same DLC, or the
+/// region-free DLC filed for the EUR game with its English text copied).
+pub(crate) fn fresh_dlc_dir(dir: &Path) -> Result<(), FsError> {
+    if dir.join(DLC_FILE).is_file() {
+        say(format!("replacing the DLC installed in {}", dir.display()));
+        std::fs::remove_dir_all(dir)?;
+    }
+    Ok(())
 }
 
 /// the DLC folders installed beside a folder game, data/dlc/*.

@@ -39,7 +39,7 @@ extern OsNativeHook os_native_hook;
 #define ONLINE_JOIN_LIST    0x712u
 
 #define ONLINE_MESS_STATE   0x006DCBDCu /* +4 buffer, +8 size in units */
-#define ONLINE_LANG_INDEX   0x006BDA6Cu /* Lang::Folder's language: 1 en, 2 fr, 5 es */
+#define ONLINE_LANG_INDEX   0x006BDA6Cu /* Lang::Folder's language: 1 en, 2 fr, 3 de, 4 it, 5 es */
 #define ONLINE_TEXT_FROM_END 0x180u     /* units before the buffer's end */
 #define ONLINE_TEXT_ROOM     0x100u     /* units the texts may take */
 
@@ -69,7 +69,7 @@ RECOMP_OVERRIDE(0x00406194) {
     CALL(RECOMP_ORIGINAL(0x00406194));
 }
 
-/* the texts, by slot: English, French, Spanish */
+/* the texts, by slot: English, French, Spanish (German and Italian below) */
 enum { T_NAME, T_HELP, T_HOST, T_HOST_HELP, T_JOIN, T_JOIN_HELP, T_COUNT };
 
 /* the help line holds about 40 characters */
@@ -98,13 +98,40 @@ static const char *const online_es[T_COUNT] = {
     "Escribe el có" "digo de tu rival.",
 };
 
+/* eur2: the EUR build's German and Italian (Lang::Folder 3 and 4), in the
+   game's own terms (Lokaler Kampf, Sitzung beitreten; Battaglia locale; the
+   Italian name is not Battaglia online, the game's Internet battle) */
+static const char *const online_de[T_COUNT] = {
+    "Online-Kampf",
+    "Fordere Freunde online per Code heraus.",
+    "Erstellen",
+    "Erhalte einen Code für deinen Gegner.",
+    "Beitreten",
+    "Gib den Code deines Gegners ein.",
+};
+static const char *const online_it[T_COUNT] = {
+    "Sfida online",
+    "Sfida un amico online con un codice.",
+    "Crea",
+    "Ottieni un codice da inviare al rivale.",
+    "Unisciti",
+    "Inserisci il codice del tuo rivale.",
+};
+
 /* writes a text (Latin-1) into the shared buffer and returns where, or 0
    when the buffer is too small to hold it safely */
+int haiku_code_is_jpn(void);                 /* jpprep: eur_region.c */
+const char *haiku_text_ja(const char *english); /* jpprep: jpn_text.c */
+uint32_t haiku_utf8_next(const unsigned char **text);
+
 static uint32_t online_text(Context *ctx, int slot) {
     const char *const *table = online_en;
-    switch (mem_read8(ctx, ONLINE_LANG_INDEX)) {
+    /* jpprep: the Japanese game has no Lang::Folder (jpn_text.c's texts) */
+    switch (haiku_code_is_jpn() ? 0 : mem_read8(ctx, ONLINE_LANG_INDEX)) {
     case 2: table = online_fr; break;
     case 5: table = online_es; break;
+    case 3: table = online_de; break; /* eur2 */
+    case 4: table = online_it; break; /* eur2 */
     default: break;
     }
     const uint32_t buffer = mem_read32(ctx, ONLINE_MESS_STATE + 4);
@@ -116,12 +143,13 @@ static uint32_t online_text(Context *ctx, int slot) {
     const uint32_t per = ONLINE_TEXT_ROOM / T_COUNT;
     const uint32_t at = buffer + (units - ONLINE_TEXT_FROM_END + per * (uint32_t)slot) * 2;
     /* online2: the texts are UTF-8 in this file (é, í, ó), one unit each */
-    const unsigned char *text = (const unsigned char *)table[slot];
+    const char *chosen = table[slot];
+    if (haiku_code_is_jpn() && haiku_text_ja(online_en[slot]))
+        chosen = haiku_text_ja(online_en[slot]); /* jpprep */
+    const unsigned char *text = (const unsigned char *)chosen;
     uint32_t i = 0;
     while (*text && i + 1 < per) {
-        uint32_t c = *text++;
-        if ((c & 0xE0) == 0xC0 && (*text & 0xC0) == 0x80)
-            c = (c & 0x1F) << 6 | (*text++ & 0x3F);
+        const uint32_t c = haiku_utf8_next(&text); /* jpprep: up to three bytes */
         mem_write16(ctx, at + 2 * i++, (uint16_t)c);
     }
     mem_write16(ctx, at + 2 * i, 0);
@@ -291,7 +319,22 @@ static const uint16_t online_cheats_fr[] =
 static const uint16_t online_cheats_es[] =
     u"Los personajes modificados con trucos\nno están permitidos en este combate.";
 
+/* jpprep: the Japanese game's */
+static const uint16_t online_cheats_ja[] =
+    u"チートで変更されたキャラクターは\nこの対戦には出撃できません。";
+
+int haiku_jpn_japanese(void); /* jpn2: jpn_text.c */
+
 static const uint16_t *online_cheats_text(Context *ctx, uint32_t *length) {
+    if (haiku_code_is_jpn()) {
+        /* jpn2: English under an English translation */
+        if (!haiku_jpn_japanese()) {
+            *length = sizeof online_cheats_en / 2;
+            return online_cheats_en;
+        }
+        *length = sizeof online_cheats_ja / 2;
+        return online_cheats_ja;
+    }
     switch (mem_read8(ctx, ONLINE_LANG_INDEX)) {
     case 2: *length = sizeof online_cheats_fr / 2; return online_cheats_fr;
     case 5: *length = sizeof online_cheats_es / 2; return online_cheats_es;
@@ -302,9 +345,9 @@ static const uint16_t *online_cheats_text(Context *ctx, uint32_t *length) {
 /* for offline_msg.c's GameMessage::Tick hook: this window closes with a
    click too, as its own does */
 int online_message_is_ours(Context *ctx, uint32_t text) {
-    const uint16_t *texts[3] = {online_cheats_en, online_cheats_fr, online_cheats_es};
-    const uint32_t lengths[3] = {sizeof online_cheats_en / 2, sizeof online_cheats_fr / 2, sizeof online_cheats_es / 2};
-    for (int t = 0; t < 3; t++) {
+    const uint16_t *texts[4] = {online_cheats_en, online_cheats_fr, online_cheats_es, online_cheats_ja};
+    const uint32_t lengths[4] = {sizeof online_cheats_en / 2, sizeof online_cheats_fr / 2, sizeof online_cheats_es / 2, sizeof online_cheats_ja / 2};
+    for (int t = 0; t < 4; t++) { /* jpprep: and the Japanese */
         uint32_t i = 0;
         while (i < lengths[t] && mem_read16(ctx, text + 2 * i) == texts[t][i])
             i++;

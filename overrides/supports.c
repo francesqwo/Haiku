@@ -228,3 +228,11 @@ RECOMP_OVERRIDE(0x0053ED90) {
     }
     CALL(RECOMP_ORIGINAL(0x0053ED90));
 }
+
+/* pulsefix: what of this file is the console's state, kept with Divine
+   Pulse's moments and saved states (overrides/keep.c) */
+void supports_keep(void (*add)(const char *, void *, uint32_t)) {
+    add("supports.supports_flag_pending", &supports_flag_pending, sizeof supports_flag_pending);
+    add("supports.ask_back", &ask_back, sizeof ask_back);
+    add("supports.ask_return", &ask_return, sizeof ask_return);
+}

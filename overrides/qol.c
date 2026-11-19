@@ -119,6 +119,7 @@
  * build without the host's settings behaves as the game.
  */
 #include "overrides.h"
+#include <string.h> /* eur2: strcmp */
 
 /* set by the host */
 uint32_t qol_skip_story = 0;
@@ -565,16 +566,68 @@ RECOMP_OVERRIDE(0x00433F54) {
 #define QOL_MARK 0x4D4C4F51u /* "QOLM" */
 #define QOL_LIST_ROOM 256u
 
-enum { QOL_TITLE = 1, QOL_EXIT = 2, QOL_MAP_TITLE = 3, QOL_MAP_EXIT = 4 }; /* qol4: the map's */
+enum { QOL_TITLE = 1, QOL_EXIT = 2, QOL_MAP_TITLE = 3, QOL_MAP_EXIT = 4, QOL_MAP_PULSE = 5 }; /* qol4: the map's; pulse: Divine Pulse */
+
+/* pulse: overrides/pulse.c's System Menu entry */
+int pulse_menu_wanted(void);
+void pulse_menu_choose(Context *ctx);
 
 /* qol4: the battle map's menu (map::CreateSystemMenu) */
 #define MAP_MENU_RETURN    0x00368E8Cu /* after bl BasicMenu::Create in map::CreateSystemMenu */
 #define TURN_END_VTABLE    0x006319A4u /* map::(anonymous)::TurnEnd: End, BasicMenuItem's own attribute */
 
+/* eur2: the menu items' texts in the EUR game's other languages (Lang::
+   Folder's index: 2 French, 3 German, 4 Italian, 5 Spanish; the USA game
+   is always 1, English), by the English text, in the game's own terms
+   (its "Retourner au menu principal", "zurück zum Hauptmenü", "volver al
+   menú principal", "tornare al menu principale"). UTF-8 here. */
+#define QOL_LANG_INDEX 0x006BDA6Cu
+static const char *const qol_texts[][5] = {
+    /* English, French, German, Italian, Spanish */
+    {"Return to Title", "Menu principal", "Zum Hauptmenü", "Menu principale", "Menú principal"},
+    {"Return to the title screen.", "Retourner au menu principal.", "Zurück zum Hauptmenü.", "Torna al menu principale.", "Volver al menú principal."},
+    {"Return to the title screen?\nAnything you haven't saved will be lost.",
+     "Retourner au menu principal ?\nToute progression non sauvegardée\nsera perdue.",
+     "Zurück zum Hauptmenü?\nNicht gespeicherter Fortschritt\ngeht verloren.",
+     "Vuoi tornare al menu principale?\nI progressi non salvati andranno persi.",
+     "¿Quieres volver al menú principal?\nSe perderá lo que no hayas guardado."},
+    {"Exit to Desktop", "Quitter le jeu", "Spiel beenden", "Esci dal gioco", "Salir del juego"},
+    {"Close the game and return to the desktop.", "Fermer le jeu et revenir au bureau.", "Das Spiel schließen und zum Desktop.", "Chiudi il gioco e torna al desktop.", "Cerrar el juego y volver al escritorio."},
+    {"Exit to the desktop?\nAnything you haven't saved will be lost.",
+     "Quitter le jeu ?\nToute progression non sauvegardée\nsera perdue.",
+     "Spiel beenden?\nNicht gespeicherter Fortschritt\ngeht verloren.",
+     "Vuoi uscire dal gioco?\nI progressi non salvati andranno persi.",
+     "¿Quieres salir del juego?\nSe perderá lo que no hayas guardado."},
+    {"Divine Pulse", "Pulsation divine", "Göttlicher Puls", "Battito divino", "Pulso divino"},
+    {"Turn back time to undo actions on this map.", "Remonter le temps pour annuler vos actions.", "Die Zeit zurückdrehen, um Züge zu ändern.", "Riavvolgi il tempo per annullare le azioni.", "Retrocede en el tiempo para deshacer acciones."},
+};
+
+int haiku_code_is_jpn(void);                 /* jpprep: eur_region.c */
+const char *haiku_text_ja(const char *english); /* jpprep: jpn_text.c */
+uint32_t haiku_utf8_next(const unsigned char **text);
+
 static void qol_text(Context *ctx, uint32_t at, const char *text, uint32_t room) {
+    /* jpprep: the Japanese game's, which has no Lang::Folder */
+    const int jpn = haiku_code_is_jpn();
+    if (jpn && haiku_text_ja(text))
+        text = haiku_text_ja(text);
+    /* eur2: the language's own, when there is one */
+    const uint32_t lang = jpn ? 0 : mem_read8(ctx, QOL_LANG_INDEX);
+    if (lang >= 2 && lang <= 5) {
+        for (uint32_t k = 0; k < sizeof qol_texts / sizeof qol_texts[0]; k++) {
+            if (strcmp(qol_texts[k][0], text) == 0) {
+                text = qol_texts[k][lang - 1];
+                break;
+            }
+        }
+    }
+    const unsigned char *p = (const unsigned char *)text;
     uint32_t i = 0;
-    for (; text[i] && i + 1 < room; i++)
-        mem_write16(ctx, at + 2 * i, (uint16_t)(unsigned char)text[i]);
+    while (*p && i + 1 < room) {
+        /* eur2: two-byte UTF-8 (é, ü, ñ...); jpprep: three (kana, kanji) */
+        const uint32_t c = haiku_utf8_next(&p);
+        mem_write16(ctx, at + 2 * i++, (uint16_t)c);
+    }
     mem_write16(ctx, at + 2 * i, 0);
 }
 
@@ -591,6 +644,7 @@ static int qol_item(Context *ctx, uint32_t item) {
 typedef struct {
     uint32_t tls, lr, a, b, step;
     uint32_t map; /* qol4: the map's menu, not My Castle's */
+    uint32_t a2;  /* pulse: the map's menu gets Divine Pulse too */
 } QolCall;
 static QolCall qol_calls[8];
 
@@ -634,13 +688,16 @@ int qol_menu_create(Context *ctx) {
     if (!add) {
         /* qol4: or the battle map's menu */
         int castle = ctx->r[14] == CASTLE_MENU_RETURN && *(volatile uint32_t *)&qol_castle_items;
-        int map = ctx->r[14] == MAP_MENU_RETURN && *(volatile uint32_t *)&qol_map_items;
+        int map = ctx->r[14] == MAP_MENU_RETURN && (*(volatile uint32_t *)&qol_map_items || pulse_menu_wanted()); /* pulse: or Divine Pulse alone */
         if ((!castle && !map) || !(add = qol_call_new(ctx, CALL_MENU)))
             return 0;
         add->lr = ctx->r[14];
         add->a = ctx->r[0];
         add->b = ctx->r[1];
         add->map = map;
+        add->a2 = map && pulse_menu_wanted(); /* pulse: and Divine Pulse */
+        if (map && !*(volatile uint32_t *)&qol_map_items)
+            add->step |= 1; /* pulse: Divine Pulse alone, without Return to Title */
     } else {
         /* back from operator new: the item in r0 */
         uint32_t item = ctx->r[0], kind = (add->step & 0xFF) + 1;
@@ -649,8 +706,14 @@ int qol_menu_create(Context *ctx) {
                 mem_write32(ctx, item + at, 0);
             mem_write32(ctx, item, add->map ? TURN_END_VTABLE : SAVE_ITEM_VTABLE); /* qol4 */
             mem_write32(ctx, item + QI_MARK, QOL_MARK);
-            mem_write32(ctx, item + QI_KIND, add->map ? kind + 2 : kind); /* qol4: QOL_MAP_TITLE, QOL_MAP_EXIT */
-            if (kind == QOL_TITLE) {
+            mem_write32(ctx, item + QI_KIND, add->map ? (kind == 2 ? QOL_MAP_PULSE : kind + 2) : kind); /* qol4: QOL_MAP_TITLE; pulse: QOL_MAP_PULSE */
+            if (add->map && kind == 2) {
+                /* pulse: Divine Pulse, directly above Return to Title (or
+                   above End without it), so the menu's own cursor (Unit
+                   first, Up to End) stays where the game puts it */
+                qol_text(ctx, item + QI_NAME, "Divine Pulse", 24);
+                qol_text(ctx, item + QI_HELP, "Turn back time to undo actions on this map.", 64);
+            } else if (kind == QOL_TITLE) {
                 qol_text(ctx, item + QI_NAME, "Return to Title", 24);
                 qol_text(ctx, item + QI_HELP, "Return to the title screen.", 64);
                 qol_text(ctx, item + QI_ASK, "Return to the title screen?\nAnything you haven't saved will be lost.", 96);
@@ -665,9 +728,17 @@ int qol_menu_create(Context *ctx) {
             while (count + 1 < QOL_LIST_ROOM && mem_read32(ctx, add->b + 4 * count))
                 count++;
             if (count && count + 1 < QOL_LIST_ROOM) {
-                uint32_t last = mem_read32(ctx, add->b + 4 * (count - 1));
-                mem_write32(ctx, add->b + 4 * (count - 1), item);
-                mem_write32(ctx, add->b + 4 * count, last);
+                uint32_t at = count - 1;
+                /* pulse2: Divine Pulse goes directly above Return to Title
+                   when the item before End is ours */
+                if (add->map && kind == 2 && count >= 2) {
+                    uint32_t before = mem_read32(ctx, add->b + 4 * (count - 2));
+                    if (qol_item(ctx, before) && mem_read32(ctx, before + QI_KIND) == QOL_MAP_TITLE)
+                        at = count - 2;
+                }
+                for (uint32_t i = count; i > at; i--)
+                    mem_write32(ctx, add->b + 4 * i, mem_read32(ctx, add->b + 4 * (i - 1)));
+                mem_write32(ctx, add->b + 4 * at, item);
                 mem_write32(ctx, add->b + 4 * (count + 1), 0);
             }
         }
@@ -676,7 +747,7 @@ int qol_menu_create(Context *ctx) {
     ctx->budget -= 8;
     /* qol5b: the map's menu gets Return to Title only (the user: Exit to
        Desktop stays in the options, the Main Menu and My Castle's menu) */
-    if ((add->step & 0xFF) < (add->map ? 1u : 2u)) {
+    if ((add->step & 0xFF) < (add->map ? 1u + add->a2 : 2u)) { /* pulse: a2, Divine Pulse too */
         qol_menu_new(ctx);
         return 1;
     }
@@ -785,6 +856,11 @@ RECOMP_OVERRIDE(0x00379218) {
 }
 
 RECOMP_OVERRIDE(0x00378FE8) {
+    /* pulse: Divine Pulse closes the menu and opens the rewind */
+    if (qol_item(ctx, ctx->r[0]) && mem_read32(ctx, ctx->r[0] + QI_KIND) == QOL_MAP_PULSE && !qol_call_find(ctx, CALL_ASK)) {
+        pulse_menu_choose(ctx);
+        return;
+    }
     if (!qol_asking(ctx, ctx->r[0])) {
         CALL(RECOMP_ORIGINAL(0x00378FE8));
         return;
@@ -961,4 +1037,14 @@ RECOMP_OVERRIDE(0x003FE9EC) {
     ctx->thumb = 0;
     ctx->budget -= 4;
     CALL(recomp_call);
+}
+
+/* pulsefix: what of this file is the console's state, kept with Divine
+   Pulse's moments and saved states (overrides/keep.c) */
+void qol_keep(void (*add)(const char *, void *, uint32_t)) {
+    add("qol.qol_calls", &qol_calls, sizeof qol_calls);
+    add("qol.qol_choice_open", &qol_choice_open, sizeof qol_choice_open);
+    add("qol.qol_dialog_open", &qol_dialog_open, sizeof qol_dialog_open);
+    add("qol.qol_confirm", &qol_confirm, sizeof qol_confirm);
+    add("qol.qol_event_movie", &qol_event_movie, sizeof qol_event_movie);
 }

@@ -38,6 +38,17 @@ pub struct Dlc {
 }
 
 impl Dlc {
+    /// eurdlc: the panel's headline, the DLC's own region
+    pub fn headline(&self) -> &'static str {
+        if self.title_id == crate::eur::DLC_TITLE {
+            "Fire Emblem Fates DLC (Europe)"
+        } else if self.title_id == crate::jpn::DLC_TITLE {
+            "Fire Emblem if DLC (Japan)"
+        } else {
+            "Fire Emblem Fates DLC (USA)"
+        }
+    }
+
     pub fn describe(&self) -> String {
         let source = match self.kind {
             Kind::Cia => "a decrypted CIA",
@@ -45,7 +56,8 @@ impl Dlc {
             Kind::Haiku => "an earlier Haiku install",
         };
         format!(
-            "Fire Emblem Fates DLC (USA), title {:016X} v{}: {} of its {} contents, {} MB, from {source}.",
+            "Fire Emblem Fates DLC ({}), title {:016X} v{}: {} of its {} contents, {} MB, from {source}.",
+            if self.title_id == crate::eur::DLC_TITLE { "EUR" } else if self.title_id == crate::jpn::DLC_TITLE { "Japan, Fire Emblem if" } else { "USA" }, // eur, jpprep
             self.title_id,
             self.version,
             self.contents.len(),
@@ -55,12 +67,20 @@ impl Dlc {
     }
 }
 
+/// eur: the USA DLC (region-free CIAs carry it for every region) or the
+/// one the EUR game asks for
+fn known_title(title: u64) -> bool {
+    // jpprep: and the Japanese DLC (which game it fits: jpn::dlc_fits)
+    title == DLC_TITLE || title == crate::eur::DLC_TITLE || title == crate::jpn::DLC_TITLE
+}
+
 fn wrong_title(title: u64) -> Problem {
     match title >> 32 {
         0x0004_0000 => Problem::WrongKind("This is a game, not DLC. Select the DLC here (the game was the step before).".into()),
         0x0004_000E => Problem::WrongKind("This is an update, not the DLC. Haiku doesn't need the update; select the DLC.".into()),
         0x0004_008C => Problem::WrongGame(format!(
-            "This is DLC for a different game or region (title {title:016X}). Haiku needs Fire Emblem Fates' USA DLC (0004008C00179400)."
+            // eurdlc: the European DLC is one too
+            "This is DLC for a different game (title {title:016X}). Haiku needs Fire Emblem Fates' DLC: the USA DLC (0004008C00179400), or for the European game the European DLC (0004008C00179500)."
         )),
         _ => Problem::NotADump(format!("This is not Fire Emblem Fates DLC (title {title:016X}).")),
     }
@@ -88,7 +108,7 @@ pub fn check(path: &Path) -> Result<Dlc, Problem> {
     let tmd_size = u32_at(0x10) as usize;
     let tmd = file.read(tmd_offset, tmd_size)?;
     let (title, version, records) = dump::tmd_contents(&tmd).ok_or_else(|| Problem::Corrupt("The CIA's title metadata can't be read: the file is damaged.".into()))?;
-    if title != DLC_TITLE {
+    if !known_title(title) {
         return Err(wrong_title(title));
     }
     let mut contents = Vec::new();
@@ -140,10 +160,13 @@ fn check_ncch_plain(ncch: &[u8], file: &mut Dump, at: u64) -> Result<(), Problem
 
 fn check_folder(dir: &Path) -> Result<Dlc, Problem> {
     // an earlier Haiku's data/dlc, data or the title folder itself
-    let tid = format!("{DLC_TITLE:016X}");
-    for candidate in [dir.to_path_buf(), dir.join(&tid), dir.join("dlc").join(&tid), dir.join("data").join("dlc").join(&tid)] {
-        if candidate.join("dlc.txt").is_file() {
-            return check_haiku(&candidate);
+    // jpprep: the EUR and Japanese DLC's folders too
+    for title in [DLC_TITLE, crate::eur::DLC_TITLE, crate::jpn::DLC_TITLE] {
+        let tid = format!("{title:016X}");
+        for candidate in [dir.to_path_buf(), dir.join(&tid), dir.join("dlc").join(&tid), dir.join("data").join("dlc").join(&tid)] {
+            if candidate.join("dlc.txt").is_file() {
+                return check_haiku(&candidate);
+            }
         }
     }
     // Citra / Azahar: .../title/0004008c/00179400/content/*.tmd + *.app
@@ -152,7 +175,7 @@ fn check_folder(dir: &Path) -> Result<Dlc, Problem> {
     dump::find_files(dir, 0, &mut |path| {
         let lower = path.to_string_lossy().to_lowercase().replace('\\', "/");
         let ext = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
-        if ext == "tmd" && lower.contains("/0004008c/00179400/content") {
+        if ext == "tmd" && (lower.contains("/0004008c/00179400/content") || lower.contains("/0004008c/00179500/content") || lower.contains("/0004008c/0012dc00/content")) { // jpprep: and the EUR and Japanese DLC
             tmds.push(path.to_path_buf());
         } else if ext == "cia" {
             cias.push(path.to_path_buf());
@@ -191,7 +214,7 @@ fn check_haiku(dir: &Path) -> Result<Dlc, Problem> {
             _ => {}
         }
     }
-    if title != DLC_TITLE {
+    if !known_title(title) {
         return Err(wrong_title(title));
     }
     if contents.is_empty() {
@@ -203,7 +226,7 @@ fn check_haiku(dir: &Path) -> Result<Dlc, Problem> {
 fn check_installed(tmd_path: &Path) -> Result<Dlc, Problem> {
     let tmd = std::fs::read(tmd_path).map_err(|e| Problem::Unreadable(format!("The DLC's .tmd can't be read ({e}).")))?;
     let (title, version, records) = dump::tmd_contents(&tmd).ok_or_else(|| Problem::Corrupt("The DLC's .tmd is damaged.".into()))?;
-    if title != DLC_TITLE {
+    if !known_title(title) {
         return Err(wrong_title(title));
     }
     let content_dir = tmd_path.parent().unwrap().to_path_buf();

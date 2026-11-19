@@ -67,6 +67,11 @@
 #include <sys/time.h>
 #include "overrides.h"
 
+/* pulse: overrides/pulse.c's hooks */
+void pulse_free_cursor(Context *ctx);
+void pulse_ai_decided(Context *ctx);
+extern uint32_t pulse_words[];
+
 #define IU_WORDS 512
 /* the words the host reads and writes, by index:
  *  0 lines mode (0 off, 1 every enemy, 2 the cursor's)    host
@@ -641,6 +646,7 @@ static void info_predict(Context *ctx) {
 
 /* map::SequenceHuman::...::ProcSequence::FreeCursorTick(void) */
 RECOMP_OVERRIDE(0x00351904) {
+    pulse_free_cursor(ctx); /* pulse: the free cursor's frame (overrides/pulse.c) */
     /* cheats: the free cursor's frame, for Move Again (overrides/cheats.c) */
     {
         extern uint32_t cheats_words[];
@@ -690,9 +696,15 @@ RECOMP_OVERRIDE(0x00352800) {
     CALL(RECOMP_ORIGINAL(0x00352800));
 }
 
+static void iu_pulse_decided(Context *ctx, const uint32_t *words) {
+    (void)words;
+    pulse_ai_decided(ctx);
+}
+
 /* AI::Processing(void): the real enemy phase, logged for comparison */
 static void iu_real_mind(Context *ctx, const uint32_t *words) {
     (void)words;
+    pulse_ai_decided(ctx); /* pulse */
     if (!iu_debug(2))
         return;
     uint32_t mind = mem_read32(ctx, MIND_PTR);
@@ -721,6 +733,11 @@ RECOMP_OVERRIDE(0x002238CC) {
     }
     if (iu_debug(2) && ctx->read_pages != (uint8_t *const *)cow_read) {
         CALL_THEN(RECOMP_ORIGINAL(0x002238CC), iu_real_mind, 0);
+        return;
+    }
+    /* pulse: each real decision, once made (overrides/pulse.c) */
+    if (pulse_words[0] && ctx->read_pages != (uint8_t *const *)cow_read) {
+        CALL_THEN(RECOMP_ORIGINAL(0x002238CC), iu_pulse_decided, 0);
         return;
     }
     CALL(RECOMP_ORIGINAL(0x002238CC));
@@ -1189,4 +1206,11 @@ RECOMP_OVERRIDE(0x001F580C) {
         }
     }
     CALL(RECOMP_ORIGINAL(0x001F580C));
+}
+
+/* pulsefix: what of this file is the console's state, kept with Divine
+   Pulse's moments and saved states (overrides/keep.c) */
+void info_ui_keep(void (*add)(const char *, void *, uint32_t)) {
+    add("info_ui.line_vb", &line_vb, sizeof line_vb);
+    add("info_ui.line_panel", &line_panel, sizeof line_panel);
 }

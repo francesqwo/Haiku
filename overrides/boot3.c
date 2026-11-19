@@ -122,3 +122,9 @@ RECOMP_OVERRIDE(0x0018D7FC) {
     ctx->r[0] = proc;
     CALL(RECOMP_ORIGINAL(0x0018D7FC));
 }
+
+/* pulsefix: what of this file is the console's state, kept with Divine
+   Pulse's moments and saved states (overrides/keep.c) */
+void boot3_keep(void (*add)(const char *, void *, uint32_t)) {
+    add("boot3.boot3_waiting", &boot3_waiting, sizeof boot3_waiting);
+}

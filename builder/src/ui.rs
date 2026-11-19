@@ -44,6 +44,10 @@ mod imp {
     use crate::win::*;
     use crate::{dlc, dump, log};
 
+    // jpvoice: the Japanese voices screen and the Play screen's Voices
+    #[path = "../../voices_ui.rs"]
+    mod voices_ui;
+
     pub struct Options {
         pub shots: Option<PathBuf>,
         pub script: Vec<String>,
@@ -113,6 +117,8 @@ mod imp {
         Build,
         Failed,
         Ready,
+        /// jpvoice: the optional Japanese voices
+        Voices,
     }
 
     #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -129,6 +135,15 @@ mod imp {
         Play,
         Rebuild,
         Change,
+        // jpvoice
+        VoicesOpen,
+        VoicesEnglish,
+        VoicesJapanese,
+        VoicesExtract,
+        VoicesRemove,
+        // jpdlc: the Japanese DLC's pick
+        VoicesDlcFile,
+        VoicesDlcFolder,
     }
 
     struct Button {
@@ -209,6 +224,8 @@ mod imp {
         shot_count: usize,
         script: VecDeque<String>,
         wait: Option<Wait>,
+        /// jpvoice
+        voices: voices_ui::VoicesState,
     }
 
     thread_local! {
@@ -244,7 +261,14 @@ mod imp {
         fn set_dlc(&mut self, path: &Path) {
             log::line(format!("DLC picked: {}", path.display()));
             self.dlc_name = file_name(path);
-            match dlc::check(path) {
+            // eurdlc: a DLC must fit the game picked before it (the European
+            // DLC isn't the USA game's), said here rather than mid-build
+            let region = self.game_ok().map(|g| g.region);
+            let fit = |d: dlc::Dlc| match region.map(|r| crate::jpn::dlc_fits(r, d.title_id)) {
+                Some(Err(why)) => Err(dump::Problem::WrongGame(why)),
+                _ => Ok(d),
+            };
+            match dlc::check(path).and_then(fit) {
                 Ok(d) => {
                     log::line(format!("  ok: {}", d.describe()));
                     self.dlc_result = Some(Ok(d.describe()));
@@ -272,6 +296,15 @@ mod imp {
                 return;
             };
             if self.dlcs.is_empty() && !self.no_dlc {
+                self.screen = Screen::Dlc;
+                self.invalidate();
+                return;
+            }
+            // eurdlc: the game may have been changed after the DLC was picked
+            if let Some(why) = self.dlcs.iter().find_map(|d| crate::jpn::dlc_fits(game.region, d.title_id).err()) {
+                log::line(format!("  the DLC doesn't fit this game: {why}"));
+                self.dlc_result = Some(Err(dump::Problem::WrongGame(why)));
+                self.dlcs.clear();
                 self.screen = Screen::Dlc;
                 self.invalidate();
                 return;
@@ -324,6 +357,11 @@ mod imp {
         fn click(&mut self, id: Id) {
             log::line(format!("click {id:?} on {:?}", self.screen));
             match (self.screen, id) {
+                // jpvoice
+                (Screen::Voices, id) => self.voices_click(id),
+                (Screen::Ready, Id::VoicesOpen) => self.screen = Screen::Voices,
+                (Screen::Ready, Id::VoicesEnglish) => self.voices_choose(false),
+                (Screen::Ready, Id::VoicesJapanese) => self.voices_choose(true),
                 (Screen::Game, Id::PickFile) => {
                     let filter = [("3DS game dumps (*.3ds, *.cci, *.cia, *.cxi)", "*.3ds;*.cci;*.cia;*.cxi;*.app"), ("All files", "*.*")];
                     if let Some(p) = pick_file(self.hwnd, "Select your Fire Emblem Fates Special Edition (USA) dump", &filter) {
@@ -400,7 +438,7 @@ mod imp {
                 let done = match wait {
                     Wait::Shot => self.shot_pending.is_none(),
                     Wait::Percent(p) => self.status.lock().unwrap().percent >= *p || self.screen != Screen::Build,
-                    Wait::Done => self.job.is_none() && self.screen != Screen::Build,
+                    Wait::Done => self.job.is_none() && self.screen != Screen::Build && self.voices.job.is_none(), // jpvoice: the voices' job too
                     Wait::Until(t) => Instant::now() >= *t,
                 };
                 if !done {
@@ -414,6 +452,7 @@ mod imp {
             match word {
                 "game" => self.set_game(Path::new(arg)),
                 "dlc" => self.set_dlc(Path::new(arg)),
+                "voices" => self.set_voices_dump(Path::new(arg)), // jpvoice
                 "nodlc" => self.click(Id::NoDlc),
                 "click" => {
                     let id = match arg {
@@ -426,6 +465,12 @@ mod imp {
                         "rebuild" => Some(Id::Rebuild),
                         "change" => Some(Id::Change),
                         "nodlc" => Some(Id::NoDlc),
+                        // jpvoice
+                        "voices" => Some(Id::VoicesOpen),
+                        "extract" => Some(Id::VoicesExtract),
+                        "english" => Some(Id::VoicesEnglish),
+                        "japanese" => Some(Id::VoicesJapanese),
+                        "remove" => Some(Id::VoicesRemove),
                         _ => None,
                     };
                     if let Some(id) = id {
@@ -490,7 +535,9 @@ mod imp {
                     add(Id::Play, "Play", 40, s(262), 240, true, true);
                     add(Id::Rebuild, "Rebuild", 40, bottom, 150, false, true);
                     add(Id::Change, "Change dump or DLC", 202, bottom, 210, false, true);
+                    self.voices_buttons(&mut add); // jpvoice
                 }
+                Screen::Voices => self.voices_buttons(&mut add), // jpvoice
             }
             for b in &mut buttons {
                 if b.id == Id::Play {
@@ -674,6 +721,7 @@ mod imp {
             let steps = [("1", "Game", Screen::Game), ("2", "DLC", Screen::Dlc), ("3", "Build", Screen::Build), ("4", "Play", Screen::Ready)];
             let current = match self.screen {
                 Screen::Failed => Screen::Build,
+                Screen::Voices => Screen::Ready, // jpvoice
                 other => other,
             };
             let mut x = w - s(40);
@@ -691,7 +739,11 @@ mod imp {
                 Screen::Dlc => self.draw_dlc(dc, content),
                 Screen::Build => self.draw_build(dc, content),
                 Screen::Failed => self.draw_failed(dc, content),
-                Screen::Ready => self.draw_ready(dc, content),
+                Screen::Ready => {
+                    self.draw_ready(dc, content);
+                    self.draw_ready_voices(dc); // jpvoice
+                }
+                Screen::Voices => self.draw_voices(dc, content), // jpvoice
             }
             for b in &self.buttons {
                 let hover = self.hover == Some(b.id) && b.enabled;
@@ -723,13 +775,27 @@ mod imp {
             match &self.game {
                 None => {}
                 Some(Ok(g)) => {
+                    // eur: the EUR Special Edition says so
+                    let eur = crate::eur::game_is_eur(g);
                     let message = format!(
-                        "{}: {}, {} MB.\nTitle 0004000000179800 (CTR-P-BFZE), the code Haiku is made for, and every hash checks out.",
+                        "{}: {}, {} MB.\n{}, and every hash checks out.",
                         self.game_name,
                         g.kind,
-                        g.size / 1_000_000
+                        g.size / 1_000_000,
+                        if eur {
+                            "Title 000400000017A800 (CTR-P-BFZP), the EUR code Haiku maps its addresses to (English, French, German, Spanish and Italian text)"
+                        } else {
+                            "Title 0004000000179800 (CTR-P-BFZE), the code Haiku is made for"
+                        }
                     );
-                    self.result_panel(dc, top, Some(true), "Fire Emblem Fates Special Edition (USA)", &message);
+                    let headline = if eur { "Fire Emblem Fates Special Edition (Europe)" } else { "Fire Emblem Fates Special Edition (USA)" };
+                    // jpprep: the Japanese game says so
+                    let (headline, message) = if crate::jpn::game_is_jpn(g) {
+                        ("Fire Emblem if (Japan)", format!("{}: {}, {} MB.\nThe Japanese game, which Haiku builds with its Japanese address map (Japanese text and voices, the petting minigame, the Japanese DLC), and every hash checks out.", self.game_name, g.kind, g.size / 1_000_000))
+                    } else {
+                        (headline, message)
+                    };
+                    self.result_panel(dc, top, Some(true), headline, &message);
                 }
                 Some(Err(p)) => {
                     let headline = match p {
@@ -753,7 +819,7 @@ mod imp {
                 dc,
                 r,
                 "Select your DLC.",
-                "A decrypted .cia of Fire Emblem Fates' DLC (USA), Citra's or Azahar's sdmc folder with it installed, or the data folder of an earlier Haiku.",
+                "A decrypted .cia of your game's Fire Emblem Fates DLC (the USA DLC, or the European one for the European game), Citra's or Azahar's sdmc folder with it installed, or the data folder of an earlier Haiku.",
             );
             let top = self.px(274);
             if self.no_dlc {
@@ -773,14 +839,17 @@ mod imp {
                     }
                 }
                 Some(Ok(describe)) => {
-                    self.result_panel(dc, top, Some(true), "Fire Emblem Fates DLC (USA)", &format!("{}: {describe}", self.dlc_name));
+                    // eurdlc: the DLC's own region
+                    let headline = self.dlcs.first().map_or("Fire Emblem Fates DLC", |d| d.headline());
+                    self.result_panel(dc, top, Some(true), headline, &format!("{}: {describe}", self.dlc_name));
                 }
                 Some(Err(p)) => {
                     let headline = match p {
                         dump::Problem::Encrypted(_) => "This DLC is encrypted",
                         dump::Problem::Corrupt(_) => "This DLC is damaged",
                         dump::Problem::WrongKind(_) => "Not the DLC",
-                        _ => "Not Fire Emblem Fates' DLC (USA)",
+                        dump::Problem::WrongGame(_) => "Not the DLC for this game", // eurdlc
+                        _ => "Not Fire Emblem Fates' DLC",
                     };
                     self.result_panel(dc, top, Some(false), headline, &format!("{}: {}", self.dlc_name, p.message()));
                 }
@@ -864,6 +933,7 @@ mod imp {
             WM_TIMER => {
                 with_app(|app| {
                     app.poll();
+                    app.poll_voices(); // jpvoice
                     app.step_script();
                 });
                 0
@@ -933,6 +1003,7 @@ mod imp {
                     with_app(|app| match app.screen {
                         Screen::Game | Screen::Ready => app.set_game(&path),
                         Screen::Dlc => app.set_dlc(&path),
+                        Screen::Voices => app.set_voices_dump(&path), // jpvoice
                         _ => {}
                     });
                 }
@@ -950,7 +1021,7 @@ mod imp {
                 0
             }
             WM_CLOSE => {
-                let building = with_app(|app| app.job.is_some()).unwrap_or(false);
+                let building = with_app(|app| app.job.is_some() || app.voices.job.is_some()).unwrap_or(false); // jpvoice: the voices' job too
                 if building {
                     let text = wide("Haiku is still being built. Stop and close? What is done is kept, and the next start carries on from there.");
                     let caption = wide("Haiku Setup");
@@ -1038,6 +1109,7 @@ mod imp {
                 shot_count: 0,
                 script: options.script.into(),
                 wait: None,
+                voices: voices_ui::VoicesState::new(), // jpvoice
             };
             // what an earlier run left: a built Haiku, or a choice and steps
             if let Some(dump_path) = state.get("dump").map(PathBuf::from).filter(|p| p.exists()) {

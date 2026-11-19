@@ -7,8 +7,11 @@ pub mod dlp;
 pub mod exefs;
 // os: a game installed as a plain folder (data/), see datadir.rs
 pub mod datadir;
+pub mod eur; // eur: the DLC of the EUR Special Edition
 pub mod layered;
 pub mod lz77;
+pub mod lz11; // fanpatch: the .lz files' LZ11
+pub mod msgarc; // fanpatch: message archives, patched message by message
 pub mod ncch;
 pub mod ncsd;
 pub mod patch;
@@ -232,6 +235,18 @@ impl Dlc {
         }
         let romfs = RomFs::parse(data, offset + ncch.romfs_offset).ok()?;
         Some((romfs.base, (offset + ncch.romfs_offset + ncch.romfs_size).saturating_sub(romfs.base)))
+    }
+
+    /// jpdlc: the RomFS of the content of an index of DLC kept as a CIA, to
+    /// lay mods over it (mods::lay_dlc); none as for romfs().
+    pub fn content_romfs(&self, index: u16) -> Option<RomFs> {
+        let offset = self.contents.iter().find(|content| content.index == index)?.offset?;
+        let data = self.image.data();
+        let ncch = NcchHeader::parse(data.get(offset as usize..)?).ok()?;
+        if !ncch.has_romfs() || (!ncch.is_decrypted() && ncch.crypto_method() != 0) {
+            return None;
+        }
+        RomFs::parse(data, offset + ncch.romfs_offset).ok()
     }
 }
 

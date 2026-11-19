@@ -630,11 +630,14 @@ impl Library {
     /// turned down.
     pub fn attach_patch(&mut self, module: std::sync::Arc<crate::codemods::PatchModule>) -> Result<usize, String> {
         let starts = self.stale_starts();
-        let missing: Vec<u32> = starts.iter().copied().filter(|&start| module.lookup(start).is_none()).collect();
+        // codemods2: a start the patch left no code at (the module says
+        // which) is no code any more: the game stops there if it goes there
+        let gone = starts.iter().filter(|&&start| module.lookup(start).is_none() && module.gone(start)).count();
+        let missing: Vec<u32> = starts.iter().copied().filter(|&start| module.lookup(start).is_none() && !module.gone(start)).collect();
         if let Some(first) = missing.first() {
             return Err(format!("{} changed functions have no recompiled version in {} (the first at 0x{first:08X})", missing.len(), module.path.display()));
         }
-        log::info!("codemods: {} changed functions run from {} ({} entries)", starts.len(), module.path.display(), module.len());
+        log::info!("codemods: {} changed functions run from {} ({} entries; {gone} are no code now)", starts.len() - gone, module.path.display(), module.len());
         self.patch = Some(module);
         self.found = Library::nothing_found();
         Ok(starts.len())

@@ -79,3 +79,9 @@ RECOMP_OVERRIDE(0x0011B850) {
         fates_gfx_hooks_eft.fog(ctx, ctx->r[0], ctx->r[1], ctx->r[2], ctx->r[3], mem_read32(ctx, ctx->r[13]));
     CALL(RECOMP_ORIGINAL(0x0011B850));
 }
+
+/* pulsefix: what of this file is the console's state, kept with Divine
+   Pulse's moments and saved states (overrides/keep.c) */
+void gfx_eft_keep(void (*add)(const char *, void *, uint32_t)) {
+    add("gfx_eft.eft_render_state", &eft_render_state, sizeof eft_render_state);
+}

@@ -1,0 +1,8 @@
+# lfgrass: shader sources are always LF. include_str! embeds the bytes as
+# checked out, and the renderer edits them as LF text; a CRLF checkout (Git
+# for Windows' core.autocrlf) silently dropped the far grass.
+*.vert text eol=lf
+*.frag text eol=lf
+*.comp text eol=lf
+*.glsl text eol=lf
+*.spv binary

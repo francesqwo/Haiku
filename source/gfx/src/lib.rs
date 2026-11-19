@@ -35,6 +35,7 @@ pub mod cache;
 pub mod blur;
 pub mod bottom; // gfx-bottom
 pub mod capture; // gfx-final: unit-icon textures
+pub mod live2d; // jpn: Live2D models (My Room) drawn natively
 // gfx-post: native post effects and the surfaces they draw into
 pub mod post;
 pub mod prim;
@@ -59,6 +60,7 @@ pub mod castlecam; // castlecam: models the camera turned out of view, in the pi
 pub mod rtpace; // rtpace: pictures in between drawn on a thread of their own in real time
 pub mod drawdist; // drawdist: far grass drawn in batches (Full Draw Distance)
 pub mod mapjit; // mapjit: dev, the map's meshes on the screen in each picture
+pub mod skybg; // skybg: the battle backdrop (dev trace)
 pub mod vein2; // vein2: dev, how pictures in between treat particle draws
 
 use std::collections::{HashMap, VecDeque};
@@ -185,6 +187,9 @@ struct Stats {
     draws: u64,
     states: u64,
     callbacks: u64,
+    /// jpn: Live2D meshes drawn natively, and left out (unreadable)
+    live2d: u64,
+    live2d_skipped: u64,
     lines: u64,
     depth: u64,
     composed: u64,
@@ -380,6 +385,8 @@ unsafe extern "C" fn hook_post_end(ctx: *mut c_void, callback: u32) {
 unsafe extern "C" fn hook_post_call(ctx: *mut c_void, function: u32, args: *const u32, count: u32) {
     let system = unsafe { system(ctx) };
     let args = unsafe { std::slice::from_raw_parts(args, count.min(16) as usize) };
+    // eur: the function is the running build's; the recorders know the USA ones
+    let function = zakuro_core::region::to_us(function);
     // gfx-lines: dev, FATES_GFX_DRAW_TRACE=1: every Pica::Draw a recorder
     // sees, with its caller (the guest lr)
     if matches!(function, 0x0013_01A8 | 0x0013_019C) && perf::var_os("FATES_GFX_DRAW_TRACE").is_some() {
@@ -464,6 +471,21 @@ unsafe extern "C" fn hook_unit_icon_begin(ctx: *mut c_void, callback: u32) {
 unsafe extern "C" fn hook_unit_icon_end(ctx: *mut c_void, callback: u32) {
     let system = unsafe { system(ctx) };
     with(|g| g.unit_icon_end(system, callback));
+}
+
+/// jpn: the Live2D hook table, `fates_gfx_hooks_live2d` in
+/// overrides/gfx_live2d.c (native mode, FATES_GFX_LIVE2D not 0).
+pub fn install_live2d(hooks: &mut live2d::Hooks) {
+    if mode_from_env() == Mode::Off || !live2d::enabled() {
+        return;
+    }
+    hooks.draw = Some(hook_live2d_draw);
+}
+
+#[allow(clippy::too_many_arguments)]
+unsafe extern "C" fn hook_live2d_draw(ctx: *mut c_void, this: u32, tex: u32, index_count: u32, vertex_count: u32, indices: u32, xys: u32, uvs: u32, opacity: u32, composition: u32) -> u32 {
+    let system = unsafe { system(ctx) };
+    with(|g| g.live2d_draw(system, this, tex, index_count, vertex_count, indices, xys, uvs, f32::from_bits(opacity), composition)).unwrap_or(0)
 }
 
 /// gfx-final: the unit-icon capture hook table, `fates_gfx_hooks_capture`
@@ -667,7 +689,7 @@ unsafe extern "C" fn hook_target_display(_ctx: *mut c_void, display: u32) {
 /// pool at 0x00106564): clear colour floats at +0x10, depth at +0x34.
 unsafe extern "C" fn hook_clear(ctx: *mut c_void) {
     let system = unsafe { system(ctx) };
-    let fb = prim::r32(system, 0x0010_6564);
+    let fb = prim::r32(system, zakuro_core::region::us(0x0010_6564));
     let mut color = [0f32; 4];
     for (i, c) in color.iter_mut().enumerate() {
         *c = f32::from_bits(prim::r32(system, fb + 0x10 + 4 * i as u32)).clamp(0.0, 1.0);
@@ -733,7 +755,7 @@ unsafe extern "C" fn hook_prim_target_done(ctx: *mut c_void, _prim_ctx: u32, dis
 fn skipped_draw_mesh(system: &mut System, model: u32) {
     let flags = prim::r16(system, model + 8);
     if flags & 1 != 0 && flags & 0x800 != 0 {
-        let types = prim::r32(system, 0x004E_BB70);
+        let types = prim::r32(system, zakuro_core::region::us(0x004E_BB70));
         system.memory.write_bytes(types, &[2]);
     }
 }
@@ -1197,6 +1219,7 @@ impl Gfx {
                 #[allow(unused_mut)]
                 let mut made = self.shade_draws(system, model, state, layer, mesh, world, disp, None);
         let t_haze = perf::scope(perf::C::Haze); // perf3
+                skybg::trace(system, model, state, mesh, &made); // skybg: dev, FATES_SKYBG_TRACE
                 self.freecam_haze(system, model, state, mesh, &mut made); // gfxcastle
                 drop(t_haze);
                 let t_wide2 = perf::scope(perf::C::Wide2); // perf3
@@ -1389,7 +1412,7 @@ impl Gfx {
                         let (_, object) = prim::state_callback(system, prim_ctx, states[i]);
                         let effect = prim::r32(system, object + 4);
                         let vtable = prim::r32(system, effect);
-                        let run = prim::r32(system, vtable + 8);
+                        let run = zakuro_core::region::to_us(prim::r32(system, vtable + 8));
                         let key = (*kind, if *kind == 0x0021_E220 { run } else { 0 });
                         if self.traced_callbacks.insert(key) {
                             eprintln!("gfx-callback disp {disp} frame {} kind {:08X} object {object:08X} effect {effect:08X} run {run:08X} at {i}/{}", self.stats.frames, kind, decoded.len());
@@ -1426,7 +1449,7 @@ impl Gfx {
             // gfx-bottom: and callbacks that only render into a texture of
             // their own (UnitIconInstance's unit-icon captures), left to the
             // original RenderTarget in the compacted list
-            let native_kind = |k: u32| k == SCENE_SYSTEM_ON_BEGIN || (k == shadow::ON_BEGIN && shadow::enabled()) || bottom::offscreen(k);
+            let native_kind = |k: u32| k == SCENE_SYSTEM_ON_BEGIN || (k == shadow::ON_BEGIN && shadow::enabled()) || bottom::offscreen(k) || (k == live2d::ON_BEGIN && live2d::enabled()); // jpn: live2d
             // gfx-post: post effects the native layer draws count too
             let post_ok = |system: &mut System, i: usize| {
                 let object = prim::state_callback(system, prim_ctx, states[i]).1;
@@ -1583,6 +1606,33 @@ impl Gfx {
         }
     }
 
+    /// jpn: a Live2D mesh (live2d.rs) into the frame being composed, at its
+    /// Live2DCallBack's place; 1 when it is drawn natively (the game's
+    /// drawTexture is then skipped), 0 when it is left to the game.
+    #[allow(clippy::too_many_arguments)]
+    fn live2d_draw(&mut self, system: &mut System, this: u32, tex: u32, index_count: u32, vertex_count: u32, indices: u32, xys: u32, uvs: u32, opacity: f32, composition: u32) -> u32 {
+        let Some(islands) = self.islands.as_mut() else { return 0 };
+        // the island whose callback is a Live2DCallBack
+        let mut object = None;
+        for &(o, _) in &islands.slots {
+            let vtable = prim::r32(system, o);
+            if vtable != 0 && zakuro_core::region::to_us(prim::r32(system, vtable)) == live2d::ON_BEGIN {
+                object = Some(o);
+            }
+        }
+        let Some(object) = object else { return 0 };
+        let disp = islands.disp as u32;
+        match live2d::mesh(system, this, tex, index_count, vertex_count, indices, xys, uvs, opacity, composition, disp) {
+            Some(d) => {
+                islands.draws.entry(object).or_default().push((d, [None; 3]));
+                self.stats.live2d += 1;
+            }
+            // a mesh it can't read is left out, never sent to a GPU there isn't
+            None => self.stats.live2d_skipped += 1,
+        }
+        1
+    }
+
     /// the original RenderTarget is done with a compacted list: the list
     /// put back, the islands' mesh draws into the frame.
     fn prim_target_done(&mut self, system: &mut System, _disp: u32) {
@@ -1647,6 +1697,7 @@ impl Gfx {
             frame.draws.splice(*at..*at, d);
         }
         gfx2d3_trace_shaded(frames, disp, &frame.draws); // gfx2d3: dev, FATES_GFX2D3_TRACE=a-b
+        skybg::trace_frame(disp as u32, &frame.draws); // skybg: dev, FATES_SKYBG_TRACE
         // FATES_GFX_TRACE_ISLANDS=N: the draws of one frame of each display
         // from game frame N on
         static TRACED: [std::sync::atomic::AtomicBool; 2] = [std::sync::atomic::AtomicBool::new(false), std::sync::atomic::AtomicBool::new(false)];
@@ -1936,6 +1987,10 @@ impl Gfx {
     /// t = 1). One size, or a surface the renderer drew, is
     /// `texture_oriented`'s.
     fn texture_mip(&mut self, system: &mut System, tex: TexRef, levels: u32) -> Option<u64> {
+        // skybg: a cube map's six faces, stacked
+        if let Some(key) = self.cube_key(system, tex) {
+            return self.note_decoded(tex, key);
+        }
         let key = self.texture_mip_inner(system, tex, levels);
         self.note_decoded(tex, key) // gfx-2d
     }

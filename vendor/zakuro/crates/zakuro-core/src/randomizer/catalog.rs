@@ -199,6 +199,13 @@ pub const SINCE_ALL: u32 = 3;
 /// call, 2026-11-16). A version 3 run keeps her, so its people stay the same.
 pub const SINCE_NO_LAYLA: u32 = 4;
 
+/// jpn2: the rules version from which the Japanese Special Edition's pool
+/// takes Revelation's story characters (Sumeragi, Arete, Anthony) from its
+/// DLC, where that edition keeps Revelation. The USA and EUR games have
+/// those files in the game, so their pool is the same as version 4's; a
+/// Japanese version 4 run keeps its 95 people.
+pub const SINCE_DLC_STORY: u32 = 5;
+
 /// the talk-only characters in the pool of runs with the rules `version`
 fn talk_only(version: u32) -> impl Iterator<Item = &'static (&'static str, bool, &'static str)> {
     TALK_ONLY.iter().filter(move |(k, _, _)| !(version >= SINCE_NO_LAYLA && *k == "ララ"))
@@ -261,13 +268,21 @@ impl Catalog {
     /// the catalog for runs with the rules `version`: from SINCE_ALL on,
     /// everyone listed above is in the pool too.
     pub fn load(rom: &Rom, version: u32) -> Result<Catalog, String> {
+        Catalog::load_with(rom, &[], version)
+    }
+
+    /// jpn2: `dlc` are DLC contents whose chapters' person files count as
+    /// the game's own (the Japanese Special Edition's Revelation, which is
+    /// DLC there: GameData/Person/C under local/), read from SINCE_DLC_STORY
+    /// on when the game itself has no GameData/Person/C.
+    pub fn load_with(rom: &Rom, dlc: &[Rom], version: u32) -> Result<Catalog, String> {
         let started = std::time::Instant::now();
         let gamedata = rom
             .read("GameData/GameData.bin.lz")
             .and_then(|f| lz11(&f))
             .and_then(|f| Bin::parse(&f))
             .ok_or("GameData/GameData.bin.lz could not be read")?;
-        let english = rom.read("m/@E/GameData.bin.lz").and_then(|f| lz11(&f)).map(|f| messages(&f)).unwrap_or_default();
+        let english = rom.read("m/@E/GameData.bin.lz").or_else(|| rom.read("m/@U/GameData.bin.lz")).or_else(|| rom.read("m/GameData.bin.lz")).and_then(|f| lz11(&f)) /* eur: @U, the EUR English; jpprep: m/, the Japanese */.map(|f| messages(&f)).unwrap_or_default();
         let name_of = |mpid: &[u8]| english.get(mpid).cloned().unwrap_or_else(|| String::from_utf8_lossy(mpid).into_owned());
 
         // the person table, its jobs and items: GameData's data starts
@@ -453,7 +468,20 @@ impl Catalog {
         // rando3: every named character of the chapters, for the talk lines'
         // he and she (a boss named in a line is a candidate too)
         let mut extra: BTreeMap<String, Option<bool>> = BTreeMap::new();
-        for path in rom.list("GameData/Person") {
+        // jpn2: Revelation's person files from the DLC when the game has
+        // none of its own (Sumeragi, Arete and Anthony are only named there)
+        let mut person_files: Vec<(&Rom, String)> = rom.list("GameData/Person").into_iter().map(|p| (rom, p)).collect();
+        if version >= SINCE_DLC_STORY && !person_files.iter().any(|(_, p)| p.starts_with("GameData/Person/C/")) {
+            for d in dlc {
+                let more: Vec<String> = d.list("local/GameData/Person/C");
+                if !more.is_empty() {
+                    log::info!("randomizer: Revelation's person files from the DLC ({} files)", more.len());
+                    person_files.extend(more.into_iter().map(|p| (d, p)));
+                    break;
+                }
+            }
+        }
+        for (rom, path) in person_files {
             let Some(bin) = rom.read(&path).and_then(|f| lz11(&f)).and_then(|f| Bin::parse(&f)) else { continue };
             let count = bin.u16(4) as u32;
             for index in 0..count {

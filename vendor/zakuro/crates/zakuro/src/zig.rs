@@ -7,7 +7,7 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use recomp3ds::compile::Compiler;
+use recomp3ds::compile::{no_window, Compiler}; // nowindow: no_window
 
 /// the release Zakuro downloads.
 const VERSION: &str = "0.17.0";
@@ -78,7 +78,7 @@ enum Fetcher {
 impl Fetcher {
     fn find() -> Option<Fetcher> {
         let runs = |program: &str| {
-            Command::new(program).arg("--version").stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|status| status.success())
+            no_window(&mut Command::new(program)).arg("--version").stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|status| status.success())
         };
         [Fetcher::Curl, Fetcher::Wget].into_iter().find(|fetcher| runs(fetcher.program()))
     }
@@ -94,6 +94,7 @@ impl Fetcher {
     /// giving up after seconds.
     fn command(self, url: &str, path: Option<&Path>, seconds: u32) -> Command {
         let mut command = Command::new(self.program());
+        no_window(&mut command); // nowindow: no console window from Haiku
         match self {
             Fetcher::Curl => {
                 command.args(["-fL", "--silent", "--show-error", "--connect-timeout", "20", "--max-time", &seconds.to_string()]);
@@ -240,7 +241,7 @@ fn unpack(archive: &Path, tools: &Path) -> Result<(), String> {
     let _ = std::fs::remove_dir_all(&staging);
     std::fs::create_dir_all(&staging).map_err(|error| error.to_string())?;
     let xz = archive.to_string_lossy().ends_with(".tar.xz.part");
-    let status = Command::new("tar")
+    let status = no_window(&mut Command::new("tar")) // nowindow
         .arg(if xz { "-xJf" } else { "-xf" })
         .arg(archive)
         .arg("-C")

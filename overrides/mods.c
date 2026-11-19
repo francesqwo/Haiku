@@ -114,10 +114,54 @@ static int is_options_item(Context *ctx, uint32_t item) { /* qol4 */
     return item && mem_read32(ctx, item) == PURCHASE_ITEM_VTABLE && mem_read32(ctx, item + ITEM_MARK) == OPTIONS_MARK;
 }
 
+/* eur2: the entries' texts in the EUR game's other languages (Lang::
+   Folder's index: 2 French, 3 German, 4 Italian, 5 Spanish; the USA game
+   is always 1, English), by the English text; Options as the game's own
+   menus name it. UTF-8 here; a help line holds 49 characters. */
+#define MODS_LANG_INDEX 0x006BDA6Cu
+static const char *const mods_texts[][5] = {
+    /* English, French, German, Italian, Spanish */
+    {"Turn mods on or off and choose their order.", "Activer, désactiver et ordonner les mods.",
+     "Mods ein- oder ausschalten, Reihenfolge wählen.", "Attiva o disattiva le mod e scegline l'ordine.", "Activa o desactiva mods y elige su orden."},
+    {"Exit to Desktop", "Quitter le jeu", "Spiel beenden", "Esci dal gioco", "Salir del juego"},
+    {"Close the game and return to the desktop.", "Fermer le jeu et revenir au bureau.", "Das Spiel schließen und zum Desktop.",
+     "Chiudi il gioco e torna al desktop.", "Cerrar el juego y volver al escritorio."},
+    {"Options", "Options", "Optionen", "Opzioni", "Opciones"},
+    {"Change the display, sound and controls.", "Régler l'affichage, le son et les commandes.", "Bild, Ton und Steuerung einstellen.",
+     "Regola immagine, audio e comandi.", "Ajusta la imagen, el sonido y los controles."},
+};
+
+int haiku_code_is_jpn(void);                 /* jpprep: eur_region.c */
+const char *haiku_text_ja(const char *english); /* jpprep: jpn_text.c */
+uint32_t haiku_utf8_next(const unsigned char **text);
+
 static void put_text(Context *ctx, uint32_t at, const char *text, uint32_t room) {
+    /* jpprep: the Japanese game's, which has no Lang::Folder */
+    const int jpn = haiku_code_is_jpn();
+    if (jpn && haiku_text_ja(text))
+        text = haiku_text_ja(text);
+    /* eur2: the language's own, when there is one */
+    const uint32_t lang = jpn ? 0 : mem_read8(ctx, MODS_LANG_INDEX);
+    if (lang >= 2 && lang <= 5) {
+        for (uint32_t k = 0; k < sizeof mods_texts / sizeof mods_texts[0]; k++) {
+            const char *a = mods_texts[k][0], *b = text;
+            while (*a && *a == *b) {
+                a++;
+                b++;
+            }
+            if (*a == 0 && *b == 0) {
+                text = mods_texts[k][lang - 1];
+                break;
+            }
+        }
+    }
+    const unsigned char *p = (const unsigned char *)text;
     uint32_t i = 0;
-    for (; text[i] && i + 1 < room; i++)
-        mem_write16(ctx, at + 2 * i, (uint16_t)(unsigned char)text[i]);
+    while (*p && i + 1 < room) {
+        /* eur2: two-byte UTF-8 (é, ü...); jpprep: three (kana, kanji) */
+        const uint32_t c = haiku_utf8_next(&p);
+        mem_write16(ctx, at + 2 * i++, (uint16_t)c);
+    }
     mem_write16(ctx, at + 2 * i, 0);
 }
 
@@ -423,4 +467,10 @@ RECOMP_OVERRIDE(0x004FB048) {
         return;
     }
     qol4_move(ctx, ctx->r[0], 3, ctx->r[1] & 0xFF);
+}
+
+/* pulsefix: what of this file is the console's state, kept with Divine
+   Pulse's moments and saved states (overrides/keep.c) */
+void mods_keep(void (*add)(const char *, void *, uint32_t)) {
+    add("mods.mods_adds", &mods_adds, sizeof mods_adds);
 }

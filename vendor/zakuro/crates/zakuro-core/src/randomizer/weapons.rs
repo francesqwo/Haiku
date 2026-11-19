@@ -38,7 +38,7 @@ pub(super) fn ensure(state: &mut State, system: &mut System, why: &str) {
     if active.plan.version < super::catalog::SINCE_ALL || active.plan.options & super::plan::CLASSES == 0 {
         return;
     }
-    let units = r32(&mut system.memory, UNIT_POOL);
+    let units = r32(&mut system.memory, crate::region::us(UNIT_POOL));
     if units == 0 || !system.memory.is_readable(units, UNIT_SIZE * UNITS) {
         return;
     }

@@ -24,6 +24,11 @@ pub(super) struct ShadedGpu {
     /// pipelines; every other draw keeps the plain shade.vert
     vs_batch: vk::ShaderModule,
     pipelines_batch: HashMap<Key, vk::Pipeline>,
+    /// skybg: raster.frag for draws with a cube map (and its depth-writing
+    /// build), their own pipelines; None if it did not build (they then
+    /// draw with the plain raster.frag, the first face flat, as before)
+    fs_cube: Option<(vk::ShaderModule, vk::ShaderModule)>,
+    pipelines_cube: HashMap<Key, vk::Pipeline>,
     pub(super) buffer: Option<Buffer>,
     used: u64,
     /// gfx-terrain: samplers with a level of detail
@@ -35,26 +40,69 @@ const ALIGN: u64 = 256;
 /// shade.vert with its position turned upright, as the 2D layer's vertex
 /// shader turns the PICA's portrait framebuffer.
 fn upright_shade_vert() -> String {
+    upright_shade_vert_from(native3d::SHADE_VERT)
+}
+
+/// lfgrass: one edit of a shader's source, said once in the log when the
+/// text it looks for isn't there (an edit that matches nothing used to drop
+/// its feature without a word: the far grass was lost that way)
+fn patch(src: &str, what: &str, from: &str, to: &str) -> String {
+    if !src.contains(from) {
+        crate::perf::warn_once(format!("gfx: shade.vert's {what} edit found nothing to change; that feature is off"));
+    }
+    src.replace(from, to)
+}
+
+/// lfgrass: the edits work on LF text. include_str! keeps the file's bytes,
+/// and a Windows checkout (Git's core.autocrlf) gives the shader CRLF, which
+/// the multi-line edits (drawdist's) never matched: no far grass. So the
+/// source is made LF first, whatever the checkout.
+fn upright_shade_vert_from(source: &str) -> String {
+    let src = source.replace('\r', "");
     // wide2: a full-width layer's sides (wide2.rs)
-    let src = native3d::SHADE_VERT.replace("gl_Position = vec4(position.xy, -position.z, position.w);", crate::wide2::SHADE_VERT_SIDE);
+    let src = patch(&src, "wide2", "gl_Position = vec4(position.xy, -position.z, position.w);", crate::wide2::SHADE_VERT_SIDE);
     // wideart: a translucent 5:3 picture's sides start on its edge and sample the side panel (wide_ui.rs)
-    let src = src.replace("gl_Position = vec4(position.xy, -position.z, position.w);", crate::wide_ui::SHADE_VERT_PANEL_START);
-    let src = src.replace("out_texcoord2 = vec2(semantic(12u, 0.0), semantic(13u, 0.0));", crate::wide_ui::SHADE_VERT_PANEL);
-    src.replace(
+    let src = patch(&src, "wideart start", "gl_Position = vec4(position.xy, -position.z, position.w);", crate::wide_ui::SHADE_VERT_PANEL_START);
+    let src = patch(&src, "wideart panel", "out_texcoord2 = vec2(semantic(12u, 0.0), semantic(13u, 0.0));", crate::wide_ui::SHADE_VERT_PANEL);
+    let src = patch(
+        &src,
+        "upright",
         "gl_Position = vec4(position.xy, -position.z, position.w);",
         "gl_Position = vec4(-position.y, position.x, -position.z, position.w);",
-    )
+    );
     // gfxcastle: the battle free camera's sky (freecam.rs)
-    .replace("out_depth = position.z / position.w * depth_map.x + depth_map.y;", SKY_HAZE)
+    patch(&src, "sky haze", "out_depth = position.z / position.w * depth_map.x + depth_map.y;", SKY_HAZE)
 }
 
 /// drawdist: the shade.vert of batches of tufts, their instances' places
 /// and wind (drawdist.rs)
 fn batch_shade_vert() -> String {
-    upright_shade_vert()
-        .replace(crate::drawdist::SHADE_VERT_GLOBALS.0, crate::drawdist::SHADE_VERT_GLOBALS.1)
-        .replace(crate::drawdist::SHADE_VERT_UNIFORM.0, crate::drawdist::SHADE_VERT_UNIFORM.1)
-        .replace(crate::drawdist::SHADE_VERT_MAIN.0, crate::drawdist::SHADE_VERT_MAIN.1)
+    batch_shade_vert_from(native3d::SHADE_VERT)
+}
+
+fn batch_shade_vert_from(source: &str) -> String {
+    let src = upright_shade_vert_from(source);
+    let src = patch(&src, "drawdist globals", crate::drawdist::SHADE_VERT_GLOBALS.0, crate::drawdist::SHADE_VERT_GLOBALS.1);
+    let src = patch(&src, "drawdist uniform", crate::drawdist::SHADE_VERT_UNIFORM.0, crate::drawdist::SHADE_VERT_UNIFORM.1);
+    patch(&src, "drawdist main", crate::drawdist::SHADE_VERT_MAIN.0, crate::drawdist::SHADE_VERT_MAIN.1)
+}
+
+#[cfg(test)]
+mod lfgrass_tests {
+    /// lfgrass: every edit lands, from an LF and from a CRLF checkout alike
+    #[test]
+    fn shade_vert_edits_land_whatever_the_line_endings() {
+        let lf = zakuro_gpu::native3d::SHADE_VERT.replace('\r', "");
+        let crlf = lf.replace('\n', "\r\n");
+        for source in [&lf, &crlf] {
+            let src = super::batch_shade_vert_from(source);
+            assert!(src.contains(crate::drawdist::SHADE_VERT_MAIN.1), "drawdist main");
+            assert!(src.contains(crate::drawdist::SHADE_VERT_GLOBALS.1), "drawdist globals");
+            assert!(src.contains(crate::drawdist::SHADE_VERT_UNIFORM.1), "drawdist uniform");
+            assert!(src.contains("gl_Position = vec4(-position.y, position.x, -position.z, position.w);"), "upright");
+            assert!(!src.contains('\r'));
+        }
+    }
 }
 
 /// gfxcastle: the battle free camera's haze overlays (freecam.rs): the mode
@@ -144,6 +192,18 @@ impl Renderer {
                 .device
                 .create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&vs_batch_code), None)
                 .map_err(vkerr("drawdist shade.vert module"))?;
+            // skybg: the cube-map build of raster.frag
+            let mut fs_cube = None;
+            if crate::skybg::enabled() {
+                match (crate::skybg::cube_frag(false), crate::skybg::cube_frag(true)) {
+                    (Ok(plain), Ok(depth)) => {
+                        let plain = self.device.create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&plain), None).map_err(vkerr("cube raster.frag module"))?;
+                        let depth = self.device.create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&depth), None).map_err(vkerr("cube raster.frag depth module"))?;
+                        fs_cube = Some((plain, depth));
+                    }
+                    (Err(e), _) | (_, Err(e)) => eprintln!("gfx: the cube-map raster.frag does not build, {e}"),
+                }
+            }
             self.shaded = Some(ShadedGpu {
                 set_layout,
                 layout,
@@ -153,6 +213,8 @@ impl Renderer {
                 pipelines: HashMap::new(),
                 vs_batch,
                 pipelines_batch: HashMap::new(),
+                fs_cube,
+                pipelines_cube: HashMap::new(),
                 buffer: None,
                 used: 0,
                 mip_samplers: HashMap::new(),
@@ -176,9 +238,23 @@ impl Renderer {
         Ok(())
     }
 
-    fn shaded_pipeline(&mut self, key: Key, batch: bool) -> Result<vk::Pipeline, String> {
+    fn shaded_pipeline(&mut self, key: Key, batch: bool, cube: bool) -> Result<vk::Pipeline, String> {
         let render_pass = self.render_pass;
         let g = self.shaded.as_mut().unwrap();
+        // skybg: a cube map's draw, the cube build of raster.frag (not on
+        // the made-ahead list)
+        if let Some((fs, fs_depth)) = g.fs_cube.filter(|_| cube && !batch) {
+            if let Some(&p) = g.pipelines_cube.get(&key) {
+                return Ok(p);
+            }
+            let _t = crate::perf::scope(crate::perf::C::Pipeline);
+            let (layout, vs) = (g.layout, g.vs);
+            let p = make_shaded(&self.device, self.pipeline_disk.cache, key, layout, vs, fs, fs_depth, render_pass)
+                .map_err(|e| format!("shaded cube pipeline: {e:?}"))?;
+            self.pipeline_disk.created(&self.device);
+            self.shaded.as_mut().unwrap().pipelines_cube.insert(key, p);
+            return Ok(p);
+        }
         // drawdist: a batch of tufts, its own shade.vert (not on the made-ahead list)
         if batch {
             if let Some(&p) = g.pipelines_batch.get(&key) {
@@ -209,9 +285,11 @@ impl Renderer {
 
     /// msaa: a shaded pipeline for `render_pass` at `samples`, each sample
     /// shaded apart over `shading` of them (0: once a pixel); msaa.rs keeps it.
-    pub(super) fn shaded_make_at(&mut self, key: Key, render_pass: vk::RenderPass, samples: u32, shading: f32, batch: bool) -> Result<vk::Pipeline, String> {
+    pub(super) fn shaded_make_at(&mut self, key: Key, render_pass: vk::RenderPass, samples: u32, shading: f32, batch: bool, cube: bool) -> Result<vk::Pipeline, String> {
         let g = self.shaded.as_ref().unwrap();
         let (layout, vs, fs, fs_depth) = (g.layout, if batch { g.vs_batch } else { g.vs }, g.fs, g.fs_depth); // drawdist: batch
+        // skybg: a cube map's draw
+        let (fs, fs_depth) = g.fs_cube.filter(|_| cube && !batch).unwrap_or((fs, fs_depth));
         let p = make_shaded_at(&self.device, self.pipeline_disk.cache, key, layout, vs, fs, fs_depth, render_pass, samples, shading)
             .map_err(|e| format!("shaded msaa pipeline: {e:?}"))?;
         self.pipeline_disk.created(&self.device);
@@ -286,7 +364,7 @@ impl Renderer {
         samples: u32, // msaa
     ) -> Result<Prepared, String> {
         // msaa: into the samples with a pipeline made for them
-        let pipeline = if samples > 1 { self.msaa_shaded_pipeline(s, samples)? } else { self.shaded_pipeline(s.key, crate::drawdist::is_batch(s))? };
+        let pipeline = if samples > 1 { self.msaa_shaded_pipeline(s, samples)? } else { self.shaded_pipeline(s.key, crate::drawdist::is_batch(s), crate::skybg::is_cube(s))? };
         // perf3: the words as their bytes in place (little-endian, as the
         // GPU reads them), not copied into a new list a byte at a time: a
         // render puts every draw's Shading, Draw and indices, and at 175

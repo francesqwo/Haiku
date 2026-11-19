@@ -528,7 +528,8 @@ impl crate::Gfx {
             let mut keys = [None; 3];
             for unit in 0..3 {
                 if let Some((tex, _)) = shaded.textures[unit] {
-                    keys[unit] = self.texture_oriented(system, tex, false);
+                    // skybg: a cube map's stacked faces
+                    keys[unit] = match self.cube_key(system, tex) { Some(k) => k, None => self.texture_oriented(system, tex, false) };
                 }
             }
             made.push((draw_of(shaded), keys));
@@ -572,7 +573,7 @@ impl crate::Gfx {
     pub(crate) fn eft_fog(&mut self, system: &mut System, on: u32, flip: u32, r: u32, g: u32, b: u32) {
         let e0 = if on & 0xFF != 0 { 5 } else { 0 } | (flip & 0xFF) << 16;
         let e1 = (r & 0xFF) | (g & 0xFF) << 8 | (b & 0xFF) << 16;
-        let (h0, h1) = (r32(system, 0x0011_B8A8), r32(system, 0x0011_B8AC));
+        let (h0, h1) = (r32(system, zakuro_core::region::us(0x0011_B8A8)), r32(system, zakuro_core::region::us(0x0011_B8AC)));
         if (h0 & 0xFFFF) == 0x0E0 && (h1 & 0xFFFF) == 0x0E1 {
             self.eft_inherit.fog_config(e0, (h0 >> 16) & 0xF, e1, (h1 >> 16) & 0xF);
         }

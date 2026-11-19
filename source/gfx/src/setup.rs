@@ -340,7 +340,7 @@ fn f(system: &mut System, addr: u32) -> f32 {
 /// a word from the game's literal pools: the parameter headers its
 /// encoders use, read rather than copied so they are the game's own.
 fn lit(system: &mut System, addr: u32) -> u32 {
-    r32(system, addr)
+    r32(system, zakuro_core::region::us(addr)) // eur: a USA literal, read where the build has it
 }
 
 const IDENTITY34: [f32; 12] = [1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1., 0.];
@@ -437,8 +437,8 @@ pub fn mesh_setup(system: &mut System, o: &Objects) -> Setup {
 /// bind tables name, and the camera position for the effect shaders
 /// (nw::eft::System::MakeCameraPositionCommand 0x00317238).
 pub fn render_state_uniforms(s: &mut Setup, system: &mut System, camera: u32) {
-    let proj_bind = r32(system, RENDERSTATE_PROJ_BIND);
-    let cam_bind = r32(system, RENDERSTATE_CAMERA_BIND);
+    let proj_bind = r32(system, zakuro_core::region::us(RENDERSTATE_PROJ_BIND));
+    let cam_bind = r32(system, zakuro_core::region::us(RENDERSTATE_CAMERA_BIND));
     let proj = m44(system, camera + 0x1A8);
     s.set_mtx44(r8(system, proj_bind + 2) as usize, &proj);
     let cam = m34(system, camera + 0x148);
@@ -1161,7 +1161,7 @@ fn model_state(s: &mut Setup, system: &mut System, o: &Objects, layer: u8) {
     let callback = r32(system, o.model + 4);
     if callback != 0 && (flags << 0x1A) as i32 >= 0 {
         let vtable = r32(system, callback);
-        let (f0, f1) = (r32(system, vtable), r32(system, vtable + 4));
+        let (f0, f1) = (zakuro_core::region::to_us(r32(system, vtable)), zakuro_core::region::to_us(r32(system, vtable + 4))); // eur
         if f0 == crate::shadow::FIELD_ACTOR_ON_BEGIN {
             // gfx-shadow: the shadow receivers' callback
             crate::shadow::field_actor_words(&mut w, system, o);
@@ -1280,7 +1280,7 @@ fn polygon_offset_words(system: &mut System, o: &Objects) -> [u32; 2] {
     let at = o.scene + 0x1C + 0xBC;
     let word = r32(system, at);
     let f = f32::from_bits(r32(system, o.params + 0xC4));
-    let k = |system: &mut System, a: u32| f32::from_bits(r32(system, a));
+    let k = |system: &mut System, a: u32| f32::from_bits(r32(system, zakuro_core::region::us(a))); // eur: USA literals
     let (k_mul, k_zero, k_div) = (k(system, 0x0051_AAA4), k(system, 0x0051_AAA8), k(system, 0x0051_AAB0));
     let bits = (word >> 24) & 0x7F;
     let range = ((1u64 << bits.min(31)) - 1) as f32;
@@ -1330,7 +1330,7 @@ fn to_f24(v: f32) -> u32 {
 fn light_luts(s: &mut Setup, system: &mut System, o: &Objects) {
     let index = r16(system, o.mstate + 0x20) as u32;
     let base = r32(system, o.scene + 0x1C) + index * 0x278;
-    let headers = r32(system, 0x0051_B870);
+    let headers = r32(system, zakuro_core::region::us(0x0051_B870));
     for i in 0..8u32 {
         for (at, select, header) in [(0x238, 0x800, 0x14), (0x258, 0x1000, 0xC)] {
             let table = r32(system, base + at + 4 * i);

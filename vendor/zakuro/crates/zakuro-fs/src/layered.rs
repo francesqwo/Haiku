@@ -34,6 +34,23 @@ enum Source {
     Host(PathBuf),
     /// a patched file, kept whole.
     Memory(Vec<u8>),
+    /// tones: a file with alternates of the same size (the base first),
+    /// read from the one ALTERNATE picks.
+    Choice(Vec<PathBuf>),
+}
+
+/// tones: which alternate of a file with alternates is read (0: the base,
+/// k: a mod's `alt/k/romfs` copy; past the last, the base). Haiku's text
+/// layer gives the Japanese game's speaking styles (talk tones) this way:
+/// every alternate is the same size, so the RomFS's tables never change and
+/// the next read of a file gets the style chosen.
+pub static ALTERNATE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// tones: the path a Choice reads now, and its index.
+fn chosen(paths: &[PathBuf]) -> (usize, &Path) {
+    let pick = ALTERNATE.load(std::sync::atomic::Ordering::Relaxed);
+    let pick = if pick < paths.len() { pick } else { 0 };
+    (pick, &paths[pick])
 }
 
 /// a stretch of the layered image after the metadata.
@@ -126,7 +143,7 @@ impl Layered {
 
     /// os: how many files the image holds.
     pub fn file_count(&self) -> usize {
-        self.pieces.iter().filter(|piece| matches!(piece.source, Source::Host(_) | Source::Memory(_))).count()
+        self.pieces.iter().filter(|piece| matches!(piece.source, Source::Host(_) | Source::Memory(_) | Source::Choice(_))).count()
     }
 
     /// how many bytes the layered image has.
@@ -136,6 +153,21 @@ impl Layered {
 
     pub fn is_empty(&self) -> bool {
         self.size == 0
+    }
+
+    /// statecheck: a digest of where every file is in the image, the
+    /// metadata tables (each file's name, offset and size) and the image's
+    /// length. Two layered images with the same digest put every file at the
+    /// same place, so a saved state's open files and the game's cached
+    /// offsets mean the same in both. Where the bytes come from (which
+    /// folder, which host path) is left out, so a moved install keeps it.
+    pub fn layout_digest(&self) -> u64 {
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        for byte in self.meta.iter().copied().chain(self.size.to_le_bytes()) {
+            hash ^= byte as u64;
+            hash = hash.wrapping_mul(0x0100_0000_01b3);
+        }
+        hash
     }
 
     /// reads the layered image from offset into out, image being the ROM's
@@ -174,6 +206,11 @@ impl Layered {
                 }
                 Source::Memory(data) => dest.copy_from_slice(&data[within as usize..within as usize + dest.len()]),
                 Source::Host(path) => self.read_kept(index, path, within, dest),
+                // tones: each alternate kept open on a key of its own
+                Source::Choice(paths) => {
+                    let (pick, path) = chosen(paths);
+                    self.read_kept(index | (pick << 48), path, within, dest)
+                }
             }
         }
         count
@@ -190,6 +227,7 @@ impl Layered {
                 &mut open.last_mut().unwrap().1
             }
             None => {
+                trace_open(path); // jpvoice: HAIKU_ROMFS_TRACE=1
                 let Ok(file) = std::fs::File::open(path) else {
                     log::warn!("romfs: {} can't be read", path.display());
                     return;
@@ -247,6 +285,7 @@ impl Layered {
             Source::Image(_) => return None,
             Source::Memory(data) => bytes.copy_from_slice(data),
             Source::Host(path) => read_host(path, 0, &mut bytes),
+            Source::Choice(paths) => read_host(chosen(paths).1, 0, &mut bytes), // tones
         }
         Some(bytes)
     }
@@ -310,7 +349,58 @@ impl Tree {
         if patches.is_dir() {
             self.patch(&patches, at, game, changes)?;
         }
+        self.alternates(dir, at); // tones
         Ok(())
+    }
+
+    /// tones: a mod's `alt/<k>/romfs` folders (k = 1, 2...) hold alternates
+    /// of files its romfs/ put in, each the same size as the file: the file
+    /// becomes a Choice that ALTERNATE picks from. An alternate of another
+    /// size, or of a file romfs/ didn't put in, is left out with a warning.
+    fn alternates(&mut self, dir: &Path, at: usize) {
+        let alt = dir.join("alt");
+        if !alt.is_dir() {
+            return;
+        }
+        for k in 1..8usize {
+            let root = alt.join(k.to_string()).join("romfs");
+            if !root.is_dir() {
+                break;
+            }
+            let mut files = Vec::new();
+            walk_files(&root, "", &mut files);
+            for (rel, path, size) in files {
+                let mut parts: Vec<&str> = rel.split('/').collect();
+                let Some(name) = parts.pop() else { continue };
+                let found = parts.iter().try_fold(at, |p, part| self.find_dir(p, part)).and_then(|p| self.find_file(p, name));
+                let Some(leaf) = found else {
+                    log::warn!("mods: the alternate {} is for a file the layer doesn't put in", path.display());
+                    continue;
+                };
+                let leaf = &mut self.leaves[leaf];
+                if leaf.size != size {
+                    log::warn!("mods: the alternate {} is {size} bytes, its file {}", path.display(), leaf.size);
+                    continue;
+                }
+                let paths = match leaf.modded.take() {
+                    Some(Source::Host(base)) => vec![base],
+                    Some(Source::Choice(paths)) => paths,
+                    other => {
+                        leaf.modded = other;
+                        log::warn!("mods: the alternate {} is for a file the layer doesn't put in", path.display());
+                        continue;
+                    }
+                };
+                let mut paths = paths;
+                while paths.len() < k {
+                    let base = paths[0].clone();
+                    paths.push(base);
+                }
+                paths.truncate(k);
+                paths.push(path);
+                leaf.modded = Some(Source::Choice(paths));
+            }
+        }
     }
 
     fn read(romfs: &RomFs) -> Result<Tree, FsError> {
@@ -445,6 +535,7 @@ impl Tree {
         match (&leaf.modded, leaf.game, game) {
             (Some(Source::Host(path)), _, _) => Ok(std::fs::read(path)?),
             (Some(Source::Memory(data)), _, _) => Ok(data.clone()),
+            (Some(Source::Choice(paths)), _, _) => Ok(std::fs::read(&paths[0])?), // tones
             (_, Some(at), Some((romfs, image))) => {
                 let start = (romfs.base + romfs.header.file_data_offset as u64 + at) as usize;
                 let bytes = image.get(start..start + leaf.size as usize);
@@ -535,6 +626,23 @@ fn entries(host: &Path) -> Result<Vec<(PathBuf, String)>, FsError> {
 }
 
 /// reads a mod's file from at into out, as much of it as there is.
+/// jpvoice: with HAIKU_ROMFS_TRACE=1, says in the log the first time each
+/// host file of the RomFS (the installed game's or a layer's) is opened, so
+/// a test can tell which file a sound came from. Off, it costs one check of
+/// a flag read once.
+fn trace_open(path: &Path) {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    static SEEN: std::sync::Mutex<Option<std::collections::HashSet<PathBuf>>> = std::sync::Mutex::new(None);
+    if !*ON.get_or_init(|| std::env::var("HAIKU_ROMFS_TRACE").is_ok_and(|value| value == "1")) {
+        return;
+    }
+    if let Ok(mut seen) = SEEN.lock() {
+        if seen.get_or_insert_with(Default::default).insert(path.to_path_buf()) {
+            log::info!("romfs: opened {}", path.display());
+        }
+    }
+}
+
 fn read_host(path: &Path, at: u64, out: &mut [u8]) {
     use std::io::{Read, Seek, SeekFrom};
     let Ok(mut file) = std::fs::File::open(path) else {
@@ -643,6 +751,35 @@ mod tests {
                 assert_eq!(&out[..read], &all[start..(start + len).min(all.len())]);
             }
         }
+        std::fs::remove_dir_all(mods).unwrap();
+    }
+
+    /// tones: a file with alternates reads as the one ALTERNATE picks, its
+    /// size and place in the image the same for each.
+    #[test]
+    fn alternates_are_picked_without_changing_the_tables() {
+        let image = game(&[("m/a.bin", b"game a"), ("m/b.bin", b"game b")]);
+        let romfs = RomFs::parse_level3(&image, 0).unwrap();
+        let mods = folder("alternates");
+        put(&mods, "romfs/m/a.bin", b"style one");
+        put(&mods, "romfs/m/b.bin", b"only base");
+        put(&mods, "alt/1/romfs/m/a.bin", b"style two");
+        put(&mods, "alt/2/romfs/m/a.bin", b"style 333");
+        put(&mods, "alt/2/romfs/m/b.bin", b"too long for b"); // another size: left out
+        let layered = Layered::new(&romfs, &image, &mods).unwrap().unwrap();
+        let mut seen = Vec::new();
+        for pick in [0, 1, 2, 7] {
+            ALTERNATE.store(pick, std::sync::atomic::Ordering::Relaxed);
+            let all = whole(&layered, &image);
+            seen.push((file(&all, "m/a.bin").unwrap(), file(&all, "m/b.bin").unwrap(), all[..layered.meta.len()].to_vec()));
+        }
+        ALTERNATE.store(0, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(seen[0].0, b"style one");
+        assert_eq!(seen[1].0, b"style two");
+        assert_eq!(seen[2].0, b"style 333");
+        assert_eq!(seen[3].0, b"style one", "past the last: the base");
+        assert!(seen.iter().all(|(_, b, _)| b == b"only base"));
+        assert!(seen.iter().all(|(_, _, meta)| *meta == seen[0].2), "the tables never change");
         std::fs::remove_dir_all(mods).unwrap();
     }
 
@@ -823,5 +960,19 @@ mod tests {
         std::fs::create_dir_all(mods.join("romfs")).unwrap();
         assert!(Layered::new(&romfs, &image, &mods).unwrap().is_none());
         std::fs::remove_dir_all(mods).unwrap();
+    }
+}
+
+/// tones: the files under dir, / separated, with their size.
+fn walk_files(dir: &Path, prefix: &str, out: &mut Vec<(String, PathBuf, u64)>) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let path = entry.path();
+        if path.is_dir() {
+            walk_files(&path, &format!("{prefix}{name}/"), out);
+        } else if let Ok(meta) = entry.metadata() {
+            out.push((format!("{prefix}{name}"), path, meta.len()));
+        }
     }
 }

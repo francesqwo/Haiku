@@ -992,6 +992,39 @@ pub struct PcSettings {
     // the STUN server, the router's port mapping. See online_ui.rs and
     // zakuro-core/src/netplay.
     pub online: OnlineSettings,
+    // pulse: Divine Pulse, the modern games' rewind (off by default), and
+    // its charges: Three Houses' story scaling, a fixed number a map
+    // (divine_pulse_fixed, Engage's 10 on Hard and Maddening), or
+    // unlimited (Engage's Normal). See pulse.rs.
+    pub divine_pulse: bool,
+    #[serde(deserialize_with = "or_default")]
+    pub divine_pulse_charges: PulseCharges,
+    pub divine_pulse_fixed: u32,
+    // pulse: save states, under the Cheats tab (off by default), and the
+    // slot the quick-save and quick-load keys use (0-7). See states.rs.
+    pub save_states: bool,
+    pub save_state_slot: u32,
+    // jpvoice: the voices the game speaks, English (the game's own) or
+    // Japanese, from the voice layer Haiku Setup extracts into
+    // data/voices-ja (haiku_voices.rs). Takes effect when the game starts.
+    #[serde(deserialize_with = "or_default")]
+    pub voices: Voices,
+    // jpprep: on the Japanese game (Fire Emblem if) Haiku's own menus are
+    // Japanese; this shows them in English instead (for an English
+    // translation mod). No effect on the USA and EUR games.
+    pub japanese_english_menus: bool,
+}
+
+/// pulse: how many charges of Divine Pulse a map gives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PulseCharges {
+    /// Three Houses: 3 at first, more as the story goes on (13 at most, 10 on Lunatic)
+    #[default]
+    Story,
+    /// the same number every map
+    Fixed,
+    Unlimited,
 }
 
 /// online: how online battles connect, saved as `[pc.online]`.
@@ -1032,6 +1065,15 @@ impl Default for OnlineSettings {
             allow_cheated_units: false,
         }
     }
+}
+
+/// jpvoice: the language of the voices (PcSettings::voices).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Voices {
+    #[default]
+    English,
+    Japanese,
 }
 
 /// supports: Kana's gender. Ask shows the game's own three-choice dialog
@@ -1213,6 +1255,14 @@ impl Default for PcSettings {
             transition_blur: false, // transblur
             full_draw_distance: true, // drawdist
             online: OnlineSettings::default(), // online
+            // pulse
+            divine_pulse: false,
+            divine_pulse_charges: PulseCharges::Story,
+            divine_pulse_fixed: 10,
+            save_states: false,
+            save_state_slot: 0,
+            voices: Voices::English, // jpvoice
+            japanese_english_menus: false, // jpprep
         }
     }
 }

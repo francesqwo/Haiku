@@ -2490,7 +2490,7 @@ impl crate::Gfx {
         // radial blur's strength set (post effect parameters +9, the battle
         // transitions'), whether or not the blur is drawn
         if index == 0 && zakuro_gpu::smooth::enabled() {
-            let strength = crate::prim::r8(system, 0x0070_091D);
+            let strength = crate::prim::r8(system, zakuro_core::region::us(0x0070_091D));
             if strength != 0 {
                 zakuro_gpu::smooth::point("tblur", std::time::Instant::now(), frame.id as i64, strength as f64);
             }

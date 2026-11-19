@@ -159,7 +159,73 @@ pub struct NativeSnd {
     warned: std::collections::BTreeSet<u32>,
 }
 
+/// pulse2: what a rewind snapshot keeps of the native layer (which
+/// `save_rest` leaves out): the voices as they were, so the music and the
+/// sounds playing at the moment go on from it when it comes back, in step
+/// with the restored memory their wave buffers are in. statesnd: a saved
+/// state's file keeps it too, in a section of its own (`saved`).
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub struct Kept {
+    mixer: mixer::Mixer,
+    initialized: bool,
+    next_due: u64,
+}
+
+/// statesnd: what a saved state's sound section holds.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct SavedSnd {
+    kept: Kept,
+    aac: aac::Saved,
+}
+
+/// statesnd: the start of the sound section; a new layout gets a new one,
+/// and a section this build cannot read is left out (as a state without
+/// one: the voices start again with the game's next sound).
+const SAVED_MAGIC: &[u8; 8] = b"SNDNAT01";
+
 impl NativeSnd {
+    /// pulse2: the voices and the clock, for a rewind snapshot.
+    pub fn keep(&self) -> Kept {
+        Kept { mixer: self.mixer.clone(), initialized: self.initialized, next_due: self.next_due }
+    }
+
+    /// pulse2: puts back what `keep` kept. The AAC decoder and the counters
+    /// stay as they are.
+    pub fn put_back(&mut self, kept: &Kept) {
+        self.mixer = kept.mixer.clone();
+        self.initialized = kept.initialized;
+        self.next_due = kept.next_due;
+    }
+
+    /// statesnd: the native layer as a saved state's file keeps it (its own
+    /// section, after memory: `System::save_state`): the voices, their
+    /// wave-buffer queues and play positions (addresses into guest memory,
+    /// which the state holds), ADPCM histories, filters, gains and
+    /// volumes, what the game changed for the next frame, the clock, and
+    /// the AAC decoder's settings.
+    pub fn saved(&self) -> Result<Vec<u8>, String> {
+        let saved = SavedSnd { kept: self.keep(), aac: self.aac.saved() };
+        let out = SAVED_MAGIC.to_vec();
+        postcard::to_extend(&saved, out).map_err(|error| format!("the sound could not be written, {error}"))
+    }
+
+    /// statesnd: reads what `saved` wrote; nothing changes until
+    /// `put_back_saved`.
+    pub fn read_saved(bytes: &[u8]) -> Result<SavedSnd, String> {
+        let body = bytes.strip_prefix(SAVED_MAGIC.as_slice()).ok_or("it is not the native sound layer's")?;
+        postcard::from_bytes(body).map_err(|error| format!("it could not be read, {error}"))
+    }
+
+    /// statesnd: the native layer as a saved state had it, after
+    /// `load_rest` left it new (and memory is the state's): the voices go
+    /// on from the saved moment, their ADPCM decoded again from memory.
+    /// The counters stay this run's.
+    pub fn put_back_saved(&mut self, saved: SavedSnd, memory: &mut crate::memory::Memory) {
+        self.put_back(&saved.kept);
+        self.mixer.decode_again(memory);
+        self.aac.put_back(saved.aac);
+    }
+
     fn warn_once(&mut self, op: u32, what: &str) {
         if self.warned.insert(op) {
             log::warn!("audio: {what}");
@@ -215,8 +281,16 @@ const DUMMY_MASTER: u32 = DUMMY + 0x100;
 const DUMMY_CHANNELS: u32 = DUMMY + 0x400;
 const DUMMY_COEFFICIENTS: u32 = DUMMY + 0x1600;
 
+/// jpn: the Japanese build's Dspsnd (another nn::snd release) has 12 more
+/// bytes before its output capture pointer, so every field from +0xC on is
+/// 0xC further than the USA build's (see overrides/snd_native.c, `D`).
+fn field(offset: u32) -> u32 {
+    if offset >= 0xC && crate::region::is_jpn() { offset + 0xC } else { offset }
+}
+
 fn point_driver_tables(system: &mut System, driver: u32) {
     let m = &mut system.memory;
+    let driver = driver.wrapping_add(field(0x1000) - 0x1000); // jpn: every table below is past +0xC
     for region in 0..2u32 {
         m.write32(driver + 0x1090 + region * 4, DUMMY);
         m.write32(driver + 0x1098 + region * 4, DUMMY_MASTER);
@@ -258,14 +332,14 @@ fn check_dummy(system: &mut System) {
 }
 
 /// a driver the native layer did not initialize, as after loading a saved
-/// state (the native mixer is not part of states): it takes it over from
-/// here, with no voice playing until the game starts them again.
+/// state that has no sound section (one saved before statesnd): it takes it
+/// over from here, with no voice playing until the game starts them again.
 fn adopt(system: &mut System, now: u64, driver: u32) {
     let snd = &mut system.services.dsp.native;
     if !snd.initialized {
         // the driver's aux buffer pointers, as Initialize sets them
         for (offset, address) in [(0x12E8, SCRATCH.aux[0]), (0x12EC, SCRATCH.aux[1]), (0x12F0, SCRATCH.aux[0]), (0x12F4, SCRATCH.aux[1])] {
-            system.memory.write32(driver + offset, address);
+            system.memory.write32(driver + field(offset), address); // jpn
         }
         point_driver_tables(system, driver);
         let snd = &mut system.services.dsp.native;

@@ -43,8 +43,9 @@ fn notice(message: &str) {
 pub fn headless_load(system: &mut System) -> Option<u64> {
     let file = std::env::var_os("FATES_LOAD").filter(|file| !file.is_empty())?;
     let started = std::time::Instant::now();
-    match std::fs::read(&file).map_err(|error| error.to_string()).and_then(|bytes| system.load_state(&bytes)) {
-        Ok(()) => {
+    // statecheck: refused when made with another file layer
+    match std::fs::read(&file).map_err(|error| error.to_string()).and_then(|bytes| crate::statecheck::load_raw(system, &bytes, &file.to_string_lossy())) {
+        Ok(_) => {
             println!("loaded {} at frame {} in {:.2?}", file.to_string_lossy(), system.frames, started.elapsed());
             Some(system.frames)
         }

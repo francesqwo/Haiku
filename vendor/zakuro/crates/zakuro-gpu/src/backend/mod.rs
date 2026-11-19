@@ -20,6 +20,41 @@ mod vulkan_pacer;
 #[cfg(feature = "vulkan")]
 pub use vulkan_pacer::keep_off as keep_present_thread_off;
 pub mod bottom_panel;
+// pulse2: Divine Pulse's effects over the top screen (the activation wave,
+// the rewind's cross-fade)
+#[cfg(feature = "vulkan")]
+mod vulkan_pulse;
+
+/// pulse2: how Divine Pulse's effect draws the top screen in the next
+/// present (zakuro's pulse_fx works it out each present). The old picture
+/// is the top screen as it was shown the present before `serial` last
+/// changed, without the grade and the wave.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct PulseEffect {
+    /// goes up whenever the game's picture is about to change (a moment
+    /// shown, a rewind made): the picture shown last becomes the old one
+    pub serial: u32,
+    /// how much of the old picture shows over the new one, 0 to 1
+    pub crossfade: f32,
+    /// how far the old picture is smeared sideways as it goes, in screen
+    /// widths (the sign is the direction)
+    pub streak: f32,
+    /// the time-stopped look: desaturated toward Divine Pulse's green, 0 to 1
+    pub grade: f32,
+    /// the grade only inside the wave (as it spreads)
+    pub wave_grades: bool,
+    /// the wave: its radius (1 reaches the corners), width (in screen
+    /// heights) and strength; strength 0 for none
+    pub ring: [f32; 3],
+    /// a second, fainter ring behind the first
+    pub echo: f32,
+    /// a brief brightening, 0 to 1
+    pub flash: f32,
+    /// darkened edges, 0 to 1
+    pub vignette: f32,
+    /// seconds, for the clock marks' slow turn
+    pub time: f32,
+}
 
 /// one screen's pixels, already converted to straight RGBA8, or where they
 /// are on the GPU, for a presenter sharing the renderer's device.

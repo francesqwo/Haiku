@@ -38,3 +38,10 @@ DUMP=$(upath "${HAIKU_DUMP:-$MAIN/game/Fates-USA.cxi}")
 [ -d "$T/cargo" ] && { export CARGO_HOME=$(wpath "$T/cargo"); export PATH="$T/cargo/bin:$PATH"; }
 [ -d "$DEVKIT/bin" ] && export PATH="$DEVKIT/bin:$PATH"
 export CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-4}
+# quiet: builds and tests are background jobs. This shell, and every
+# compiler it starts (Windows hands a below-normal class down to children),
+# runs at below-normal priority so a game being played beside it keeps its
+# sound and its pace. HAIKU_BUILD_PRIORITY=normal leaves it alone.
+if [ "${HAIKU_BUILD_PRIORITY:-low}" != normal ] && [ -r /proc/$$/winpid ]; then
+  powershell -NoProfile -Command "try { (Get-Process -Id $(cat /proc/$$/winpid)).PriorityClass = 'BelowNormal' } catch {}" > /dev/null 2>&1 || true
+fi

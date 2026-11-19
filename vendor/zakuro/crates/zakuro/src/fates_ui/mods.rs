@@ -110,6 +110,7 @@ pub fn sample() -> ModsView {
                 true,
                 true,
                 vec![
+                    Note { warning: false, text: crate::haiku_codemods::own_saves_note("gameplay-tweaks") }, // codemods2
                     Note { warning: false, text: "Code mod (code.ips): Haiku recompiles the code it changes.".into() },
                     Note { warning: false, text: "Compiled: 3 of the game's functions run patched.".into() },
                 ],
@@ -249,14 +250,24 @@ pub fn draw_row_extras(canvas: &Canvas, item: Item, env: &Env, x: f32, y: f32, l
 /// the details box under the rows: the selected mod's name, version and
 /// author, its description and its notes, warnings in red.
 pub fn draw_details(canvas: &Canvas, item: Item, env: &Env) {
-    let x = PANEL_X + 30.0;
-    let width = PANEL_W - 60.0;
     canvas.fill(PANEL_X + 26.0, DETAILS_Y - 1.5, PANEL_W - 52.0, 0.8, Color32::from_rgba_unmultiplied(70, 110, 110, 110));
+    // fanpatch: what doesn't fit is wrapped again a little smaller first
+    let lines = details_lines(canvas, item, env, 0.72);
+    let fits = |lines: &[(String, f32, Color32)], line: f32| lines.iter().map(|(_, scale, _)| if *scale < 0.8 { line } else { 15.0 }).sum::<f32>() <= DETAILS_H + 2.0;
+    if !fits(&lines, 13.0) {
+        draw_detail_lines(canvas, &details_lines(canvas, item, env, 0.62), 0.62, 11.0);
+        return;
+    }
+    draw_detail_lines(canvas, &lines, 0.72, 13.0);
+}
+
+/// the details box's lines at a text scale (fanpatch: split from draw_details).
+fn details_lines(canvas: &Canvas, item: Item, env: &Env, small: f32) -> Vec<(String, f32, Color32)> {
+    let width = PANEL_W - 60.0;
     let mut lines: Vec<(String, f32, Color32)> = Vec::new();
-    let small = 0.72;
     match item {
         Item::Mod(index) => {
-            let Some(row) = env.mods.rows.get(index) else { return };
+            let Some(row) = env.mods.rows.get(index) else { return lines };
             let mut title = row.name.clone();
             let meta = meta(row);
             if !meta.is_empty() {
@@ -294,12 +305,19 @@ pub fn draw_details(canvas: &Canvas, item: Item, env: &Env) {
                 lines.push((line, small, if env.mods.pending { TEXT_WARN } else { TEXT_SOFT }));
             }
         }
-        _ => return,
+        _ => return lines,
     }
+    lines
+}
+
+/// draws the details box's lines, small ones `line` units apart.
+fn draw_detail_lines(canvas: &Canvas, lines: &[(String, f32, Color32)], small: f32, line: f32) {
+    let x = PANEL_X + 30.0;
+    let width = PANEL_W - 60.0;
     let mut y = DETAILS_Y + 1.0;
     let bottom = DETAILS_Y + DETAILS_H;
     for (index, (text, scale, colour)) in lines.iter().enumerate() {
-        let height = if *scale < 0.8 { 13.0 } else { 15.0 };
+        let height = if *scale < 0.8 { line } else { 15.0 };
         if y + height > bottom + 2.0 {
             // what doesn't fit ends in an ellipsis on the last line
             if index > 0 {
@@ -394,6 +412,10 @@ fn confirm_text(confirm: &Confirm, pending: bool) -> String {
     if confirm.exit {
         // qol: the same dialog asks before Exit to Desktop
         return "Exit to the desktop? Anything you haven't saved will be lost.".to_owned();
+    }
+    if crate::haiku_voices::asking() {
+        // jpvoice: and before the restart that changes the voices
+        return "Restart the game with the voices as set? Anything you haven't saved will be lost.".to_owned();
     }
     if confirm.title {
         // qol4: and before Return to Title

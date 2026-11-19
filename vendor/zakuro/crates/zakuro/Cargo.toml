@@ -49,6 +49,8 @@ gilrs = { version = "0.11.2", features = ["serde-serialize"] }
 miniz_oxide = "0.8"
 # hdpacks: unpacking large downloads as they are read (already in the lock)
 flate2 = "1"
+# jpn2: the English rules for Haiku's lines on the Japanese game (already in the lock)
+regex = "1"
 
 [dev-dependencies]
 zakuro-fs = { workspace = true, features = ["testing"] }

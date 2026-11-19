@@ -49,7 +49,10 @@ pub const HAIR: u32 = 0x20;
 /// - 4: as 3, without Layla (catalog::SINCE_NO_LAYLA): she never fights,
 ///   so she has no battle or map head of her own.
 pub const VERSION_FIRST: u32 = 1;
-pub const VERSION_CURRENT: u32 = 4;
+/// - 5 (jpn2): as 4; on the Japanese Special Edition, Revelation's story
+///   characters come from its DLC (catalog::SINCE_DLC_STORY), so its pool
+///   is the 98 of the other editions. Elsewhere the same as 4.
+pub const VERSION_CURRENT: u32 = 5;
 
 /// splitmix64: small, fast and the same everywhere
 pub struct Rng(u64);

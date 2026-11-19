@@ -334,6 +334,45 @@ fn write_cstr(m: &mut Memory, a: u32, text: &[u8], room: usize) {
 
 // -- the hook ---------------------------------------------------------------
 
+/// pulse: a save state (the Cheats tab's Save States) was loaded: the run
+/// its save's marker names comes on, or the randomizer goes off for a state
+/// of an ordinary run, as a save loaded from the title would have it. The
+/// state's memory already has the run's tables; activating writes them
+/// from the ROM's originals and the plan again, which gives the same bytes,
+/// and gives the host the run's bookkeeping (the talk lines' cast, the
+/// pool of names) that a new process would not have.
+pub fn state_loaded(system: &mut System) {
+    let mut guard = STATE.lock().unwrap_or_else(|e| e.into_inner());
+    let state = guard.get_or_insert_with(State::default);
+    let key = system as *mut System as usize;
+    // everything the host kept about the memory before (its page of
+    // strings, the chapter entries it changed) is of another memory now;
+    // only the catalogs read from the ROM and the font stay
+    let fresh = State {
+        system: key,
+        catalog: state.catalog.take(),
+        catalogs: std::mem::take(&mut state.catalogs),
+        catalog_failed: state.catalog_failed,
+        font: state.font.take(),
+        font_failed: state.font_failed,
+        ..State::default()
+    };
+    *state = fresh;
+    set_active(false);
+    if let Some(choice) = user_data(system).and_then(|gud| read_marker(system, gud)) {
+        activate(state, system, choice, "a loaded save state");
+    } else {
+        log::info!("randomizer: off (a loaded save state of an ordinary run)");
+    }
+}
+
+/// pulse: the randomized run on now (seed, options, rules), for a save
+/// state's header.
+pub fn run_now() -> Option<(u32, u32, u32)> {
+    current().map(|c| (c.seed, c.options, c.version))
+}
+
+
 /// the hook the overrides call (haiku_rando_hook).
 ///
 /// # Safety
@@ -506,7 +545,7 @@ pub unsafe extern "C" fn hook(ctx: *mut std::ffi::c_void, op: u32, a: u32, b: u3
 }
 
 fn user_data(system: &mut System) -> Option<u32> {
-    let gud = r32(&mut system.memory, GAME_USER_DATA);
+    let gud = r32(&mut system.memory, crate::region::us(GAME_USER_DATA));
     (gud != 0 && system.memory.is_readable(gud, 0x40)).then_some(gud)
 }
 
@@ -549,7 +588,9 @@ fn write_marker(state: &State, system: &mut System, gud: u32) {
 /// on, everyone is in the pool; an older run's catalog is the one it was
 /// planned with), which becomes the current one
 fn load_catalog(state: &mut State, system: &mut System, version: u32) -> Option<Arc<Catalog>> {
-    let pool = if version >= catalog::SINCE_NO_LAYLA {
+    let pool = if version >= catalog::SINCE_DLC_STORY {
+        catalog::SINCE_DLC_STORY
+    } else if version >= catalog::SINCE_NO_LAYLA {
         catalog::SINCE_NO_LAYLA
     } else if version >= catalog::SINCE_ALL {
         catalog::SINCE_ALL
@@ -564,7 +605,14 @@ fn load_catalog(state: &mut State, system: &mut System, version: u32) -> Option<
         return None;
     }
     let rom = system.title.as_ref().and_then(rom::Rom::of);
-    match rom.map(|rom| Catalog::load(&rom, version)) {
+    // jpn2: the DLC's contents, for the Japanese Special Edition's Revelation
+    // (read only when the game has no person files of its own for it)
+    let dlc: Vec<rom::Rom> = if version >= catalog::SINCE_DLC_STORY {
+        system.dlc.iter().flat_map(|d| d.contents.iter().map(|c| c.index).chain(d.folders.iter().map(|(i, _)| *i)).collect::<std::collections::BTreeSet<u16>>().into_iter().filter_map(move |i| rom::Rom::of_dlc(d, i))).collect()
+    } else {
+        Vec::new()
+    };
+    match rom.map(|rom| Catalog::load_with(&rom, &dlc, version)) {
         Some(Ok(cat)) => {
             let cat = Arc::new(cat);
             state.catalogs.insert(pool, cat.clone());
@@ -587,7 +635,7 @@ fn load_catalog(state: &mut State, system: &mut System, version: u32) -> Option<
 /// GameData's person table in guest memory, and where its data starts.
 fn gamedata_in_memory(cat: &Catalog, system: &mut System) -> Option<(u32, u32)> {
     let m = &mut system.memory;
-    let node = r32(m, PERSON_LIST);
+    let node = r32(m, crate::region::us(PERSON_LIST));
     if node == 0 || !m.is_readable(node, 12) {
         return None;
     }
@@ -719,6 +767,12 @@ fn identity_strings(state: &mut State, system: &mut System, cat: &Catalog, base:
 
 fn activate(state: &mut State, system: &mut System, choice: Choice, why: &str) {
     if state.active.as_ref().is_some_and(|a| a.choice == choice) {
+        return;
+    }
+    // codemods2: a code mod that changes the functions the randomizer hooks
+    // (who a unit is, what it carries) has its own cast: its code wins
+    if crate::codemods::replaces(0x001AE730) || crate::codemods::replaces(0x003D8C38) {
+        log::warn!("randomizer: off, a code mod changes the functions it works through; the run stays as the mod makes it");
         return;
     }
     if state.active.is_some() {
@@ -882,7 +936,7 @@ fn write_spoiler(plan: &Plan, extra: &[String]) {
 /// the person tables Person's list holds, after GameData's own.
 fn loaded_tables(system: &mut System) -> Vec<u32> {
     let mut tables = Vec::new();
-    let mut node = r32(&mut system.memory, PERSON_LIST);
+    let mut node = r32(&mut system.memory, crate::region::us(PERSON_LIST));
     let mut guard = 0;
     while node != 0 && guard < 64 && system.memory.is_readable(node, 12) {
         if guard > 0 {
@@ -993,7 +1047,7 @@ fn dispos_unit(state: &mut State, system: &mut System, entry: u32) {
     }
     // the person: in the loaded tables, by PID
     let mut person = 0;
-    let mut node = r32(m, PERSON_LIST);
+    let mut node = r32(m, crate::region::us(PERSON_LIST));
     let mut guard = 0;
     'tables: while node != 0 && guard < 64 {
         let table = r32(m, node);
@@ -1540,7 +1594,7 @@ fn save_badge(state: &mut State, system: &mut System, item: u32) -> u32 {
     if kind != 3 || slot >= 9 {
         return 0;
     }
-    let table = r32(m, CHAPTER_FILE_NAMES);
+    let table = r32(m, crate::region::us(CHAPTER_FILE_NAMES));
     let name_at = r32(m, table.wrapping_add(slot * 4));
     if name_at == 0 || !m.is_readable(name_at, 2) {
         return 0;
