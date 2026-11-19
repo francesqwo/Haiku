@@ -24,6 +24,8 @@ pub mod net;
 pub mod applet;
 // gate: StreetPass and the amiibo reader, natively
 pub mod local;
+// vow: ir:rst for code mods that open it
+pub mod irrst;
 // offline-msg: the message shown when an online feature cannot be used
 pub mod online;
 // online: local wireless (nwm::UDS), natively, carried by crate::netplay

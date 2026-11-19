@@ -1,5 +1,6 @@
-//! Haiku Setup's log, `Haiku Setup.log` beside it: every step, what it
-//! found and every tool's failure, so a failed build can be looked into.
+//! The setup's log (oneexe: setup-work/setup.log; 1.x wrote `Haiku
+//! Setup.log` beside Haiku Setup.exe): every step, what it found and every
+//! tool's failure, so a failed build can be looked into.
 
 use std::io::Write;
 use std::path::Path;
@@ -10,6 +11,9 @@ static LOG: Mutex<Option<std::fs::File>> = Mutex::new(None);
 static ECHO: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 pub fn open(path: &Path, echo: bool) {
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
     let file = std::fs::OpenOptions::new().create(true).append(true).open(path).ok();
     *LOG.lock().unwrap() = file;
     ECHO.store(echo, std::sync::atomic::Ordering::Relaxed);

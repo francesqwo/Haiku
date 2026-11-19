@@ -113,6 +113,7 @@ pub fn svc_name(number: u32) -> &'static str {
         0x2B => "GetProcessInfo",
         0x2D => "ConnectToPort",
         0x32 => "SendSyncRequest",
+        0x33 => "OpenProcess",
         0x35 => "GetProcessId",
         0x37 => "GetThreadId",
         0x38 => "GetResourceLimit",
@@ -121,6 +122,7 @@ pub fn svc_name(number: u32) -> &'static str {
         0x3C => "Break",
         0x3D => "OutputDebugString",
         0x54..=0x56 => "CacheMaintenance",
+        0x70 => "ControlProcessMemory",
         _ => "?",
     }
 }

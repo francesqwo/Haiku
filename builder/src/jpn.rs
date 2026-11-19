@@ -64,11 +64,18 @@ pub struct Build {
 
 /// the Japanese build this Haiku has a map for, or why it has none.
 pub fn build(setup: &Path) -> Result<Build, String> {
+    // oneexe: the map is in Haiku.exe (regions.rs); a setup/jpn folder (a
+    // test's) is read instead when there is one
     let dir = setup.join("jpn");
-    let text = std::fs::read_to_string(dir.join("build.txt")).map_err(|_| "This Haiku has no address map for the Japanese game yet".to_owned())?;
-    if !dir.join("map-jpn.tsv").is_file() {
-        return Err("This Haiku's Japanese address map is missing (setup/jpn/map-jpn.tsv): extract the whole Haiku download again".to_owned());
-    }
+    let text = if dir.is_dir() {
+        let text = std::fs::read_to_string(dir.join("build.txt")).map_err(|_| "This Haiku has no address map for the Japanese game yet".to_owned())?;
+        if !dir.join("map-jpn.tsv").is_file() {
+            return Err("This Haiku's Japanese address map is missing (setup/jpn/map-jpn.tsv): extract the whole Haiku download again".to_owned());
+        }
+        text
+    } else {
+        crate::regions::JPN_BUILD.to_owned()
+    };
     let mut build = Build { title: 0, code_sha256: String::new() };
     for line in text.lines() {
         match line.split_once(' ') {

@@ -4,14 +4,16 @@
 # Usage (from a checkout or worktree root):  dev/build.sh <name>
 #   -> runs/<name>/Haiku.exe, with runs/<name>/game linked to $HAIKU_MAIN/game
 #      (when there is one) and assets/ to this checkout's.
-# It links $HAIKU_WORK/recomp-<name>/code (dev/recomp.sh <name>), else
-# $HAIKU_MAIN/source/code.
+# oneexe: Haiku.exe holds the engine and Haiku's overrides; the game's code
+# is the module dev/recomp.sh <name> builds ($HAIKU_WORK/recomp-<name>/module),
+# copied here into runs/<name>/data/code, where Haiku.exe looks for it. A run
+# folder whose data/ is a link to the main checkout's gets none (that would
+# write into the main checkout): give such a run HAIKU_GAME_MODULE=<game.dll>.
 set -euo pipefail
 NAME=${1:?usage: dev/build.sh <name>}
 HERE=$(cd "$(dirname "$0")/.." && pwd)
 . "$HERE/dev/env.sh"
 export CARGO_TARGET_DIR=$(wpath "$WORK/target-$NAME")
-if [ -d "$WORK/recomp-$NAME/code" ]; then export FATES_RECOMP_DIR=$(wpath "$WORK/recomp-$NAME/code"); else export FATES_RECOMP_DIR=$(wpath "$MAIN/source/code"); fi
 # native-final: PROFILE=ship builds the shipped profile (thin LTO)
 PROFILE=${PROFILE:-release}
 cargo build --manifest-path "$(wpath "$HERE/source/Cargo.toml")" --profile "$PROFILE" ${CARGO_EXTRA:-}
@@ -26,4 +28,15 @@ if [ ! -e "$RUN/game" ] && [ -d "$MAIN/game" ]; then
   cmd //c mklink //J "$(wpath "$RUN/game")" "$(wpath "$MAIN/game")" >/dev/null
 fi
 "$HERE/dev/link-assets.sh" "$RUN"
+MODULE="$WORK/recomp-$NAME/module"
+if [ -f "$MODULE/game.dll" ]; then
+  if [ -L "$RUN/data" ] || { [ -e "$RUN/data" ] && [ "$(cd "$RUN/data" && pwd -P)" != "$(cd "$RUN" && pwd -P)/data" ]; }; then
+    echo "runs/$NAME/data is a link: the module is not copied there (HAIKU_GAME_MODULE=$(wpath "$MODULE/game.dll"))"
+  else
+    mkdir -p "$RUN/data/code"
+    cp "$MODULE/game.dll" "$MODULE/game.txt" "$RUN/data/code/"
+  fi
+else
+  echo "no module in $MODULE yet: dev/recomp.sh $NAME builds it"
+fi
 echo "built $RUN/Haiku.exe"

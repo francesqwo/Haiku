@@ -25,6 +25,7 @@ pub mod codegen;
 pub mod compile;
 pub mod cro;
 pub mod discover;
+pub mod hosted; // oneexe
 pub mod image;
 pub mod natives;
 pub mod overrides;
@@ -107,6 +108,12 @@ pub fn imported(files: &[(cro::Module, Vec<u8>)], crs: Option<&cro::Module>, mod
 /// the main executable's module description, the static.crs every title
 /// carries in its RomFS, or the one a mod gives in its place.
 pub fn static_module(title: &Title, mods: Mods) -> Option<cro::Module> {
+    // oneexe: a game installed as a folder
+    if title.romfs.is_none() {
+        let dir = title.romfs_dir.as_ref()?;
+        let bytes = mods.romfs.and_then(|romfs| romfs("static.crs")).or_else(|| std::fs::read(dir.join("static.crs")).ok())?;
+        return cro::parse(&bytes);
+    }
     let romfs = title.romfs.as_ref()?;
     let file = romfs.lookup("static.crs").ok()?;
     cro::parse(&mods.read(title, "static.crs", &file)?)
@@ -115,6 +122,29 @@ pub fn static_module(title: &Title, mods: Mods) -> Option<cro::Module> {
 /// every CRO module in the RomFS with its file, the one a mod gives in its
 /// place when it gives one.
 pub fn module_files(title: &Title, mods: Mods) -> Vec<(cro::Module, Vec<u8>)> {
+    // oneexe: a game installed as a folder, its modules by path
+    if let (None, Some(dir)) = (&title.romfs, &title.romfs_dir) {
+        let mut paths = Vec::new();
+        let mut dirs = vec![(dir.clone(), String::new())];
+        while let Some((at, path)) = dirs.pop() {
+            for entry in std::fs::read_dir(&at).into_iter().flatten().flatten() {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if entry.file_type().is_ok_and(|t| t.is_dir()) {
+                    dirs.push((entry.path(), join(&path, &name)));
+                } else if name.to_ascii_lowercase().ends_with(".cro") {
+                    paths.push(join(&path, &name));
+                }
+            }
+        }
+        paths.sort();
+        return paths
+            .into_iter()
+            .filter_map(|path| {
+                let bytes = mods.romfs.and_then(|romfs| romfs(&path)).or_else(|| std::fs::read(dir.join(&path)).ok())?;
+                Some((cro::parse(&bytes)?, bytes))
+            })
+            .collect();
+    }
     let Some(romfs) = &title.romfs else { return Vec::new() };
     let mut files = Vec::new();
     if let Ok(root) = romfs.root() {

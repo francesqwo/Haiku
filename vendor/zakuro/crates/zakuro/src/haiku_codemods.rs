@@ -463,11 +463,19 @@ pub fn build(plan: &Plan, game: &Game, base: &patch::Base, compiler: &Compiler, 
         let _ = std::fs::write(dir.join("base.txt"), base.to_text());
         let _ = std::fs::write(dir.join("patched.bin"), code.as_slice());
         let _ = std::fs::write(dir.join("exheader.bin"), &exheader_bytes);
+        // vow: and the game's own, for the pages the mod's adds
+        let _ = std::fs::write(dir.join("game-exheader.bin"), &game.exheader);
         let changed: String = plan.changed.iter().map(|(start, end)| format!("{start:08X} {end:08X}\n")).collect();
         let _ = std::fs::write(dir.join("changed.txt"), changed);
         log::info!("codemods: the analysis's input is in {}", dir.display());
     }
-    let program = patch::program(&exheader, &code, &plan.changed);
+    // vow: the pages the mod's exheader adds past the game's .data and .bss,
+    // where a Magikoopa-style mod (V.O.W Edition) keeps its code
+    let executable = patch::added_pages(&recomp3ds::rom::ExHeader::read(&game.exheader), &exheader);
+    for &(start, end) in &executable {
+        log::info!("codemods: code may run at 0x{start:08X}..0x{end:08X}, the pages the exheader adds past the game's .data and .bss");
+    }
+    let program = patch::program_with(&exheader, &code, &plan.changed, &executable);
     let (made, program) = patch::plan(base, program, &plan.changed);
     log::info!(
         "codemods: {} functions changed, {} to recompile, {} new instructions, {} entries with no code now, {} of Haiku's own replaced, {} dead ends, analysed in {:.1} s",
@@ -577,7 +585,7 @@ pub fn compiler() -> Option<Compiler> {
         let leading: Vec<&str> = words.collect();
         return Some(Compiler::new(program, &leading)).filter(Compiler::runs);
     }
-    let tools = crate::haiku_mods::root().join("tools");
+    let tools = crate::haiku_mods::home().join("tools"); // versions: beside Haiku.exe
     let mut candidates = Vec::new();
     if let Ok(entries) = std::fs::read_dir(&tools) {
         for entry in entries.flatten() {
@@ -608,7 +616,7 @@ pub fn setup_compiler() -> Option<Compiler> {
     static FOUND: std::sync::OnceLock<Option<Compiler>> = std::sync::OnceLock::new();
     FOUND
         .get_or_init(|| {
-            let kit = crate::haiku_mods::root().join("setup").join("w64devkit");
+            let kit = crate::haiku_mods::home().join("setup").join("w64devkit"); // versions: beside Haiku.exe, not in a version's folder
             let gcc = kit.join("bin").join("gcc.exe");
             let ascii = |path: &Path| path.to_str().is_some_and(str::is_ascii);
             let whole = cfg!(windows) && gcc.is_file() && kit.join("lib").join("dllcrt2.o").is_file();

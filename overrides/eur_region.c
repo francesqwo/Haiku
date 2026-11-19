@@ -4,7 +4,9 @@
  * copy for the EUR build (the line marked "eur: title"). */
 #include "overrides.h"
 
-const unsigned long long haiku_code_title = 0x0004000000179800ull; /* eur: title */
+/* oneexe: Haiku.exe sets it to the game's module's title when it binds the
+ * module, before any of the game's code runs (source/src/module.rs) */
+unsigned long long haiku_code_title = 0x0004000000179800ull; /* eur: title */
 
 /* jpprep: whether the code is a Japanese build's (Fire Emblem if: the
  * Special Edition 000400000012DE00, or the single-route 12DC00 and 12DD00

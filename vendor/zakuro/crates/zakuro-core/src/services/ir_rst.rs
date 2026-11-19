@@ -79,7 +79,8 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
 }
 
 /// the block and the event, made the first time they are asked for.
-fn resources(system: &mut System) -> (ObjectId, ObjectId) {
+/// vow: pcos::irrst answers the requests natively with these.
+pub(crate) fn resources(system: &mut System) -> (ObjectId, ObjectId) {
     if let (Some((memory, _)), Some(event)) = (system.services.ir_rst.memory, system.services.ir_rst.event) {
         return (memory, event);
     }
@@ -105,6 +106,21 @@ fn resources(system: &mut System) -> (ObjectId, ObjectId) {
     system.services.ir_rst.memory = Some((memory, block.addr));
     system.services.ir_rst.event = Some(event);
     (memory, event)
+}
+
+/// vow: Initialize(update period in ms): entries are written from then on.
+pub(crate) fn initialize(system: &mut System, milliseconds: u32) {
+    resources(system);
+    let period = (milliseconds.max(1) as u64) * CPU_CLOCK_HZ / 1000;
+    let state = &mut system.services.ir_rst;
+    state.period = Some(period);
+    state.next_update = system.cpu.cycles + period;
+    state.next = 0;
+}
+
+/// vow: Shutdown: no more entries.
+pub(crate) fn shutdown(system: &mut System) {
+    system.services.ir_rst.period = None;
 }
 
 /// writes an entry when one is due, the buttons and the stick as the

@@ -286,6 +286,13 @@ pub struct ModList {
     options: HashMap<String, BTreeMap<String, i64>>,
 }
 
+/// versions: the Haiku folder itself (HAIKU_HOME, which Haiku.exe sets
+/// when root() is a version's folder, games\<version>\), for what every
+/// version shares: setup\, tools\.
+pub fn home() -> PathBuf {
+    std::env::var_os("HAIKU_HOME").map(PathBuf::from).unwrap_or_else(root)
+}
+
 /// the folder Haiku runs from: FATES_ROOT, or the program's.
 pub fn root() -> PathBuf {
     if let Some(root) = std::env::var_os("FATES_ROOT") {
@@ -312,7 +319,19 @@ impl ModList {
     /// LOCALAPPDATA/haiku (Haiku points both into its own folder).
     pub fn haiku(data_dir: Option<&Path>) -> ModList {
         let cache = std::env::var_os("LOCALAPPDATA").map(|dir| PathBuf::from(dir).join("haiku"));
-        ModList::load(&root(), data_dir, cache.as_deref())
+        // versions: each version of the game has its own list of its mods,
+        // beside its mods folder (HAIKU_MODS_LIST, set by Haiku.exe). Set
+        // before the first scan, so the shared list in data_dir is neither
+        // read nor rewritten for a version that has its own
+        let own = std::env::var_os("HAIKU_MODS_LIST").map(PathBuf::from);
+        let mut list = ModList {
+            folder: root().join("mods"),
+            config: own.or_else(|| data_dir.map(|dir| dir.join(CONFIG_FILE))),
+            cache: cache.map(|dir| dir.join("mods")),
+            ..ModList::default()
+        };
+        list.scan();
+        list
     }
 
     /// reads the mods folder and the list again.

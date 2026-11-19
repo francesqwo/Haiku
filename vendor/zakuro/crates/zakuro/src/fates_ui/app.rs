@@ -13,6 +13,10 @@ use crate::App;
 impl App {
     /// the interface over the game for a frame, in place of Zakuro's menus.
     pub(crate) fn fates_interface(&mut self, event_loop: &ActiveEventLoop) -> Overlay {
+        // updscreen: the work before the game's code loads, alone
+        if self.pregame.is_some() {
+            return self.pregame_frame(event_loop);
+        }
         self.fates_script(event_loop);
         // mods: the game's Main Menu asked for the Mods page
         if crate::haiku_mods::take_open_request() {

@@ -1,22 +1,26 @@
-//! Haiku Setup: builds Haiku (Fire Emblem Fates, recompiled for PC) from
-//! the player's own dump of Fire Emblem Fates Special Edition (USA) and its
-//! DLC, then starts it. The release holds no game code or data: the code is
-//! recompiled here from the dump, and Haiku's game-derived files are made
-//! from it (derive.rs).
+//! Haiku's setup: installs Fire Emblem Fates from the player's own dump
+//! (the USA or European Special Edition, or the Japanese Fire Emblem if)
+//! and its DLC, makes Haiku's game-derived files from it, and recompiles the
+//! game's code into the module Haiku.exe loads (module.rs). The release
+//! holds no game code or data.
 //!
-//! Without arguments it opens its window (ui.rs). For testing and scripts:
-//!   Haiku Setup --check-game <dump>      what the dump is
-//!   Haiku Setup --check-dlc <dlc>        what the DLC is
-//!   Haiku Setup --build <dump> [--dlc <dlc>]...   build, printing progress
-//!   Haiku Setup --voices <dump> [--dlc <dlc>] [--installed <romfs>] [--out <data>]   (jpvoice)
+//! oneexe: this was Haiku Setup.exe, a program of its own that linked a
+//! whole Haiku.exe. It is now a library inside Haiku.exe, which opens its
+//! window on first launch (and whenever the game's module has to be built
+//! again), and whose command line it keeps (`cli`):
+//!   Haiku --check-game <dump>      what the dump is
+//!   Haiku --check-dlc <dlc>        what the DLC is
+//!   Haiku --build <dump> [--dlc <dlc>]...   install and build, printing progress
+//!   Haiku --rebuild                 build the game's module again from data/
+//!   Haiku --voices <dump> [--dlc <dlc>] [--installed <romfs>] [--out <data>]   (jpvoice)
 //!                                        take the Japanese voices out of a dump
-//!   Haiku Setup --voices-dlc <dlc> [--out <data>]   (jpdlc) and of the Japanese DLC
-//! Development (dev/builder/package.sh):
+//!   Haiku --voices-dlc <dlc> [--out <data>]   (jpdlc) and of the Japanese DLC
+//!   Haiku --setup                   the setup window (Rebuild, Change dump or DLC, Voices)
+//! Development (dev/builder/package.sh, dev/recomp.sh):
+//!   --make-module <dump or data dir> <out dir>   the game's module alone
 //!   --make-derived <repo> <romfs> <pack> [<report>]
 //!   --make-derived-eur <dir> <EUR romfs> <pack> [<report>]   (eur2)
 //!   --apply-derived <pack> <romfs> <out>
-
-#![cfg_attr(windows, windows_subsystem = "windows")]
 
 mod aes; // jpvoice
 mod derive;
@@ -24,15 +28,20 @@ mod dlc;
 mod dump;
 mod eur; // eur: the EUR Special Edition
 mod jpn; // jpprep: the Japanese game (Fire Emblem if), and which DLC fits which game
-mod log;
+pub mod layout; // versions: USA, EUR and JPN side by side (games\<version>\)
+pub mod log;
 mod lz11;
 mod make;
+pub mod module; // oneexe: the game's code module, its stamp and its build
 mod pil;
-mod pipeline;
+pub mod pipeline;
+pub mod regions; // oneexe: the regions' address maps, in the exe
 mod spawn;
 mod tex;
 mod toolchain;
-mod ui;
+pub mod ui;
+pub mod upgrade; // oneexe: an install of an earlier Haiku, brought over
+pub mod updscreen; // updscreen: the module built while the game's window shows it
 mod voices; // jpvoice: the optional Japanese voices (its screen: voices_ui.rs, in ui.rs)
 #[cfg(windows)]
 mod win;
@@ -41,49 +50,44 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
+/// oneexe: the recompiler, for the exe (its hosted tables' version)
+pub use recomp3ds as recomp;
+
 /// an error from the shared crates in the setup's words (they were written
 /// for the runtime Haiku grew from, whose name the setup doesn't show).
 pub fn clean_error(text: &str) -> String {
     text.replace("Zakuro needs", "Haiku needs").replace("Zakuro", "Haiku")
 }
 
-/// the folder Haiku Setup.exe is in (HAIKU_SETUP_ROOT for tests).
+/// the folder Haiku.exe is in (HAIKU_SETUP_ROOT, else FATES_ROOT, for
+/// tests). versions: HAIKU_HOME first, which the game sets to the Haiku
+/// folder when it points FATES_ROOT at a version's (layout.rs), so a setup
+/// or a restart started from the game finds the whole folder.
 pub fn root() -> PathBuf {
-    if let Some(root) = std::env::var_os("HAIKU_SETUP_ROOT") {
+    if let Some(root) = std::env::var_os("HAIKU_HOME").or_else(|| std::env::var_os("HAIKU_SETUP_ROOT")).or_else(|| std::env::var_os("FATES_ROOT")) {
         return PathBuf::from(root);
     }
     std::env::current_exe().ok().and_then(|exe| exe.parent().map(Path::to_owned)).unwrap_or_else(|| PathBuf::from("."))
 }
 
-#[cfg(windows)]
-fn attach_console() {
-    #[link(name = "kernel32")]
-    extern "system" {
-        fn AttachConsole(pid: u32) -> i32;
+/// oneexe: the setup's command line, inside Haiku.exe: the exit code when
+/// args (without the program) is a setup command, None to go on to the
+/// game. The window's options (--setup, --shots, --hidden, --script) open
+/// it; it relaunches Haiku.exe to play when asked.
+pub fn cli(args: &[String]) -> Option<i32> {
+    let first = args.first()?.clone();
+    if first == "--setup" || first.starts_with("--shots") || first == "--hidden" || first == "--script" || first == "--window" {
+        ui::run(ui::Options::from_args(args), ui::Start::Setup);
+        return Some(0);
     }
-    // SAFETY: plain call; output redirected to a file or pipe keeps working
-    unsafe {
-        AttachConsole(u32::MAX);
-    }
-}
-#[cfg(not(windows))]
-fn attach_console() {}
-
-fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let Some(first) = args.first().cloned() else {
-        ui::run(ui::Options::from_env());
-        return;
-    };
-    if first.starts_with("--shots") || first == "--hidden" || first == "--script" || first == "--window" {
-        ui::run(ui::Options::from_args(&args));
-        return;
-    }
-    attach_console();
     let code = match first.as_str() {
         "--check-game" => check_game(&args[1..]),
         "--check-dlc" => check_dlc(&args[1..]),
         "--build" => build(&args[1..]),
+        "--rebuild" if args.get(1).is_some_and(|a| a == "--progress") => updscreen::child(), // updscreen: for the game's window
+        "--rebuild" => rebuild(), // oneexe
+        "--versions" => versions(&args[1..]), // versions
+        "--make-module" => make_module(&args[1..]), // oneexe
         "--make-derived" => make_derived(&args[1..]),
         "--make-derived-eur" => make_derived_eur(&args[1..]), // eur2
         "--make-derived-jpn" => make_derived_jpn(&args[1..]), // jpprep
@@ -145,15 +149,134 @@ fn main() {
             }
         },
         "--help" | "-h" | "/?" => {
-            println!("Haiku Setup: run it without arguments. For scripts: --check-game <dump>, --check-dlc <dlc>, --build <dump> [--dlc <dlc>]...");
+            println!("Haiku: run it without arguments to play (the setup opens the first time). For scripts: --check-game <dump>, --check-dlc <dlc>, --build <dump> [--dlc <dlc>]..., --rebuild, --voices <dump>, --voices-dlc <dlc>, --versions [usa|eur|jpn], --versions remove <usa|eur|jpn>, --setup");
             0
         }
-        other => {
-            eprintln!("unknown option {other}; run without arguments for the window");
-            2
-        }
+        _ => return None,
     };
-    std::process::exit(code);
+    Some(code)
+}
+
+/// versions: `--versions` lists the versions installed and the one that
+/// plays; `--versions <usa|eur|jpn>` makes that one play (as the options'
+/// Game Version does).
+fn versions(args: &[String]) -> i32 {
+    let root = root();
+    let installed = layout::installed(&root);
+    // versions2: `--versions remove <usa|eur|jpn>`, Haiku Setup's Remove a
+    // version without its window (its games\<version>\ deleted, the saves
+    // kept; never the only one)
+    if args.first().map(String::as_str) == Some("remove") {
+        let Some(version) = args.get(1).and_then(|tag| layout::Version::from_tag(tag)) else {
+            eprintln!("usage: --versions remove <usa|eur|jpn>");
+            return 2;
+        };
+        let paths = pipeline::Paths::new(root.clone());
+        log::open(&paths.log_file(), false);
+        log::line(format!("--versions remove {}", version.tag()));
+        let folder = match layout::remove(&root, version) {
+            Ok(folder) => folder,
+            Err(e) => {
+                log::line(format!("  not removed: {e}"));
+                eprintln!("{e}");
+                return 1;
+            }
+        };
+        let deleted = layout::delete_removed(&folder);
+        log::line(format!("  removed {} ({}); playing {}", version.tag(), deleted.as_ref().map_or_else(|e| format!("some files left, deleted at the next start: {e}"), |_| "deleted".into()), layout::active(&root).map(|v| v.tag()).unwrap_or("none")));
+        println!("removed {} (games\\{}); the saves are kept", version.name(), version.folder());
+        if let Err(e) = deleted {
+            println!("some of its files are left ({e}); they are deleted at the next start");
+        }
+        return versions(&[]);
+    }
+    if let Some(want) = args.first() {
+        let Some(version) = layout::Version::from_tag(want) else {
+            eprintln!("usage: --versions [usa|eur|jpn]");
+            return 2;
+        };
+        if !installed.contains(&version) {
+            eprintln!("{} isn't installed (installed: {})", version.name(), installed.iter().map(|v| v.tag()).collect::<Vec<_>>().join(", "));
+            return 1;
+        }
+        if let Err(e) = layout::set_active(&root, version) {
+            eprintln!("the settings can't be written: {e}");
+            return 1;
+        }
+    }
+    let active = layout::active(&root);
+    for v in &installed {
+        println!("{}{} in {}", v.tag(), if Some(*v) == active { " (plays)" } else { "" }, layout::dir(&root, *v).display());
+    }
+    if installed.is_empty() {
+        println!("no version in {} (a flat folder plays from data\\)", root.join(layout::GAMES).display());
+    }
+    0
+}
+
+/// oneexe: the game's module built again from the game installed in data/,
+/// as Haiku.exe does by itself when the module is out of date.
+fn rebuild() -> i32 {
+    let paths = pipeline::Paths::new(root());
+    log::open(&paths.log_file(), true);
+    let status: pipeline::Shared = Arc::new(Mutex::new(pipeline::Status::default()));
+    let cancel = AtomicBool::new(false);
+    let result = std::thread::scope(|scope| {
+        let job = scope.spawn(|| pipeline::update(&paths, &status, &cancel));
+        print_progress(&job, &status);
+        job.join().unwrap()
+    });
+    finish(result)
+}
+
+/// oneexe: the game's module alone, from a dump or a game installed as a
+/// folder, into a folder of its own (development: dev/recomp.sh). The
+/// amiibo icons come from <out>/amiibo_icons.c when it is there.
+fn make_module(args: &[String]) -> i32 {
+    let (Some(source), Some(out)) = (args.first(), args.get(1)) else {
+        eprintln!("usage: --make-module <dump or data dir> <out dir>");
+        return 2;
+    };
+    let out = std::path::absolute(out).unwrap_or_else(|_| PathBuf::from(out));
+    let source = std::path::absolute(source).unwrap_or_else(|_| PathBuf::from(source));
+    let source = source.as_path();
+    let _ = std::fs::create_dir_all(&out);
+    log::open(&out.join("make-module.log"), true);
+    let status: pipeline::Shared = Arc::new(Mutex::new(pipeline::Status::default()));
+    let cancel = AtomicBool::new(false);
+    let amiibo = out.join("amiibo_icons.c");
+    let result = std::thread::scope(|scope| {
+        let job = scope.spawn(|| module::build(source, &out.join("work"), &out, amiibo.is_file().then_some(amiibo.as_path()), &root().join("setup"), &status, &cancel));
+        print_progress(&job, &status);
+        job.join().unwrap()
+    });
+    finish(result)
+}
+
+fn finish(result: Result<String, String>) -> i32 {
+    match result {
+        Ok(said) => {
+            log::line(format!("ok: {said}"));
+            0
+        }
+        Err(e) => {
+            log::line(format!("failed: {e}"));
+            1
+        }
+    }
+}
+
+fn print_progress<T>(job: &std::thread::ScopedJoinHandle<T>, status: &pipeline::Shared) {
+    let mut last = String::new();
+    while !job.is_finished() {
+        let s = status.lock().unwrap().clone();
+        let coarse = format!("{:.0}{}", s.percent, s.step);
+        if coarse != last {
+            println!("{:3.0}% {} {}", s.percent, s.step, s.detail);
+            last = coarse;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
 }
 
 fn check_game(args: &[String]) -> i32 {
@@ -272,17 +395,7 @@ fn build(args: &[String]) -> i32 {
     let cancel = AtomicBool::new(false);
     let result = std::thread::scope(|scope| {
         let job = scope.spawn(|| pipeline::run(&paths, &game, &dlcs, &status, &cancel));
-        let mut last = String::new();
-        while !job.is_finished() {
-            let s = status.lock().unwrap().clone();
-            let line = format!("{:3.0}% {} {}", s.percent, s.step, s.detail);
-            let coarse = format!("{:.0}{}", s.percent, s.step);
-            if coarse != last {
-                println!("{line}");
-                last = coarse;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(250));
-        }
+        print_progress(&job, &status);
         job.join().unwrap()
     });
     match result {

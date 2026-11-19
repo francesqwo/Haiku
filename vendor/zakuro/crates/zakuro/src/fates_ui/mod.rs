@@ -22,6 +22,7 @@ pub mod qol; // qol: the boon/bane panel
 pub mod growth; // info-ui: the growth rates on the lower screen
 pub mod cheats; // cheats: the Cheats tab
 pub mod online; // online: the host's code and the connecting line
+pub mod pregame; // updscreen: the game's code being built, before the game starts
 pub mod pulse; // pulse: Divine Pulse's rewind screen
 pub mod states; // pulse: the Cheats tab's Save States
 pub mod tones; // tones: Options > Gameplay > Speaking Style

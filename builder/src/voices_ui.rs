@@ -348,7 +348,7 @@ impl App {
                 self.result_panel(dc, top, Some(done.dlc_error.is_none()), headline, &lines.join("\n"));
             }
             Some(Err(e)) => {
-                self.result_panel(dc, top, Some(false), "The voices couldn't be taken out", &format!("{e}\n\nThe log is Haiku Setup.log, beside Haiku Setup."));
+                self.result_panel(dc, top, Some(false), "The voices couldn't be taken out", &format!("{e}\n\nThe log is setup-work\\setup.log, beside Haiku.exe."));
             }
             None if self.voices.picked.is_some() || self.voices.dlc_picked.is_some() => self.draw_voices_picks(dc, top),
             None => {

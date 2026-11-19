@@ -62,6 +62,46 @@ pub fn generate(
     mods: Mods,
     events: &(dyn Fn(Event) + Sync),
 ) -> Result<Generated, String> {
+    generate_with(rom, pick, overrides, None, mods, events)
+}
+
+/// oneexe: overrides a host program links in itself, compiled apart from
+/// the title's code: the library has a small function in each one's place
+/// that goes on through a slot the host fills when it loads the library
+/// (hosted.rs writes them, and the tables the host binds by).
+pub struct Hosted<'a> {
+    /// what each replaces, as for RECOMP_OVERRIDE: the module (none for the
+    /// executable) and the address, odd for Thumb.
+    pub overrides: &'a [(Option<String>, u32)],
+    /// the executable's addresses (odd for Thumb) whose generated function
+    /// the host's overrides call by name.
+    pub functions: &'a [u32],
+    /// what the host knows the library by, kept in it (recomp_hosted_stamp).
+    pub stamp: &'a str,
+    /// C files of the host's own to compile in with the code (name, text).
+    pub extra: &'a [(String, String)],
+}
+
+/// generate, with the overrides linked into the host instead of written as
+/// C beside the code.
+pub fn generate_hosted(
+    rom: &Path,
+    pick: impl FnOnce(&Title) -> PathBuf,
+    hosted: &Hosted,
+    mods: Mods,
+    events: &(dyn Fn(Event) + Sync),
+) -> Result<Generated, String> {
+    generate_with(rom, pick, None, Some(hosted), mods, events)
+}
+
+fn generate_with(
+    rom: &Path,
+    pick: impl FnOnce(&Title) -> PathBuf,
+    overrides: Option<&Path>,
+    hosted: Option<&Hosted>,
+    mods: Mods,
+    events: &(dyn Fn(Event) + Sync),
+) -> Result<Generated, String> {
     let title = Title::load(rom).map_err(|error| format!("could not load {}, {error}", rom.display()))?;
     let mut programs = crate::programs(&title, mods).map_err(|error| format!("could not read the code, {error}"))?;
     let dir = pick(&title);
@@ -70,6 +110,15 @@ pub fn generate(
         None => Vec::new(),
     };
     let mut replaced: Vec<Override> = files.iter().flat_map(|file| file.overrides.iter().cloned()).collect();
+    // oneexe: the host's, by address
+    if let Some(hosted) = hosted {
+        for (module, address) in hosted.overrides {
+            if replaced.iter().any(|o| o.module == *module && o.address == *address) {
+                return Err(format!("0x{address:08X} is overridden twice"));
+            }
+            replaced.push(crate::hosted::override_of(module.as_deref(), *address));
+        }
+    }
     let by_hand = replaced.len();
     // the C library's divisions run on the host, as overrides of their own,
     // unless one written by hand takes the address. the modules call the
@@ -124,7 +173,8 @@ pub fn generate(
         .enumerate()
         .map(|(i, ((name, program), analysis))| codegen::Unit { module: (i > 0).then_some(name.as_str()), program, analysis })
         .collect();
-    let generated = codegen::generate(&units, &replaced);
+    let wanted: Vec<u32> = hosted.map(|hosted| hosted.functions.to_vec()).unwrap_or_default();
+    let (generated, named) = codegen::generate_named(&units, &replaced, &wanted);
 
     let write = |path: &Path, contents: &[u8]| {
         std::fs::write(path, contents).map_err(|error| format!("could not write {}, {error}", path.display()))
@@ -143,6 +193,17 @@ pub fn generate(
     if let Some(source) = &native_source {
         write(&dir.join("natives.c"), source.as_bytes())?;
         sources.push("natives.c".to_owned());
+    }
+    // oneexe: the host's overrides' places and the tables it binds by, and
+    // the host's own files
+    if let Some(hosted) = hosted {
+        let source = crate::hosted::source(hosted, &named, title.program_id());
+        write(&dir.join(crate::hosted::FILE), source.as_bytes())?;
+        sources.push(crate::hosted::FILE.to_owned());
+        for (name, text) in hosted.extra {
+            write(&dir.join(name), text.as_bytes())?;
+            sources.push(name.clone());
+        }
     }
     let bytes = generated.iter().map(|(_, contents)| contents.len()).sum();
     events(Event::Generated { files: generated.len(), bytes, overrides: by_hand });

@@ -11,7 +11,7 @@ Haiku is a native Windows port of Fire Emblem Fates Special Edition: the US rele
 
 ## Screenshots
 
-The Haiku Setup launcher, which checks your dump and builds the game:
+Haiku Setup, the screens Haiku.exe shows the first time, which check your dump and build the game's code:
 
 | Your dump, checked | Building | Ready to play |
 |---|---|---|
@@ -28,6 +28,7 @@ The Haiku Setup launcher, which checks your dump and builds the game:
 ### Three versions of the game
 
 - **US** (`CTR-P-BFZE`), **European** (`CTR-P-BFZP`) and **Japanese** (*Fire Emblem if*, `CTR-P-BFZJ`) Special Editions. Haiku Setup recognises which one your dump is and builds that version; each has its own DLC and its own saves.
+- **All three side by side.** One Haiku folder can hold the US, European and Japanese versions at once: **Add a version…** in Haiku Setup installs another from its dump, without touching the others, and **Options > Interface > Game Version** switches between them with a restart. Each version keeps its own game language, voices and mods folder. **Remove a version…** deletes one version's folder and keeps your saves and settings.
 - **The European release** plays in English, French, German, Spanish or Italian (Options > Interface > Game Language). Haiku's own menus and added text come in every language, made from your dump.
 - **The Japanese release** runs with its own script and voices, and Haiku's menus in Japanese (or English: Options > Interface > Menu Language). It keeps what the Western releases don't have: **My Room's petting minigame** (drag with the mouse), the **Festival of Bonds** and **Cipher** DLC, and **Corrin's three speaking styles** per gender.
 - **Japanese voices** for the US and European releases: on Haiku Setup's Play screen, **Add Japanese voices…** takes the voice files from a dump that has them, the Japanese release or an undub, and the DLC's from the Japanese DLC. Switch between English and Japanese on the Play screen or in Options > Audio.
@@ -109,11 +110,11 @@ A **Cheats** tab, off by default:
 ### Mods
 
 - A **Mods** screen, from the Main Menu or the options: turn mods on and off, set their load order, see file conflicts and missing dependencies, and **Apply and Restart**.
-- Mods go in the `mods` folder next to Haiku.exe, as folders or zips, the way you downloaded them. Luma3DS-style (LayeredFS) and plain `romfs/` mods work as they are, including replacement **music and sounds**, text, models and maps. File patches (.ips, .bps) are supported.
+- Mods go in the `mods` folder of the version they are for, `games\<version>\mods` (the Mods screen's **Open Mods Folder** opens it), as folders or zips, the way you downloaded them. Luma3DS-style (LayeredFS) and plain `romfs/` mods work as they are, including replacement **music and sounds**, text, models and maps. File patches (.ips, .bps) are supported.
 - **Other layouts work too:** a mod made of the game's own folders (such as `GameData`, `m` or `bu`) with no `romfs/` folder around them, and a mod that holds several releases, whose folder for each release (named by the game's title id) is up to two folders down. Folders of optional files are left alone.
 - **Texture packs**, including **Citra-format HD texture packs**. Large downloads (zips within zips, or packs split into several parts) are recognised and unpacked once, in the background.
 - **Code mods**: `code.ips`, IPS32, `code.bps`, `code.bin` and `exheader.bin` patches are **recompiled to native code**, not interpreted. Haiku needs a C compiler for that. It asks first, and offers two: **Zig**, a one-time 96 MB download that compiles in under a minute, or **the compiler that comes with Haiku**, which needs no download but takes several minutes for a big code mod. The Mods page's **Code Mod Compiler** row changes the choice, and Haiku's compiler is the backup if Zig can't be downloaded.
-- **A mod with several code patches** uses `code.ips` (or the one its readme names). Pick another with the mod's `code_patch` option in `userdata/haiku/mods.toml`; the mod's note on the Mods screen says how.
+- **A mod with several code patches** uses `code.ips` (or the one its readme names). Pick another with the mod's `code_patch` option in `games\<version>\mods.toml`; the mod's note on the Mods screen says how.
 - **A code mod that can't be compiled** is left out with a note saying why, and the other mods, other code mods included, still run.
 - **Native plugins** in C (or anything that makes a DLL), with hooks before and after the game's functions, per-frame callbacks, memory access and options: see [`sdk/haiku_mod.h`](sdk/haiku_mod.h).
 - **No mods come with Haiku.** Mods made by others, HD texture packs for example, belong to their authors; get them from them.
@@ -128,7 +129,7 @@ Haiku can use the fan translations made for the Japanese release, *Fire Emblem i
 - **Uncensored Patch:** it comes as a RAR, which Haiku can't open. Extract it with 7-Zip (the password is on the patch's own page), and put the extracted folder (or just its `rom` folder) in `mods`.
 - The patcher (IfPatcher.exe) is never run.
 - **On the Japanese release** (the best fit, since the translations were made for it): the files go in as they are, and the patch's `dlc` folders are laid over your own Japanese DLC, so its patched DLC file isn't needed. You get the whole translated game with the Japan-only content: the petting minigame, the Festival of Bonds, the original script and Corrin's speaking styles. Haiku's menus and its added lines (Kana's question, same-gender S-supports) switch to English, made from the translation's own lines.
-- **On the US or European release:** Haiku lays the files out as Team If's patcher does (`m/X` becomes `m/@E/X`) and trims them to what that game reads. The patch's Japanese fonts are left out: the game's own fonts draw the translation, and the few signs they can't show (such as ō, or the ≪ ≫ around dragon speech) are written as the nearest ones they can. To use the patch's fonts anyway, add `options = { fonts = 1 }` to the mod's entry in `userdata/haiku/mods.toml`. What stays as that game has it: the petting minigame is cut from its code, the Japan-only DLC can't run, DLC maps keep their English text, and a line the translation doesn't have is the game's own. **Speaking Style** (Options > Gameplay, or the avatar creator's voice) gives Corrin the Japanese script's three speaking styles. The translations work with **Voices: Japanese**; on the European release the translation shows when the Game Language is English.
+- **On the US or European release:** Haiku lays the files out as Team If's patcher does (`m/X` becomes `m/@E/X`) and trims them to what that game reads. The patch's Japanese fonts are left out: the game's own fonts draw the translation, and the few signs they can't show (such as ō, or the ≪ ≫ around dragon speech) are written as the nearest ones they can. To use the patch's fonts anyway, add `options = { fonts = 1 }` to the mod's entry in `games\<version>\mods.toml`. What stays as that game has it: the petting minigame is cut from its code, the Japan-only DLC can't run, DLC maps keep their English text, and a line the translation doesn't have is the game's own. **Speaking Style** (Options > Gameplay, or the avatar creator's voice) gives Corrin the Japanese script's three speaking styles. The translations work with **Voices: Japanese**; on the European release the translation shows when the Game Language is English.
 - The patch's title logo is used.
 - A save state remembers the mods it was made with, and won't load once a translation has been turned on or off since; the game's own saves are fine either way.
 
@@ -142,9 +143,11 @@ Haiku can use the fan translations made for the Japanese release, *Fire Emblem i
 
 1. **Dump your game.** You need your own Fire Emblem Fates **Special Edition** cartridge (US, European or Japanese), dumped and **decrypted** with GodMode9 on your own 3DS: a `.3ds`/`.cci`, `.cia` or `.cxi`, or the sdmc folder of Citra or Azahar with the game installed. Optionally dump your DLC the same way (a decrypted `.cia`). Haiku never needs or asks for console keys.
 2. **Download** `Haiku.zip` from the [Releases](https://github.com/tyle-beep/Haiku/releases) page and extract it somewhere you can write to, for example `C:\Games\Haiku`. No administrator rights are needed.
-3. **Run `Haiku Setup.exe`**, select your dump, then your DLC (or continue without it).
-4. **Build.** Haiku Setup checks your dump against its own hashes, installs the game's files, makes Haiku's own files from them, recompiles the game's code and compiles it with the bundled compiler. It takes **about 10 to 30 minutes**, once, and runs at low priority. If it stops, start it again and it carries on.
-5. **Play.** Next time, start `Haiku.exe` directly. Press **Esc** for the options.
+3. **Run `Haiku.exe`.** The first time, it opens Haiku Setup: select your dump, then your DLC (or continue without it).
+4. **Build.** Haiku Setup checks your dump against its own hashes, installs the game's files, makes Haiku's own files from them, recompiles the game's code and compiles it with the bundled compiler. It takes **about 10 to 30 minutes**, once, and runs at low priority. If it stops, start Haiku.exe again and it carries on.
+5. **Play.** From then on `Haiku.exe` goes straight to the game. Press **Esc** for the options; Haiku Setup (Rebuild, Change dump or DLC, Add a version, Remove a version, Japanese voices) is in Options > Interface.
+
+**Updating**: extract a new release over the folder and start `Haiku.exe`. It plays at once unless the release needs the game's code built again, which it then does by itself first (only what changed), with a progress screen in the game's own window and look. Saves, settings and mods are never touched. An install of 1.0, 1.1 or 1.2 is updated the same way: Haiku.exe finds the game installed, builds the game's code once, and removes the old `Haiku Setup.exe`.
 
 Your dump is only ever read. Everything Haiku makes stays in its folder.
 
@@ -153,16 +156,16 @@ Your dump is only ever read. Everything Haiku makes stays in its folder.
 - **Windows 10 or 11, 64-bit.**
 - **A GPU with Vulkan** support.
 - **About 3 GB of disk space**: a finished install is about 2.6 GB, most of it the game's files installed from your dump.
-- The one-time build needs a fair amount of memory. Haiku Setup only starts as many compilers as your free memory allows, so a PC with less memory builds more slowly rather than failing.
+- The one-time build needs a fair amount of memory. Haiku only starts as many compilers as your free memory allows, so a PC with less memory builds more slowly rather than failing.
 
 ## Building from source
 
 Most players should use the release. To build Haiku yourself you need Windows x64 with Git Bash, Rust (stable), [w64devkit](https://github.com/skeeto/w64devkit) 2.11.0, Python 3 and your own dump.
 
-- **Haiku Setup**: `cargo build --release --manifest-path builder/Cargo.toml`
-- **The engine**: `cargo build --release --manifest-path source/Cargo.toml` with `FATES_RECOMP_DIR` pointing at a folder with `librecomp.a`, the game's recompiled code, which `dev/recomp.sh` makes from your dump.
+- **Haiku.exe** (the engine, Haiku's overrides, which `source/build.rs` compiles in with w64devkit's gcc, and Haiku Setup, the `builder/` library): `cargo build --release --manifest-path source/Cargo.toml`, or `dev/build.sh <name>`. It holds no game code.
+- **The game's code module** (`data\code\game.dll`, what the release builds on the player's PC): `Haiku.exe --make-module <dump or data folder> <out dir>`, or `dev/recomp.sh <name>`, which `dev/build.sh` then puts beside the run.
 - **A release folder like the one on the Releases page**: put the official SDL3 x64 `SDL3.dll` in `dist-dll/`, then `dev/builder/package.sh <out dir>`. It writes `<out dir>/Haiku` and `Haiku.zip`. The compiler's source zip comes from `dev/builder/toolchain-source.sh`.
-- **The files Haiku makes from the game** (decoded UI and fonts, button icons, message files and so on) are not in this repository. `dev/builder/derived.pack` holds recipes for them, and `"Haiku Setup.exe" --apply-derived dev/builder/derived.pack <romfs> .` makes them in your checkout from a RomFS installed from your dump (the `data\romfs` folder of a Haiku Setup build).
+- **The files Haiku makes from the game** (decoded UI and fonts, button icons, message files and so on) are not in this repository. `dev/builder/derived.pack` holds recipes for them, and `Haiku.exe --apply-derived dev/builder/derived.pack <romfs> .` makes them in your checkout from a RomFS installed from your dump (the `data\romfs` folder of an install).
 
 The dev scripts take their paths from the environment (`dev/env.sh`: `HAIKU_WORK`, `HAIKU_TOOLCHAIN`, `HAIKU_DUMP`, and so on). The C files in `overrides/` replace individual game functions; [`vendor/3dsrecomp/docs/overrides.md`](vendor/3dsrecomp/docs/overrides.md) explains how. Never commit anything made from the game: `.gitignore` keeps the usual places out.
 
@@ -184,7 +187,7 @@ No. Without it, the DLC maps aren't available. You can add it later from Haiku S
 Only when you play online (online battles talk directly to the other player, with a public STUN server to find a way through routers), or when you choose to download Zig, a compiler for code mods. The compiler that comes with Haiku needs no download, and Haiku Setup never uses the network.
 
 **Where are my settings and saves?**
-In `userdata\haiku`, next to Haiku.exe. Haiku Setup writes a log, `Haiku Setup.log`, next to itself.
+In `userdata\haiku`, next to Haiku.exe. Haiku Setup writes a log, `setup-work\setup.log`.
 
 ## No game files included
 
@@ -192,7 +195,7 @@ In `userdata\haiku`, next to Haiku.exe. Haiku Setup writes a log, `Haiku Setup.l
 - You need **your own legally obtained copy** of the game, which you dump yourself. Haiku reads your decrypted dump and never changes it.
 - The game's code is recompiled, and Haiku's game-derived files are made, **on your own PC from your own dump**. What is published here is only Haiku's own code, the recipes for those files, and third-party open-source components.
 - We do not provide ROMs or keys and will not help anyone obtain them. Issues or requests about getting the game are closed.
-- Don't share the files Haiku builds from your dump (its `data` and `assets` folders, or a built Haiku.exe): they contain the game.
+- Don't share the files Haiku builds from your dump (the `games` folder: each version's `data` folder, with the game's code built as `data\code\game.dll`, and its `assets` folder): they contain the game. Haiku.exe itself holds no game code.
 
 ## Legal
 
@@ -209,5 +212,5 @@ In `userdata\haiku`, next to Haiku.exe. Haiku Setup writes a log, `Haiku Setup.l
 - **3dsrecomp** by fearkov ([github.com/fearkov/3dsrecomp](https://github.com/fearkov/3dsrecomp)): the static recompiler, MIT License (as its Cargo.toml declares), `vendor/3dsrecomp/LICENSE`. Haiku carries a modified copy in `vendor/3dsrecomp`.
 - **SDL3** ([libsdl.org](https://www.libsdl.org)): zlib License, `dist-dll/SDL3-LICENSE.txt`. The release ships the official `SDL3.dll`.
 - **SDL_GameControllerDB**: zlib License, `vendor/zakuro/crates/zakuro/data/gamecontrollerdb-LICENSE.txt`.
-- **Rust crates**: the crates compiled into Haiku.exe and Haiku Setup are listed with their licences in the release's `LICENSES\Rust-crates.txt`, and their licence texts are in `LICENSES\Rust-crates-licences.txt`. They are under MIT, Apache-2.0, BSD, zlib, ISC, Unicode and similar permissive licences.
+- **Rust crates**: the crates compiled into Haiku.exe are listed with their licences in the release's `LICENSES\Rust-crates.txt`, and their licence texts are in `LICENSES\Rust-crates-licences.txt`. They are under MIT, Apache-2.0, BSD, zlib, ISC, Unicode and similar permissive licences.
 - **The compiler bundled in the release**: [w64devkit](https://github.com/skeeto/w64devkit) 2.11.0 by Christopher Wellons (the Unlicense), with **GCC 16.2.0** and **GNU Binutils 2.47** (GPL-3.0; libgcc under the GCC Runtime Library Exception 3.1), **GMP, MPFR and MPC** inside the compiler (LGPL-3.0), and the **MinGW-w64** v14.0.0 runtime (Zope Public License 2.1 and others, `LICENSES\MinGW-w64-runtime.txt`). Their source is offered as described under [Legal](#legal).

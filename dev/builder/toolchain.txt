@@ -1,4 +1,4 @@
-# builder: the files of w64devkit 2.11.0 Haiku Setup's build uses (dev/builder/package.sh
+# builder: the files of w64devkit 2.11.0 the setup's build uses (dev/builder/package.sh
 # copies them into setup/w64devkit). Found by tracing a build: gcc -M over
 # the recompiled code and the overrides (headers), and gcc -v -Wl,--trace
 # over the engine's link (startup objects and libraries).
@@ -16,6 +16,7 @@ lib/gcc/x86_64-w64-mingw32/16.2.0/crtend.o
 lib/gcc/x86_64-w64-mingw32/16.2.0/libgcc.a
 lib/gcc/x86_64-w64-mingw32/16.2.0/libgcc_eh.a
 lib/crt2.o
+# the game's module (oneexe) and code mods' DLLs (zigdl) link with this startup object
 lib/dllcrt2.o
 lib/libadvapi32.a
 lib/libavrt.a

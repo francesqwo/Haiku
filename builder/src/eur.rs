@@ -34,10 +34,19 @@ pub fn load_map(dir: &Path) -> Result<HashMap<u32, u32>, String> {
 /// line may say `none` (0: an address that build doesn't have) or end in ?
 /// (used only where the map has none), as dev/region/translate.py reads it.
 pub fn load_map_named(dir: &Path, map: &str) -> Result<HashMap<u32, u32>, String> {
-    let mut table = HashMap::new();
-    for (name, column) in [(map, 1), ("manual.tsv", 1)] {
+    let read = |name: &str| {
         let path = dir.join(name);
-        let text = std::fs::read_to_string(&path).map_err(|e| format!("{} is missing ({e}). Extract the whole Haiku download again.", path.display()))?;
+        std::fs::read_to_string(&path).map_err(|e| format!("{} is missing ({e}). Extract the whole Haiku download again.", path.display()))
+    };
+    Ok(parse_map(&read(map)?, &read("manual.tsv")?))
+}
+
+/// oneexe: a map's text and its manual.tsv's, as load_map_named reads them
+/// (regions.rs: the maps Haiku.exe carries).
+pub fn parse_map(map_text: &str, manual_text: &str) -> HashMap<u32, u32> {
+    let mut table = HashMap::new();
+    for (name, text) in [("map", map_text), ("manual.tsv", manual_text)] {
+        let column = 1;
         for line in text.lines() {
             if line.starts_with('#') || line.starts_with("us\t") || line.trim().is_empty() {
                 continue;
@@ -58,7 +67,7 @@ pub fn load_map_named(dir: &Path, map: &str) -> Result<HashMap<u32, u32>, String
             }
         }
     }
-    Ok(table)
+    table
 }
 
 fn is_hex(b: u8) -> bool {

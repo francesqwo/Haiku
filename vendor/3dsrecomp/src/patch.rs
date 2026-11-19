@@ -34,7 +34,8 @@ use crate::rom::ExHeader;
 /// and the analysis that guesses what changed code still is.
 /// modfix: 3, holes only guessed code goes to are dead ends, and msr writes
 /// the cpsr as user mode does.
-pub const VERSION: u32 = 3;
+/// vow: 4, code in the pages a mod's exheader adds past .data and .bss.
+pub const VERSION: u32 = 4;
 
 /// a function of the program, as its tables describe it.
 #[derive(Debug, Clone, PartialEq)]
@@ -206,6 +207,29 @@ fn mode_of(key: u32) -> Mode {
 /// what a patch changes there is data (FE1 changes tables in .rodata, which
 /// were read as code before and made Thumb guesses of strings).
 pub fn program(exheader: &ExHeader, code: &[u8], changed: &[(u32, u32)]) -> Program {
+    program_with(exheader, code, changed, &[])
+}
+
+/// vow: the pages a mod's exheader adds to .data past the end of the game's
+/// own .data and .bss, where a mod built the Magikoopa way keeps its code
+/// (see program_with), as one range; none when it adds none there.
+pub fn added_pages(game: &ExHeader, theirs: &ExHeader) -> Vec<(u32, u32)> {
+    let page = |address: u32| address.saturating_add(0xFFF) & !0xFFF;
+    let own_end = page(game.data.address.saturating_add(game.data.size).saturating_add(game.bss_size));
+    let their_end = page(theirs.data.address.saturating_add(theirs.data.size));
+    if theirs.data.address == game.data.address && their_end > own_end { vec![(own_end, their_end)] } else { Vec::new() }
+}
+
+/// vow: program, with places past .text a code mod makes executable when it
+/// runs (sorted and apart, page aligned). a mod built the Magikoopa way
+/// (V.O.W Edition) has its exheader make .data longer, puts its code in the
+/// pages past the game's own .data and .bss, and its loader, run from a hook
+/// at the entry point, makes those pages read-write-execute with
+/// svcControlProcessMemory before anything calls into them. its code there
+/// is code: the text reaches on to the end of the last of them, and what lies
+/// between (.rodata, the game's .data and .bss) is closed (Segment::closed),
+/// so nothing there is taken for code, as before.
+pub fn program_with(exheader: &ExHeader, code: &[u8], changed: &[(u32, u32)], executable: &[(u32, u32)]) -> Program {
     let image = crate::image::Image::from_code(exheader, code);
     let text_start = exheader.text.address;
     let text_end = image.text.end();
@@ -230,7 +254,25 @@ pub fn program(exheader: &ExHeader, code: &[u8], changed: &[(u32, u32)]) -> Prog
     if end > text_end {
         text.bytes.extend((text_end..(end + 3) & !3).map(byte_at));
     }
-    let in_code = |value: u32| (value & !1) >= text_start && (value & !1) < text_end || meets(changed, value & !1, (value & !1) + 2);
+    // vow: on to the pages a mod makes executable, closed in between
+    let executable: Vec<(u32, u32)> = executable.iter().copied().filter(|&(start, end)| start >= text.end() && end > start).collect();
+    if let Some(&(_, last)) = executable.last() {
+        let mut open = text.end();
+        let mut closed = Vec::new();
+        for &(start, end) in &executable {
+            if start > open {
+                closed.push((open, start));
+            }
+            open = open.max(end);
+        }
+        let from = text.end();
+        text.bytes.extend((from..last).map(|address| if closed.iter().any(|&(a, b)| address >= a && address < b) { 0 } else { byte_at(address) }));
+        text.closed = closed;
+    }
+    let in_executable = |value: u32| executable.iter().any(|&(start, end)| value >= start && value < end);
+    let in_code = |value: u32| {
+        (value & !1) >= text_start && (value & !1) < text_end || meets(changed, value & !1, (value & !1) + 2) || in_executable(value & !1)
+    };
     let mut seeds = vec![(image.entry, Source::Entry)];
     seeds.extend(
         [&image.rodata, &image.data]
@@ -361,6 +403,28 @@ pub fn plan(base: &Base, mut program: Program, changed: &[(u32, u32)]) -> (Plan,
         }
     }
     let stale_set: BTreeSet<u32> = stale_entries.iter().copied().collect();
+    // vow: the code of the changed functions, which the program can't run
+    // any more, by mode: a function of the patched code holding some of it
+    // runs in the module, even unchanged and reached only through a
+    // pointer (V.O.W's hooks replace a function's first instruction with a
+    // branch to its own code, which goes back to the second through a
+    // literal: `ldr r12, =second; bx r12`)
+    let mut stale_code: [Vec<(u32, u32)>; 2] = [Vec::new(), Vec::new()];
+    for &index in &stale {
+        let function = &base.functions[index];
+        stale_code[function.thumb as usize].extend(function.spans.iter().copied());
+    }
+    for spans in &mut stale_code {
+        spans.sort_unstable();
+        let mut merged: Vec<(u32, u32)> = Vec::new();
+        for &(start, end) in spans.iter() {
+            match merged.last_mut() {
+                Some(last) if start <= last.1 => last.1 = last.1.max(end),
+                _ => merged.push((start, end)),
+            }
+        }
+        *spans = merged;
+    }
     let mut selected: BTreeSet<u32> = BTreeSet::new();
     let mut new_instructions = 0;
     for (&entry, function) in &analysis.functions {
@@ -368,11 +432,12 @@ pub fn plan(base: &Base, mut program: Program, changed: &[(u32, u32)]) -> (Plan,
             continue;
         }
         let spans = &held[(function.mode == Mode::Thumb) as usize];
+        let stale_spans = &stale_code[(function.mode == Mode::Thumb) as usize];
         let mut take = function.labels.iter().any(|&label| stale_set.contains(&key(label, function.mode)));
         let mut fresh = 0;
         for &address in &function.instructions {
             let end = address + size(&program.text, address, function.mode);
-            if meets(&changed, address, end) {
+            if meets(&changed, address, end) || meets(stale_spans, address, end) {
                 take = true;
             }
             if !meets(spans, address, end) {
@@ -620,7 +685,7 @@ mod tests {
     const BASE: u32 = 0x0010_0000;
 
     fn segment(words: &[u32]) -> Segment {
-        Segment { base: BASE, bytes: words.iter().flat_map(|w| w.to_le_bytes()).collect() }
+        Segment::new(BASE, words.iter().flat_map(|w| w.to_le_bytes()).collect())
     }
 
     /// the program as codegen would describe it, one function per function
@@ -848,6 +913,86 @@ mod tests {
         image.extend_from_slice(&bytes(&[0xE3A0_0002, 0xE12F_FF1E]));
         let program = program(&exheader, &image, &[(BASE + 0x1000, BASE + 0x1008)]);
         assert_eq!(program.text.end(), BASE + 8, ".text doesn't run on into .rodata");
+    }
+
+    /// vow: a mod built the Magikoopa way makes .data longer, keeps its code
+    /// in the pages past the game's .data and .bss and calls it from .text:
+    /// that code is recompiled, and .rodata and the game's .data between
+    /// stay closed, so a pointer into .rodata is no code.
+    #[test]
+    fn code_in_the_pages_an_exheader_adds_past_data_is_recompiled() {
+        let info = |address: u32, size: u32| crate::rom::CodeSetInfo { address, num_pages: 1, size };
+        let game = ExHeader {
+            title: String::new(),
+            compress_code: false,
+            text: info(BASE, 8),
+            rodata: info(BASE + 0x1000, 8),
+            data: info(BASE + 0x2000, 8),
+            bss_size: 0x10,
+        };
+        let theirs = ExHeader { data: info(BASE + 0x2000, 0x2000), ..game.clone() };
+        assert_eq!(added_pages(&game, &theirs), [(BASE + 0x3000, BASE + 0x4000)]);
+        assert!(added_pages(&game, &game).is_empty());
+        let own = [0xE3A0_0001, 0xE12F_FF1E]; // mov r0, #1; bx lr
+        let patched = [0xEB00_0BFE, 0xE12F_FF1E]; // bl BASE + 0x3000; bx lr
+        let mut image = bytes(&patched);
+        image.resize(0x1000, 0);
+        image.extend_from_slice(&bytes(&[BASE + 0x1000, 0])); // .rodata: a pointer into itself
+        image.resize(0x2000, 0);
+        image.extend_from_slice(&bytes(&[0, 0])); // the game's .data
+        image.resize(0x3000, 0);
+        image.extend_from_slice(&bytes(&[0xE3A0_0002, 0xE12F_FF1E])); // the mod's: mov r0, #2; bx lr
+        image.resize(0x4000, 0);
+        let changed = vec![(BASE, BASE + 4), (BASE + 0x3000, BASE + 0x3008)];
+        let with = program_with(&theirs, &image, &changed, &added_pages(&game, &theirs));
+        assert!(with.text.contains(BASE + 0x3000));
+        assert!(!with.text.contains(BASE + 0x1000) && !with.text.contains(BASE + 0x2000), ".rodata and .data are closed");
+        assert_eq!(with.text.read32(BASE + 0x1000), None);
+        let (made, _) = plan(&base_of(&own), with, &changed);
+        assert!(made.holes.is_empty(), "{:X?}", made.holes);
+        assert!(made.functions.contains_key(&(BASE + 0x3000)), "{:X?}", made.functions.keys());
+        assert!(!made.functions.contains_key(&(BASE + 0x1000)));
+        // without the added pages the call leads where no code is
+        let without = program(&theirs, &image, &changed);
+        let (made, _) = plan(&base_of(&own), without, &changed);
+        assert!(!made.functions.contains_key(&(BASE + 0x3000)));
+    }
+
+    /// vow: a hook replaces a function's first instruction with a branch to
+    /// new code, which goes back to the second through a literal; the rest
+    /// of the changed function runs in the module, as only the module can.
+    #[test]
+    fn the_rest_of_a_hooked_function_reached_through_a_literal_is_recompiled() {
+        let own = [
+            0xEB00_0000, // bl BASE + 8
+            0xE12F_FF1E, // bx lr
+            0xE3A0_2000, // mov r2, #0
+            0xE5C0_1000, // strb r1, [r0]
+            0xE12F_FF1E, // bx lr
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        ];
+        let mut patched = own;
+        patched[2] = 0xEA00_0004; // b BASE + 0x20
+        patched[8] = 0xE3A0_2000; // mov r2, #0
+        patched[9] = 0xE59F_C000; // ldr r12, [pc, #0]
+        patched[10] = 0xE12F_FF1C; // bx r12
+        patched[11] = BASE + 0xC;
+        let changed = changed_ranges(BASE, &bytes(&own), &bytes(&patched));
+        let program = Program { text: segment(&patched), seeds: vec![(BASE, Source::Entry)], slots: None };
+        let (made, _) = plan(&base_of(&own), program, &changed);
+        assert!(made.holes.is_empty(), "{:X?}", made.holes);
+        assert!(made.functions.values().any(|f| f.instructions.contains(&(BASE + 0x20))), "the new code: {:X?}", made.functions.keys());
+        assert!(
+            made.functions.values().any(|f| f.labels.contains(&(BASE + 0xC))),
+            "the second instruction runs in the module: {:X?}",
+            made.functions.keys()
+        );
     }
 
     /// modfix: the program's analysis guessed Thumb code over bytes a patch

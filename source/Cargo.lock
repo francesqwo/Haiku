@@ -1744,9 +1744,22 @@ name = "haiku"
 version = "0.1.0"
 dependencies = [
  "fates-gfx",
+ "haiku-setup",
  "image",
+ "log",
  "zakuro",
  "zakuro-core",
+ "zakuro-fs",
+]
+
+[[package]]
+name = "haiku-setup"
+version = "0.1.0"
+dependencies = [
+ "miniz_oxide 0.8.9",
+ "png",
+ "recomp3ds",
+ "sha2",
  "zakuro-fs",
 ]
 

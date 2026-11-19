@@ -1232,8 +1232,8 @@ pub fn command_dlc(args: &[String]) -> i32 {
         return 2;
     };
     let option = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).map(PathBuf::from);
-    let data = option("--out").unwrap_or_else(|| crate::root().join("data"));
-    crate::log::open(&crate::root().join("Haiku Setup.log"), true);
+    let data = option("--out").unwrap_or_else(|| crate::pipeline::Paths::new(crate::root()).data()); // versions: the playing version's
+    crate::log::open(&crate::pipeline::Paths::new(crate::root()).log_file(), true);
     run_dlc(Path::new(path), &data)
 }
 
@@ -1295,57 +1295,26 @@ pub fn settings_file(root: &Path) -> PathBuf {
     root.join("userdata").join("haiku").join("settings.toml")
 }
 
-/// the Voices setting: true for Japanese.
+/// the Voices setting: true for Japanese. versions2: in a Haiku folder
+/// with games\<version>\, the playing version's own
+/// ([pc.per_version.<tag>] voices, which the game reads before the shared
+/// line), else the shared [pc] voices.
 pub fn japanese_set(root: &Path) -> bool {
-    let Ok(text) = std::fs::read_to_string(settings_file(root)) else { return false };
-    let mut in_pc = false;
-    for line in text.lines() {
-        let t = line.trim();
-        if t.starts_with('[') {
-            in_pc = t == "[pc]";
-        } else if in_pc && t.starts_with("voices") {
-            return t.split_once('=').is_some_and(|(_, v)| v.trim().trim_matches('"') == "japanese");
-        }
-    }
-    false
+    let path = settings_file(root);
+    let own = crate::layout::active(root).and_then(|v| crate::layout::table_value(&path, &crate::layout::own_table(v), "voices"));
+    own.or_else(|| crate::layout::pc_value(&path, "voices")).as_deref() == Some("japanese")
 }
 
 /// sets Voices in the settings file, keeping every other line as it is (a
-/// missing file gets just this; Haiku fills in the rest).
+/// missing file gets just this; Haiku fills in the rest). versions2: the
+/// playing version's own, in a folder with games\<version>\.
 pub fn set_japanese(root: &Path, on: bool) -> std::io::Result<()> {
     let path = settings_file(root);
-    let text = std::fs::read_to_string(&path).unwrap_or_default();
-    let value = format!("voices = \"{}\"", if on { "japanese" } else { "english" });
-    let mut lines: Vec<String> = text.lines().map(str::to_owned).collect();
-    let mut in_pc = false;
-    let mut pc_header = None;
-    let mut done = false;
-    for (i, line) in lines.iter_mut().enumerate() {
-        let t = line.trim();
-        if t.starts_with('[') {
-            in_pc = t == "[pc]";
-            if in_pc {
-                pc_header = Some(i);
-            }
-        } else if in_pc && t.split_once('=').is_some_and(|(k, _)| k.trim() == "voices") {
-            *line = value.clone();
-            done = true;
-        }
+    let value = if on { "japanese" } else { "english" };
+    match crate::layout::active(root) {
+        Some(version) => crate::layout::set_table_value(&path, &crate::layout::own_table(version), "voices", value),
+        None => crate::layout::set_pc_value(&path, "voices", value),
     }
-    if !done {
-        match pc_header {
-            Some(i) => lines.insert(i + 1, value),
-            None => {
-                if !lines.is_empty() {
-                    lines.push(String::new());
-                }
-                lines.push("[pc]".into());
-                lines.push(value);
-            }
-        }
-    }
-    std::fs::create_dir_all(path.parent().unwrap())?;
-    std::fs::write(&path, lines.join("\n") + "\n")
 }
 
 /// `--voices <dump> [--dlc <dlc>] [--installed <romfs>] [--out <data>]`:
@@ -1359,9 +1328,9 @@ pub fn command(args: &[String]) -> i32 {
         return 2;
     };
     let option = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).map(PathBuf::from);
-    let data = option("--out").unwrap_or_else(|| crate::root().join("data"));
+    let data = option("--out").unwrap_or_else(|| crate::pipeline::Paths::new(crate::root()).data()); // versions: the playing version's
     let installed = option("--installed").unwrap_or_else(|| data.join("romfs"));
-    crate::log::open(&crate::root().join("Haiku Setup.log"), true);
+    crate::log::open(&crate::pipeline::Paths::new(crate::root()).log_file(), true);
     let dump = match check(Path::new(path)) {
         Ok(d) => d,
         Err(p) => {
@@ -1525,6 +1494,28 @@ mod tests {
         std::fs::write(&file, "[pc]\nwindow_mode = \"borderless\"\n").unwrap();
         set_japanese(&dir, true).unwrap();
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "[pc]\nvoices = \"japanese\"\nwindow_mode = \"borderless\"\n");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn versions_keep_their_own_voices() {
+        let dir = std::env::temp_dir().join(format!("haiku-voices-versions-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let data = crate::layout::dir(&dir, crate::layout::Version::Eur).join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        for file in [zakuro_fs::datadir::NCCH_FILE, zakuro_fs::datadir::EXHEADER_FILE, zakuro_fs::datadir::EXEFS_FILE] {
+            std::fs::write(data.join(file), b"").unwrap();
+        }
+        std::fs::write(data.join(zakuro_fs::datadir::MANIFEST_FILE), "title 000400000017A800\n").unwrap();
+        let file = settings_file(&dir);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, "[pc]\nvoices = \"japanese\"\n").unwrap();
+        // the shared line is the default
+        assert!(japanese_set(&dir));
+        set_japanese(&dir, false).unwrap();
+        assert!(!japanese_set(&dir));
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert!(text.contains("[pc]\nvoices = \"japanese\"") && text.contains("[pc.per_version.eur]\nvoices = \"english\""), "{text}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

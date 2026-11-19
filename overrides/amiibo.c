@@ -48,7 +48,9 @@
 
 /* amiibo_icons.c, made by dev/amiibo/make_icons.py: one IconData per Hero */
 #define AMIIBO_ICON_WORDS 2304u
-extern const uint16_t amiibo_icons[4][2304];
+/* oneexe: Haiku.exe's copy, filled from the game's module when it is bound
+ * (the icons are made from the dump, so they are not in Haiku.exe) */
+extern uint16_t amiibo_icons[4][2304];
 
 #define LIST_CREATE_RETURN 0x003F3BB0u /* after bl BasicMenu::Create in ContentsMenu::CreateBind */
 #define BASIC_MENU_CREATE  0x004FA880u

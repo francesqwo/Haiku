@@ -37,36 +37,37 @@ FatesGfxPostHooks fates_gfx_hooks_post;
 /* how many word arguments each observed function takes (r0-r3, then the
  * guest stack) */
 static uint32_t post_arg_count(uint32_t addr) {
-    switch (addr) {
-    case 0x00126640: return 7;  /* Pica::TexEnvSrc */
-    case 0x0012FFA8: return 7;  /* Pica::TexEnvOperand */
-    case 0x0012FF68: return 3;  /* Pica::TexEnvCombine */
-    case 0x003D2214: return 5;  /* Pica::TexEnvConst */
-    case 0x00126060: return 3;  /* Pica::TexEnvScale */
-    case 0x00130098: return 8;  /* Pica::TexEnvBufferInput */
-    case 0x001300F0: return 6;  /* Pica::TextureSamplerType */
-    case 0x00137718: return 14; /* Pica::TextureSetting */
-    case 0x001263E0: return 4;  /* Pica::Viewport */
-    case 0x00125F60: return 5;  /* Pica::ScissorTest */
-    case 0x0013027C: return 1;  /* Pica::Blend */
-    case 0x001303FC: return 6;  /* Pica::BlendFunc */
-    case 0x00126548: return 3;  /* Pica::AlphaTest */
-    case 0x0012657C: return 3;  /* Pica::DepthTest */
-    case 0x001302D8: return 1;  /* Pica::Culling */
-    case 0x003D26D0: return 4;  /* Pica::ColorMask */
-    case 0x001376BC: return 2;  /* Pica::UniformMatrix(MTX44) */
-    case 0x001301A8: return 1;  /* Pica::Draw */
-    case 0x00204030: return 3;  /* PostEffectContext::DrawQuads */
-    case 0x00203BF8: return 3;  /* PostEffectContext::InitBeforeDraw */
-    case 0x00113354: return 4;  /* nn::gr::CTR::FrameBuffer::MakeCommand */
-    case 0x0010653C: return 2;  /* FrameBuffer::MakeCommand (the display's) */
-    case 0x005C85EC: return 5;  /* nngxFilterBlockImage */
-    case 0x005C854C: return 7;  /* nngxAddBlockImageCopyCommand */
-    case 0x00113C00: return 8;  /* nngxAddMemoryFillCommand */
-    case 0x001AC484: return 1;  /* CommandAlter::AddCallback */
-    case 0x0010B924: return 3;  /* CommandAlter::Execute */
-    default: return 4;
-    }
+    /* oneexe: an if per function rather than a switch: the addresses are
+     * the running build's, which Haiku.exe fills in when it binds the
+     * game's module (source/hosted_build.rs), not constants */
+    if (addr == 0x00126640) return 7;  /* Pica::TexEnvSrc */
+    if (addr == 0x0012FFA8) return 7;  /* Pica::TexEnvOperand */
+    if (addr == 0x0012FF68) return 3;  /* Pica::TexEnvCombine */
+    if (addr == 0x003D2214) return 5;  /* Pica::TexEnvConst */
+    if (addr == 0x00126060) return 3;  /* Pica::TexEnvScale */
+    if (addr == 0x00130098) return 8;  /* Pica::TexEnvBufferInput */
+    if (addr == 0x001300F0) return 6;  /* Pica::TextureSamplerType */
+    if (addr == 0x00137718) return 14; /* Pica::TextureSetting */
+    if (addr == 0x001263E0) return 4;  /* Pica::Viewport */
+    if (addr == 0x00125F60) return 5;  /* Pica::ScissorTest */
+    if (addr == 0x0013027C) return 1;  /* Pica::Blend */
+    if (addr == 0x001303FC) return 6;  /* Pica::BlendFunc */
+    if (addr == 0x00126548) return 3;  /* Pica::AlphaTest */
+    if (addr == 0x0012657C) return 3;  /* Pica::DepthTest */
+    if (addr == 0x001302D8) return 1;  /* Pica::Culling */
+    if (addr == 0x003D26D0) return 4;  /* Pica::ColorMask */
+    if (addr == 0x001376BC) return 2;  /* Pica::UniformMatrix(MTX44) */
+    if (addr == 0x001301A8) return 1;  /* Pica::Draw */
+    if (addr == 0x00204030) return 3;  /* PostEffectContext::DrawQuads */
+    if (addr == 0x00203BF8) return 3;  /* PostEffectContext::InitBeforeDraw */
+    if (addr == 0x00113354) return 4;  /* nn::gr::CTR::FrameBuffer::MakeCommand */
+    if (addr == 0x0010653C) return 2;  /* FrameBuffer::MakeCommand (the display's) */
+    if (addr == 0x005C85EC) return 5;  /* nngxFilterBlockImage */
+    if (addr == 0x005C854C) return 7;  /* nngxAddBlockImageCopyCommand */
+    if (addr == 0x00113C00) return 8;  /* nngxAddMemoryFillCommand */
+    if (addr == 0x001AC484) return 1;  /* CommandAlter::AddCallback */
+    if (addr == 0x0010B924) return 3;  /* CommandAlter::Execute */
+    return 4;
 }
 
 /* called at the entry of each observed function, before the original */

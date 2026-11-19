@@ -138,6 +138,8 @@ struct Scene {
 fn options_at(fates: &mut FatesUi, tab: usize, page: Page, row: usize) {
     super::cheats::snapshot_reset(); // cheats: no question left from a scene before
     crate::haiku_voices::set_asking(false); // jpvoice: nor the voices' restart question
+    crate::haiku_setup_entry::set_asking(false); // oneexe: nor Haiku Setup's
+    crate::haiku_versions::set_asking(false); // versions: nor the version's restart
     super::states::snapshot_reset(); // statecheck: nor a save state's dialog
     fates.options.show(0.0);
     fates.options.select(tab, page, row);
@@ -252,6 +254,17 @@ const SCENES: &[Scene] = &[
     Scene { name: "options-exit-confirm", setup: |f, _, s| {
         options_at(f, 4, Page::Main, 10);
         f.options.ask_exit();
+        s.pc.glyphs = crate::settings::Glyphs::Xbox;
+    } },
+    // oneexe: Interface's Haiku Setup row (a release install; the picture
+    // run sets HAIKU_SETUP_ENTRY=1), and its Yes/No
+    Scene { name: "options-setup", setup: |f, _, s| {
+        options_at(f, 5, Page::Main, 1);
+        s.pc.glyphs = crate::settings::Glyphs::Xbox;
+    } },
+    Scene { name: "options-setup-confirm", setup: |f, _, s| {
+        options_at(f, 5, Page::Main, 1);
+        f.options.ask_setup();
         s.pc.glyphs = crate::settings::Glyphs::Xbox;
     } },
     // qol4: the options menu's own key and button, on the Controls pages

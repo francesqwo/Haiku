@@ -187,6 +187,12 @@ pub enum Item {
     /// installed), and the restart that applies a change
     Voices,
     VoicesRestart,
+    /// oneexe: Haiku Setup (Rebuild, Change dump or DLC, voices)
+    HaikuSetup,
+    /// versions: the version of the game that plays (with two or more
+    /// installed), and the restart that applies a change
+    GameVersion,
+    GameVersionRestart,
     /// tones: Corrin's speaking style (only with a Japanese-script
     /// translation on)
     SpeakingStyle,
@@ -255,8 +261,18 @@ fn items(tab: Tab, page: Page, mode: BottomScreen, mods: usize) -> Vec<Item> {
             // nolang: the USA game has English text only (m/@E), so its Language
             // row changed nothing; it is shown on the European game (five
             // languages) and the Japanese one (Haiku's menu language)
-            Tab::Interface if zakuro_core::region::is_eur() || zakuro_core::region::is_jpn() => vec![UiScale, Language],
-            Tab::Interface => vec![UiScale],
+            Tab::Interface if zakuro_core::region::is_eur() || zakuro_core::region::is_jpn() => {
+                let mut list = vec![UiScale, Language];
+                crate::haiku_versions::interface_rows(&mut list, GameVersion, GameVersionRestart); // versions
+                list.extend(crate::haiku_setup_entry::available().then_some(HaikuSetup)); // oneexe
+                list
+            }
+            Tab::Interface => {
+                let mut list = vec![UiScale];
+                crate::haiku_versions::interface_rows(&mut list, GameVersion, GameVersionRestart); // versions
+                list.extend(crate::haiku_setup_entry::available().then_some(HaikuSetup)); // oneexe
+                list
+            }
             // qol3: no SpotPass row (its questions are always answered No)
             Tab::Gameplay => {
                 let mut list = vec![GameSpeed, FastSpeed, SkipStory, BoonBane, FreeCamera, FreeCameraStyle, CastleWalk, TargetingLines, GrowthButton, CorrinSAny, KanaGender, DivinePulse, ReturnTitle, ExitDesktop]; // qol; cameras: FreeCamera, FreeCameraStyle, CastleWalk; info-ui: TargetingLines, GrowthButton; supports: CorrinSAny, KanaGender; qol4: ReturnTitle; pulse: DivinePulse
@@ -662,6 +678,14 @@ pub fn row(item: Item, settings: &Settings, env: &Env, armed: Option<Item>, rebi
         Item::VoicesRestart => (s("Restart with These Voices"), None, s("Restart the game so the voices change. Anything you haven't saved will be lost.")),
         Item::SpeakingStyle => super::tones::row(), // tones
         Item::ExitDesktop => (s("Exit to Desktop"), None, s("Close the game and return to the desktop. Anything you haven't saved will be lost.")),
+        // oneexe
+        Item::HaikuSetup => (s("Haiku Setup"), None, s("Add or remove a version of the game, change your dump or DLC, add the Japanese voices, or build the game's code again. The game closes first; Play in Haiku Setup starts it again.")),
+        // versions
+        Item::GameVersion => {
+            let tag = crate::haiku_versions::shown(&pc.game_version);
+            (s("Game Version"), Some(s(crate::haiku_versions::label(&tag))), crate::haiku_versions::help(&tag))
+        }
+        Item::GameVersionRestart => (s("Restart with This Version"), None, s("Restart the game with the version as set. Anything you haven't saved will be lost.")),
         // qol4
         Item::ReturnTitle => (s("Return to Title"), None, s("Restart the game from its opening, as the game's own soft reset does. Anything you haven't saved will be lost.")),
         Item::BoonBane => (
@@ -966,7 +990,13 @@ pub fn adjust(item: Item, dir: i32, settings: &mut Settings, env: &Env) -> Optio
             Effect::Apply
         }
         Item::SpeakingStyle => return super::tones::adjust(d), // tones
-        Item::ExitDesktop | Item::ReturnTitle | Item::VoicesRestart => return None, // qol4: ReturnTitle; jpvoice: VoicesRestart
+        // versions: the next version installed, either way
+        Item::GameVersion => {
+            pc.game_version = crate::haiku_versions::step(&pc.game_version, d);
+            crate::haiku_versions::chosen(&pc.game_version);
+            Effect::Apply
+        }
+        Item::ExitDesktop | Item::ReturnTitle | Item::VoicesRestart | Item::HaikuSetup | Item::GameVersionRestart => return None, // qol4: ReturnTitle; jpvoice: VoicesRestart; oneexe: HaikuSetup; versions
     };
     Some(effect)
 }
@@ -1026,6 +1056,8 @@ fn changes(item: Item) -> bool {
             | Item::ExitDesktop // qol
             | Item::ReturnTitle // qol4
             | Item::VoicesRestart // jpvoice
+            | Item::HaikuSetup // oneexe
+            | Item::GameVersionRestart // versions
             | Item::ModsNone | Item::ModsFolder | Item::ModsApply // mods (zigdl: ModsCompiler changes with left and right)
     )
 }
@@ -1144,6 +1176,12 @@ impl OptionsMenu {
     #[allow(dead_code)]
     pub fn ask_exit(&mut self) {
         self.confirm = Some(super::mods::Confirm { yes: false, download: None, exit: true, title: false });
+    }
+
+    /// oneexe: Haiku Setup's Yes/No, for the interface's pictures
+    pub fn ask_setup(&mut self) {
+        crate::haiku_setup_entry::set_asking(true);
+        self.confirm = Some(super::mods::Confirm { yes: false, download: None, exit: false, title: false });
     }
 
     /// mods: the rows the page shows at once.
@@ -1283,9 +1321,21 @@ impl OptionsMenu {
                 self.confirm = Some(super::mods::Confirm { yes: true, download: None, exit: false, title: false });
                 return;
             }
+            // oneexe: Haiku Setup, after the game's Yes/No (No first)
+            Item::HaikuSetup if dir == 0 => {
+                crate::haiku_setup_entry::set_asking(true);
+                self.confirm = Some(super::mods::Confirm { yes: false, download: None, exit: false, title: false });
+                return;
+            }
             // qol: the game's Yes/No first, No chosen to start with
             Item::ExitDesktop if dir == 0 => {
                 self.confirm = Some(super::mods::Confirm { yes: false, download: None, exit: true, title: false });
+                return;
+            }
+            // versions: the restart that plays another version, after the Yes/No
+            Item::GameVersionRestart if dir == 0 => {
+                crate::haiku_versions::set_asking(true);
+                self.confirm = Some(super::mods::Confirm { yes: true, download: None, exit: false, title: false });
                 return;
             }
             // jpvoice: the restart that applies Voices, after the Yes/No
@@ -1386,6 +1436,13 @@ impl OptionsMenu {
                     self.confirm = None;
                     effects.push(Effect::Quit); // qol
                 }
+                // oneexe: Haiku Setup starts, and the game closes
+                Some(super::mods::Answer::Yes) if crate::haiku_setup_entry::asking() => {
+                    self.confirm = None;
+                    if crate::haiku_setup_entry::open() {
+                        effects.push(Effect::Quit);
+                    }
+                }
                 // qol4: Return to Title: the menu closes, the game resets
                 Some(super::mods::Answer::Yes) if confirm.title => {
                     self.confirm = None;
@@ -1412,6 +1469,8 @@ impl OptionsMenu {
             }
             if self.confirm.is_none() {
                 crate::haiku_voices::set_asking(false); // jpvoice
+                crate::haiku_setup_entry::set_asking(false); // oneexe
+                crate::haiku_versions::set_asking(false); // versions
             }
             // qol3: the title's question alone: answered, the menu closes
             if self.exit_only && self.confirm.is_none() {

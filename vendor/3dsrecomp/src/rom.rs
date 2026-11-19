@@ -6,7 +6,7 @@
 use std::fmt;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 /// offsets and sizes in NCSD and NCCH headers count these.
@@ -83,7 +83,7 @@ pub struct ExHeader {
     pub text: CodeSetInfo,
     pub rodata: CodeSetInfo,
     pub data: CodeSetInfo,
-    #[cfg_attr(not(feature = "verify"), allow(dead_code))]
+    // vow: read by patch::added_pages too
     pub bss_size: u32,
 }
 
@@ -266,10 +266,17 @@ pub struct Title {
     /// where .code is in the dump, and how big.
     code: (u64, u64),
     pub romfs: Option<RomFs>,
+    /// oneexe: a game installed as a folder (load_dir) has its RomFS as
+    /// files, here.
+    pub romfs_dir: Option<PathBuf>,
 }
 
 impl Title {
     pub fn load(path: impl AsRef<Path>) -> Result<Title, Error> {
+        // oneexe: a game installed as a folder, as Haiku's data/ holds it
+        if path.as_ref().is_dir() {
+            return Title::load_dir(path.as_ref());
+        }
         let mut file = File::open(path)?;
         let read = |file: &mut File, offset: u64, len: usize| -> Result<Vec<u8>, Error> {
             let mut bytes = vec![0; len];
@@ -326,7 +333,37 @@ impl Title {
             })?;
 
         let romfs = if has_romfs { read_romfs(&mut file, romfs_offset, read).ok() } else { None };
-        Ok(Title { file: Mutex::new(file), program_id, exheader, code, romfs })
+        Ok(Title { file: Mutex::new(file), program_id, exheader, code, romfs, romfs_dir: None })
+    }
+
+    /// oneexe: a game installed as a folder (zakuro-fs datadir): ncch.bin,
+    /// the NCCH header; exheader.bin; exefs.bin, the ExeFS as it is in the
+    /// dump; romfs/, every RomFS file. The code, its layout and the RomFS
+    /// files read are the dump's own, so the code made from it is the same.
+    pub fn load_dir(dir: &Path) -> Result<Title, Error> {
+        let ncch = std::fs::read(dir.join("ncch.bin"))?;
+        if ncch.len() < NCCH_HEADER_SIZE as usize || &ncch[0x100..0x104] != b"NCCH" {
+            return error("ncch.bin is not an NCCH header");
+        }
+        let program_id = u64_at(&ncch, 0x118);
+        let exheader_bytes = std::fs::read(dir.join("exheader.bin"))?;
+        if exheader_bytes.len() < 0x400 {
+            return error("exheader.bin is cut short");
+        }
+        let exheader = ExHeader::read(&exheader_bytes[..0x400]);
+        let mut file = File::open(dir.join("exefs.bin"))?;
+        let mut table = vec![0; EXEFS_HEADER_SIZE as usize];
+        file.read_exact(&mut table)?;
+        let code = table
+            .as_chunks::<16>()
+            .0
+            .iter()
+            .take(10)
+            .find(|entry| ascii(&entry[..8]) == ".code")
+            .map(|entry| (EXEFS_HEADER_SIZE + u32_at(entry, 8) as u64, u32_at(entry, 12) as u64))
+            .ok_or_else(|| Error("exefs.bin has no .code".into()))?;
+        let romfs_dir = dir.join("romfs");
+        Ok(Title { file: Mutex::new(file), program_id, exheader, code, romfs: None, romfs_dir: romfs_dir.is_dir().then_some(romfs_dir) })
     }
 
     pub fn program_id(&self) -> u64 {

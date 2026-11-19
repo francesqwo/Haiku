@@ -20,10 +20,13 @@ pub mod haiku_mods; // mods: Haiku's mod manager
 pub mod haiku_codemods; // codemods: code patches recompiled, native plugins
 pub mod haiku_builtin; // sunglasses: Haiku's own RomFS layer (assets/builtin)
 pub mod haiku_voices; // jpvoice: the Japanese voice layer (data/voices-ja)
+pub mod haiku_setup_entry; // oneexe: Options > Interface > Haiku Setup
+pub mod haiku_versions; // versions: Options > Interface > Game Version
 pub mod haiku_import; // hdpacks: downloads (split, zips of zips) unpacked into mod folders
 pub mod haiku_fanpatch; // fanpatch: mods for other releases (Team If), Haiku's text under mods'
 pub mod haiku_modlayout; // modfix: mods laid out as players get them (loose RomFS folders, title folders deeper down, a choice of code patches)
 pub mod jpn_english; // jpn2: Haiku's lines and menus in English under a translation on the Japanese game
+pub mod pregame; // updscreen: work before the game's code loads, shown in the game's window
 // hfr: high frame rates, display modes and pacing
 pub mod display;
 pub mod hfr;
@@ -126,6 +129,17 @@ pub fn run(linked: Option<Linked>) {
 
 /// runs the emulator as run does, with an overlay over the game.
 pub fn run_with(linked: Option<Linked>, overlay: Option<Box<dyn GameOverlay>>) {
+    run_inner(linked, overlay, None)
+}
+
+/// updscreen: opens the window as run does, shows the work there in the
+/// game's look while it is done (fates_ui/pregame.rs), then plays the code
+/// it gives, in the same window. A window is needed: headless runs stop.
+pub fn run_after(work: Box<dyn pregame::Pregame>) {
+    run_inner(None, None, Some(work))
+}
+
+fn run_inner(linked: Option<Linked>, overlay: Option<Box<dyn GameOverlay>>, pregame: Option<Box<dyn pregame::Pregame>>) {
     report::init();
 
     let options = match cli::parse() {
@@ -220,12 +234,18 @@ pub fn run_with(linked: Option<Linked>, overlay: Option<Box<dyn GameOverlay>>) {
         hfr: hfr::Pacer::default(),
         fates: fates_ui::FatesUi::default(),
         qol: Default::default(), // qol
+        pregame: pregame.map(fates_ui::pregame::Screen::new), // updscreen
     };
 
     // native-rt: deterministic or real-time scheduling for the session
     zakuro_core::pcos::rt::choose(app.options.headless.is_some());
     if app.options.headless.is_some() {
         zakuro_core::pcos::threads::background(); // quiet: tests never slow a game being played
+    }
+    // updscreen: the work before the game needs the window
+    if app.pregame.is_some() && app.options.headless.is_some() {
+        eprintln!("zakuro: the game's code has to be made first, which a headless run doesn't do");
+        std::process::exit(3);
     }
     if let Some(mut frames) = app.options.headless {
         hfr::apply_game_timing(&app.settings.pc); // hfr
@@ -871,6 +891,9 @@ struct App {
     fates: fates_ui::FatesUi,
     // qol: game speed, Skip Story's skips, the boon/bane panel
     qol: qol::State,
+    /// updscreen: the work before the game's code loads, while it shows;
+    /// the game starts once it is done
+    pregame: Option<fates_ui::pregame::Screen>,
 }
 
 /// how long each step of the loop took, its mean and its longest.
@@ -985,7 +1008,10 @@ impl ApplicationHandler for App {
                 self.bottom.presenter_changed();
                 // the game the command line names starts on the device the
                 // presenter may lend the renderer, once there is one
-                self.start();
+                // updscreen: or once the work before it is done
+                if self.pregame.is_none() {
+                    self.start();
+                }
             }
             Err(error) => {
                 eprintln!("zakuro: could not start the {renderer:?} backend: {error}");

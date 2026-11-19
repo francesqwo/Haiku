@@ -26,6 +26,11 @@ zakuro-fs = { path = "../vendor/zakuro/crates/zakuro-fs" }
 zakuro-core = { path = "../vendor/zakuro/crates/zakuro-core" }
 # gfx: the native renderer, behind FATES_NATIVE_GFX
 fates-gfx = { path = "gfx" }
+# oneexe: Haiku's setup (it was Haiku Setup.exe): installs the game and
+# builds the game's code module, which this exe loads (src/module.rs)
+haiku-setup = { path = "../builder" }
+# updscreen: the build screen's lines in haiku.log
+log = "0.4"
 
 # builder: the exe's icon is made from assets/icon/haiku.png (icon.rs)
 [build-dependencies]

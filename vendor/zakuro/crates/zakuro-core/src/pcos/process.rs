@@ -146,6 +146,27 @@ pub fn svc(system: &mut System, number: u32) -> bool {
             system.cpu.regs[1] = handle;
             "process.ConnectToPort"
         }
+        // vow: OpenProcess(out, process id). code mods made with
+        // Magikoopa-style loaders (V.O.W Edition) open their own process to
+        // make the pages their exheader added executable. there is one
+        // process: the pseudo-handle names it, as GetProcessId and
+        // ControlProcessMemory take it
+        0x33 => {
+            let id = system.cpu.regs[1];
+            if id == system.kernel.process_id {
+                system.cpu.regs[0] = 0;
+                system.cpu.regs[1] = crate::kernel::object::CURRENT_PROCESS;
+            } else {
+                log::warn!("svcOpenProcess of process {id}, which isn't the game's");
+                system.cpu.regs[0] = errors::NOT_FOUND.0;
+            }
+            "process.OpenProcess"
+        }
+        // vow: ControlProcessMemory(process, addr0, addr1, size, type, perm)
+        0x70 => {
+            control_process_memory(system);
+            "process.ControlProcessMemory"
+        }
         0x38 => {
             let object = system.kernel.objects.insert(KObject::ResourceLimit);
             let handle = system.kernel.handles.create(&mut system.kernel.objects, object, "ResourceLimit");
@@ -283,6 +304,40 @@ fn control_memory(system: &mut System) {
         }
         _ => {
             log::warn!("svcControlMemory with unknown operation 0x{operation:X}");
+            system.cpu.regs[0] = errors::INVALID_ENUM_VALUE.0;
+        }
+    }
+}
+
+/// vow: svcControlProcessMemory, r0 = process, r1 = addr0, r2 = addr1,
+/// r3 = size, r4 = operation, r5 = permission. a code mod's loader asks it
+/// of the game's own process, to make the pages its exheader added
+/// executable (MEMOP_PROTECT, read-write-execute). permissions are not
+/// enforced, and the code there runs recompiled (the patch module), so
+/// protecting is accepted as it is. nothing else is asked of it.
+fn control_process_memory(system: &mut System) {
+    let [process, addr0, _addr1, size, operation, permission] = [0, 1, 2, 3, 4, 5].map(|r| system.cpu.regs[r]);
+    // OpenProcess hands out the pseudo-handle, the only process there is
+    if process != crate::kernel::object::CURRENT_PROCESS {
+        log::warn!("svcControlProcessMemory on handle 0x{process:X}, which isn't the game's process");
+        system.cpu.regs[0] = errors::INVALID_HANDLE.0;
+        return;
+    }
+    if (addr0 | size) & PAGE_MASK != 0 {
+        system.cpu.regs[0] = errors::MISALIGNED_ADDRESS.0;
+        return;
+    }
+    match operation & MEMOP_OP_MASK {
+        MEMOP_PROTECT => {
+            log::info!(
+                "a code mod made 0x{addr0:08X}..0x{:08X} {} (svcControlProcessMemory); its code there runs recompiled",
+                addr0.wrapping_add(size),
+                if permission & 4 != 0 { "executable" } else { "non-executable" }
+            );
+            system.cpu.regs[0] = 0;
+        }
+        other => {
+            log::warn!("svcControlProcessMemory with operation 0x{other:X}, which isn't supported");
             system.cpu.regs[0] = errors::INVALID_ENUM_VALUE.0;
         }
     }

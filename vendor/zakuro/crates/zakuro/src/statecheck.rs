@@ -277,9 +277,16 @@ pub fn started(system: &zakuro_core::System, layers: &[PathBuf], mods: &crate::h
     for (part, hash) in parts.iter_mut().zip(&hashes) {
         part.digest = hex(hash.0);
     }
-    let mut language_hash = Fnv::new();
-    language_hash.add(&[language.code()]);
-    parts.push(Part { kind: "language".into(), id: "language".into(), name: language.name().to_owned(), digest: hex(language_hash.0) });
+    // versions2: the language only where it is a choice, the European game;
+    // the US game's text is English and the Japanese game is told Japanese
+    // whatever the setting said (a state from before each version had its
+    // own language carries the shared one, which a part left out here never
+    // compares against)
+    if zakuro_core::region::is_eur() {
+        let mut language_hash = Fnv::new();
+        language_hash.add(&[language.code()]);
+        parts.push(Part { kind: "language".into(), id: "language".into(), name: language.name().to_owned(), digest: hex(language_hash.0) });
+    }
     // what never blocks: the texture packs
     let looks: Vec<Part> = on
         .iter()

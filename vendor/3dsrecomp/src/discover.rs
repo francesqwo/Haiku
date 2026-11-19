@@ -699,7 +699,13 @@ impl Discovery<'_> {
         let mut starts = Vec::new();
         let mut in_gap = false;
         let mut address = self.text.base.next_multiple_of(4);
-        while let Some(word) = self.text.read32(address) {
+        while address + 4 <= self.text.end() {
+            // vow: a closed place of the text (Segment::closed) is no gap
+            let Some(word) = self.text.read32(address) else {
+                in_gap = false;
+                address += 4;
+                continue;
+            };
             let offset = (address - self.text.base) as usize;
             let unknown = self.analysis.map[offset..offset + 4].iter().all(|&byte| byte == Byte::Unknown);
             if unknown && !self.analysis.functions.contains_key(&address) && !self.rejected.contains(&(address, Mode::Arm)) {
@@ -1336,7 +1342,7 @@ mod tests {
 
     fn program(words: &[u32]) -> Program {
         Program {
-            text: Segment { base: BASE, bytes: words.iter().flat_map(|w| w.to_le_bytes()).collect() },
+            text: Segment::new(BASE, words.iter().flat_map(|w| w.to_le_bytes()).collect()),
             seeds: vec![(BASE, Source::Entry)],
             slots: None,
         }

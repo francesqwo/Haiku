@@ -1,16 +1,43 @@
-//! Haiku Setup's window: a small Win32 window drawn by hand with GDI in
+//! Haiku's setup window: a small Win32 window drawn by hand with GDI in
 //! the port's colours (the dark teal wallpaper, cream text, gold trim).
+//! There is no game art before the game is installed, so it keeps Haiku
+//! Setup's look.
 //!
 //! Screens: the game dump, the DLC, the build (progress and percentage),
 //! a failure (what went wrong, the log), and once Haiku is built, Play,
 //! Rebuild and Change dump or DLC. Files can be picked or dropped on it.
+//! versions2: and Add a version (the same screens, for a dump of another
+//! version, which installs beside) and Remove a version (its own screen:
+//! which, what is deleted and what is kept, then Windows' Yes/No).
+//!
+//! oneexe: it is Haiku.exe's own window now. Haiku.exe opens it on first
+//! launch (Start::Install), when the game's module or Haiku's files have to
+//! be made again (Start::Update: the build starts by itself and the game
+//! starts when it is done), and for `Haiku.exe --setup` and the Options'
+//! Setup entry (Start::Setup). Play starts Haiku.exe again, which then
+//! plays: the game always runs in a process of its own.
 //!
 //! For tests and evidence it can drive itself and save what it shows:
 //! `--shots <dir>` saves each frame it is asked to (its own back buffer,
 //! the window's exact pixels), and `--script "<cmd>; <cmd>; ..."` runs
 //! commands: game <path>, dlc <path>, nodlc, click <next|back|build|cancel|
-//! retry|play|rebuild|change|nodlc>, shot <name>, wait-percent <n>,
-//! wait-done, wait-ms <n>, exit.
+//! retry|play|rebuild|change|nodlc|add-version|remove-version|pick-usa|
+//! pick-eur|pick-jpn|remove-confirm>, shot <name>, wait-percent <n>,
+//! wait-done, wait-ms <n>, exit. (A scripted remove-confirm skips the
+//! Yes/No.)
+
+/// oneexe: why the window opens
+#[derive(Clone, Debug, PartialEq)]
+pub enum Start {
+    /// no game installed yet: the first screens
+    Install,
+    /// the game is installed, but Haiku's files or its module have to be
+    /// made again: built at once, then the game starts
+    Update(String),
+    /// asked for (--setup, the Options' Setup): Rebuild, Change dump or
+    /// DLC, the voices
+    Setup,
+}
 
 #[cfg(not(windows))]
 pub struct Options;
@@ -24,8 +51,8 @@ impl Options {
     }
 }
 #[cfg(not(windows))]
-pub fn run(_: Options) {
-    eprintln!("Haiku Setup's window is for Windows; use --build");
+pub fn run(_: Options, _: Start) {
+    eprintln!("Haiku's setup window is for Windows; use --build");
 }
 
 #[cfg(windows)]
@@ -40,6 +67,7 @@ mod imp {
     use std::sync::{Arc, Mutex};
     use std::time::Instant;
 
+    use super::Start;
     use crate::pipeline::{self, Paths, Shared, State, Status};
     use crate::win::*;
     use crate::{dlc, dump, log};
@@ -119,6 +147,8 @@ mod imp {
         Ready,
         /// jpvoice: the optional Japanese voices
         Voices,
+        /// versions2: Remove a version
+        Remove,
     }
 
     #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -144,6 +174,11 @@ mod imp {
         // jpdlc: the Japanese DLC's pick
         VoicesDlcFile,
         VoicesDlcFolder,
+        // versions2
+        AddVersion,
+        RemoveVersion,
+        RemovePick(crate::layout::Version),
+        RemoveConfirm,
     }
 
     struct Button {
@@ -226,6 +261,23 @@ mod imp {
         wait: Option<Wait>,
         /// jpvoice
         voices: voices_ui::VoicesState,
+        /// oneexe: building again by itself (Start::Update): the game
+        /// starts when it is done
+        updating: Option<String>,
+        /// versions2: Add a version's screens (a dump of another version)
+        adding: bool,
+        /// versions2: a game is built, so the dump screen can go Back to
+        /// Play
+        can_return: bool,
+        /// versions2: Remove a version: the one picked, what removing it
+        /// deletes, why it wasn't
+        remove_pick: Option<crate::layout::Version>,
+        remove_summary: Option<crate::layout::RemoveSummary>,
+        remove_error: Option<String>,
+        /// versions2: a removed version's folder being deleted
+        deleting: Vec<std::thread::JoinHandle<()>>,
+        /// versions2: driven by --script (no Yes/No)
+        scripted: bool,
     }
 
     thread_local! {
@@ -285,6 +337,95 @@ mod imp {
             self.invalidate();
         }
 
+        /// versions2: the dump and DLC the playing version was built from,
+        /// as the setup's state has them (what the first screens show)
+        fn restore_choice(&mut self) {
+            self.game = None;
+            self.game_name.clear();
+            self.dlcs.clear();
+            self.dlc_result = None;
+            self.dlc_name.clear();
+            self.no_dlc = false;
+            let state = self.state.clone();
+            if let Some(dump_path) = state.get("dump").map(PathBuf::from).filter(|p| p.exists()) {
+                self.set_game(&dump_path);
+                for dlc_path in state.dlc_paths().into_iter().filter(|p| p.exists()) {
+                    self.set_dlc(&dlc_path);
+                }
+                if state.get("dlc") == Some("") {
+                    self.no_dlc = true;
+                }
+            }
+        }
+
+        /// versions2: Add a version: the dump screens, for another version
+        fn add_version(&mut self) {
+            self.adding = true;
+            self.game = None;
+            self.game_name.clear();
+            self.dlcs.clear();
+            self.dlc_result = None;
+            self.dlc_name.clear();
+            self.no_dlc = false;
+            self.resumable = false;
+            self.screen = Screen::Game;
+        }
+
+        /// versions2: back from the dump screens to Play
+        fn back_to_ready(&mut self) {
+            self.adding = false;
+            self.remove_pick = None;
+            self.remove_summary = None;
+            self.remove_error = None;
+            self.restore_choice();
+            self.screen = Screen::Ready;
+        }
+
+        fn pick_removal(&mut self, version: crate::layout::Version) {
+            self.remove_pick = Some(version);
+            self.remove_error = None;
+            self.remove_summary = Some(crate::layout::remove_summary(&self.paths.root, version));
+        }
+
+        /// versions2: Remove a version, after Windows' Yes/No
+        fn remove_version(&mut self) {
+            let Some(version) = self.remove_pick else { return };
+            let root = self.paths.root.clone();
+            // a test can still have the question shown (HAIKU_SETUP_ASK=1)
+            if !self.scripted || std::env::var("HAIKU_SETUP_ASK").is_ok_and(|v| v == "1") {
+                let text = wide(&format!(
+                    "Remove {}?\n\nIts folder, games\\{}\\, is deleted: its game files and the game's code, Haiku's files made from it, its caches and its mods. This can't be undone; adding it again needs its dump and a build.\n\nYour saves and settings (userdata\\haiku) are kept.",
+                    version.name(),
+                    version.folder()
+                ));
+                let caption = wide("Haiku Setup");
+                // SAFETY: NUL-terminated strings, our window
+                let answer = unsafe { MessageBoxW(self.hwnd, text.as_ptr(), caption.as_ptr(), MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) };
+                if answer != IDYES {
+                    log::line(format!("remove {}: not confirmed", version.tag()));
+                    return;
+                }
+            }
+            log::line(format!("remove {}: confirmed", version.tag()));
+            match crate::layout::remove(&root, version) {
+                Ok(folder) => {
+                    log::line(format!("  {} moved to {}, deleting it; playing {}", crate::layout::dir(&root, version).display(), folder.display(), crate::layout::active(&root).map(|v| v.tag()).unwrap_or("none")));
+                    self.deleting.push(std::thread::spawn(move || match crate::layout::delete_removed(&folder) {
+                        Ok(()) => log::line(format!("  deleted {}", folder.display())),
+                        Err(e) => log::line(format!("  {} isn't all deleted ({e}); the rest goes at the next start", folder.display())),
+                    }));
+                    self.paths = Paths::new(root.clone());
+                    self.state = State::load(&self.paths);
+                    self.built_note = format!("{} was removed; your saves are kept.", crate::layout::capital(version.name()));
+                    self.back_to_ready();
+                }
+                Err(e) => {
+                    log::line(format!("  not removed: {e}"));
+                    self.remove_error = Some(e);
+                }
+            }
+        }
+
         fn game_ok(&self) -> Option<&dump::Game> {
             self.game.as_ref().and_then(|g| g.as_ref().ok())
         }
@@ -314,10 +455,29 @@ mod imp {
             let (paths, dlcs, status, cancel) = (self.paths.clone(), self.dlcs.clone(), self.status.clone(), self.cancel.clone());
             self.job = Some(std::thread::spawn(move || {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| pipeline::run(&paths, &game, &dlcs, &status, &cancel)));
-                let result = result.unwrap_or_else(|_| Err("Haiku Setup ran into an internal error. The log has the details.".into()));
+                let result = result.unwrap_or_else(|_| Err("Haiku's setup ran into an internal error. The log has the details.".into()));
                 match &result {
                     Ok(said) => log::line(format!("build finished: {said}")),
                     Err(e) => log::line(format!("build failed: {e}")),
+                }
+                result
+            }));
+            self.screen = Screen::Build;
+            self.invalidate();
+        }
+
+        /// oneexe: Haiku's files and the game's module made again from the
+        /// game installed in data/ (no dump needed)
+        fn start_update(&mut self) {
+            *self.status.lock().unwrap() = Status { step: "Starting".into(), ..Status::default() };
+            self.cancel.store(false, Ordering::Relaxed);
+            let (paths, status, cancel) = (self.paths.clone(), self.status.clone(), self.cancel.clone());
+            self.job = Some(std::thread::spawn(move || {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| pipeline::update(&paths, &status, &cancel)));
+                let result = result.unwrap_or_else(|_| Err("Haiku's setup ran into an internal error. The log has the details.".into()));
+                match &result {
+                    Ok(said) => log::line(format!("update finished: {said}")),
+                    Err(e) => log::line(format!("update failed: {e}")),
                 }
                 result
             }));
@@ -332,11 +492,22 @@ mod imp {
             }
             if finished {
                 let job = self.job.take().unwrap();
-                match job.join().unwrap_or_else(|_| Err("Haiku Setup ran into an internal error.".into())) {
+                match job.join().unwrap_or_else(|_| Err("Haiku's setup ran into an internal error.".into())) {
+                    Ok(said) if self.updating.is_some() => {
+                        // oneexe: built again by itself: the game starts
+                        self.built_note = said;
+                        self.updating = None;
+                        self.screen = Screen::Ready;
+                        self.play();
+                    }
                     Ok(said) => {
                         self.built_note = said;
+                        // versions: the version just set up plays now
+                        self.paths = Paths::new(self.paths.root.clone());
                         self.state = State::load(&self.paths);
                         self.resumable = false;
+                        self.adding = false; // versions2
+                        self.can_return = true;
                         self.screen = Screen::Ready;
                     }
                     Err(e) => {
@@ -362,6 +533,18 @@ mod imp {
                 (Screen::Ready, Id::VoicesOpen) => self.screen = Screen::Voices,
                 (Screen::Ready, Id::VoicesEnglish) => self.voices_choose(false),
                 (Screen::Ready, Id::VoicesJapanese) => self.voices_choose(true),
+                // versions2: Add a version, Remove a version
+                (Screen::Ready, Id::AddVersion) => self.add_version(),
+                (Screen::Game, Id::Back) => self.back_to_ready(),
+                (Screen::Ready, Id::RemoveVersion) => {
+                    self.remove_pick = None;
+                    self.remove_summary = None;
+                    self.remove_error = None;
+                    self.screen = Screen::Remove;
+                }
+                (Screen::Remove, Id::RemovePick(version)) => self.pick_removal(version),
+                (Screen::Remove, Id::RemoveConfirm) => self.remove_version(),
+                (Screen::Remove, Id::Back) => self.back_to_ready(),
                 (Screen::Game, Id::PickFile) => {
                     let filter = [("3DS game dumps (*.3ds, *.cci, *.cia, *.cxi)", "*.3ds;*.cci;*.cia;*.cxi;*.app"), ("All files", "*.*")];
                     if let Some(p) = pick_file(self.hwnd, "Select your Fire Emblem Fates Special Edition dump", &filter) {
@@ -395,6 +578,8 @@ mod imp {
                     self.dlc_name.clear();
                 }
                 (Screen::Dlc, Id::Back) => self.screen = Screen::Game,
+                // oneexe: an update that failed is tried again as an update
+                (Screen::Failed, Id::Retry) if self.updating.is_some() => self.start_update(),
                 (Screen::Dlc, Id::Build) | (Screen::Failed, Id::Retry) => self.start_build(),
                 (Screen::Failed, Id::Back) => self.screen = Screen::Dlc,
                 (Screen::Failed, Id::OpenLog) => open_path(&self.paths.log_file()),
@@ -402,14 +587,14 @@ mod imp {
                 (Screen::Ready, Id::Play) => self.play(),
                 (Screen::Ready, Id::Change) => self.screen = Screen::Game,
                 (Screen::Ready, Id::Rebuild) => {
-                    // everything again, from the dump remembered
-                    self.state.values.retain(|k, _| !k.starts_with("done."));
+                    // oneexe: Haiku's files and the whole module again, from
+                    // the game installed in data/ (Change dump or DLC
+                    // installs the game again)
+                    self.state.values.remove("done.assets");
                     self.state.save(&self.paths);
-                    if self.game_ok().is_none() {
-                        self.screen = Screen::Game;
-                    } else {
-                        self.start_build();
-                    }
+                    let _ = std::fs::remove_file(self.paths.module_dir().join(crate::module::NOTE));
+                    let _ = std::fs::remove_file(self.paths.work.join("module").join("c").join("objects.tsv"));
+                    self.start_update();
                 }
                 _ => {}
             }
@@ -417,15 +602,17 @@ mod imp {
         }
 
         fn play(&mut self) {
+            // oneexe: Haiku.exe again, which plays now that everything is
+            // made; it waits for this one to close (HAIKU_RESTART_WAIT)
             let exe = self.paths.exe();
             log::line(format!("play: {}", exe.display()));
-            match crate::spawn::start(&exe, &self.paths.root) {
+            match crate::spawn::start_waiting(&exe, &self.paths.root) {
                 Ok(_) => {
                     // SAFETY: our window
                     unsafe { DestroyWindow(self.hwnd) };
                 }
                 Err(e) => {
-                    self.failure = format!("Haiku.exe can't be started ({e}). Build it again with Rebuild.");
+                    self.failure = format!("Haiku.exe can't be started ({e}).");
                     self.screen = Screen::Failed;
                 }
             }
@@ -471,6 +658,13 @@ mod imp {
                         "english" => Some(Id::VoicesEnglish),
                         "japanese" => Some(Id::VoicesJapanese),
                         "remove" => Some(Id::VoicesRemove),
+                        // versions2
+                        "add-version" => Some(Id::AddVersion),
+                        "remove-version" => Some(Id::RemoveVersion),
+                        "pick-usa" => Some(Id::RemovePick(crate::layout::Version::Usa)),
+                        "pick-eur" => Some(Id::RemovePick(crate::layout::Version::Eur)),
+                        "pick-jpn" => Some(Id::RemovePick(crate::layout::Version::Jpn)),
+                        "remove-confirm" => Some(Id::RemoveConfirm),
                         _ => None,
                     };
                     if let Some(id) = id {
@@ -514,6 +708,9 @@ mod imp {
                     add(Id::PickFile, "Select file\u{2026}", 40, s(214), 170, false, true);
                     add(Id::PickFolder, "Select folder\u{2026}", 222, s(214), 170, false, true);
                     add(Id::Next, "Next  \u{203A}", WIDTH - 40 - 160, bottom, 160, true, self.game_ok().is_some());
+                    if self.can_return {
+                        add(Id::Back, "\u{2039}  Back", 40, bottom, 130, false, true); // versions2
+                    }
                 }
                 Screen::Dlc => {
                     add(Id::PickFile, "Select file\u{2026}", 40, s(214), 170, false, true);
@@ -533,11 +730,37 @@ mod imp {
                 }
                 Screen::Ready => {
                     add(Id::Play, "Play", 40, s(262), 240, true, true);
-                    add(Id::Rebuild, "Rebuild", 40, bottom, 150, false, true);
-                    add(Id::Change, "Change dump or DLC", 202, bottom, 210, false, true);
+                    add(Id::Rebuild, "Rebuild", 40, bottom, 120, false, true);
+                    add(Id::Change, "Change dump or DLC", 172, bottom, 196, false, true);
+                    // versions2
+                    let versions = crate::layout::installed(&self.paths.root).len();
+                    add(Id::AddVersion, "Add a version\u{2026}", 380, bottom, 160, false, true);
+                    add(Id::RemoveVersion, "Remove a version\u{2026}", 552, bottom, 168, false, versions > 1);
                     self.voices_buttons(&mut add); // jpvoice
                 }
                 Screen::Voices => self.voices_buttons(&mut add), // jpvoice
+                // versions2: which version, then Remove
+                Screen::Remove => {
+                    let installed = crate::layout::installed(&self.paths.root);
+                    let playing = crate::layout::active(&self.paths.root);
+                    for (i, v) in installed.iter().enumerate() {
+                        let label = match v {
+                            crate::layout::Version::Usa => "USA",
+                            crate::layout::Version::Eur => "Europe",
+                            crate::layout::Version::Jpn => "Japan",
+                        };
+                        let label = if Some(*v) == playing { format!("{label} (playing)") } else { label.to_owned() };
+                        add(Id::RemovePick(*v), &label, 40 + 182 * i as i32, s(214), 170, self.remove_pick == Some(*v), true);
+                    }
+                    add(Id::Back, "\u{2039}  Back", 40, bottom, 130, false, true);
+                    let label = match self.remove_pick {
+                        Some(crate::layout::Version::Usa) => "Remove USA",
+                        Some(crate::layout::Version::Eur) => "Remove Europe",
+                        Some(crate::layout::Version::Jpn) => "Remove Japan",
+                        None => "Remove",
+                    };
+                    add(Id::RemoveConfirm, label, WIDTH - 40 - 200, bottom, 200, false, self.remove_pick.is_some() && installed.len() > 1);
+                }
             }
             for b in &mut buttons {
                 if b.id == Id::Play {
@@ -721,7 +944,7 @@ mod imp {
             let steps = [("1", "Game", Screen::Game), ("2", "DLC", Screen::Dlc), ("3", "Build", Screen::Build), ("4", "Play", Screen::Ready)];
             let current = match self.screen {
                 Screen::Failed => Screen::Build,
-                Screen::Voices => Screen::Ready, // jpvoice
+                Screen::Voices | Screen::Remove => Screen::Ready, // jpvoice; versions2
                 other => other,
             };
             let mut x = w - s(40);
@@ -744,6 +967,7 @@ mod imp {
                     self.draw_ready_voices(dc); // jpvoice
                 }
                 Screen::Voices => self.draw_voices(dc, content), // jpvoice
+                Screen::Remove => self.draw_remove(dc, content), // versions2
             }
             for b in &self.buttons {
                 let hover = self.hover == Some(b.id) && b.enabled;
@@ -765,12 +989,24 @@ mod imp {
         }
 
         unsafe fn draw_game(&self, dc: HDC, r: RECT) {
-            self.heading(
-                dc,
-                r,
-                "Select your Fire Emblem Fates Special Edition dump.",
-                "The US, European or Japanese release, decrypted: a .3ds (.cci), .cia or .cxi of the cartridge, or Citra's or Azahar's sdmc folder with it installed. You can also drop it here. It is only read.",
-            );
+            // versions2: Add a version
+            let installed = crate::layout::installed(&self.paths.root);
+            if self.adding {
+                let have = installed.iter().map(|v| v.folder()).collect::<Vec<_>>().join(", ");
+                self.heading(
+                    dc,
+                    r,
+                    "Add a version: select its dump.",
+                    &format!("A decrypted dump of another release (US, European or Japanese). It installs beside what is here ({have}) with its own mods, and changes nothing installed."),
+                );
+            } else {
+                self.heading(
+                    dc,
+                    r,
+                    "Select your Fire Emblem Fates Special Edition dump.",
+                    "The US, European or Japanese release, decrypted: a .3ds (.cci), .cia or .cxi of the cartridge, or Citra's or Azahar's sdmc folder with it installed. You can also drop it here. It is only read.",
+                );
+            }
             let top = self.px(274);
             match &self.game {
                 None => {}
@@ -794,6 +1030,13 @@ mod imp {
                         ("Fire Emblem if (Japan)", format!("{}: {}, {} MB.\nThe Japanese game, which Haiku builds with its Japanese address map (Japanese text and voices, the petting minigame, the Japanese DLC), and every hash checks out.", self.game_name, g.kind, g.size / 1_000_000))
                     } else {
                         (headline, message)
+                    };
+                    // versions2: a version installed already is built again
+                    let version = crate::layout::Version::of_region(g.region);
+                    let message = if self.adding && installed.contains(&version) {
+                        format!("{message}\n{} is installed already: building it again replaces its game files (its mods and saves are kept).", crate::layout::capital(version.name()))
+                    } else {
+                        message
                     };
                     self.result_panel(dc, top, Some(true), headline, &message);
                 }
@@ -868,9 +1111,13 @@ mod imp {
                 self.round_rect(dc, RECT { left: bar.left + s(3), top: bar.top + s(3), right: bar.left + s(3) + fill_w, bottom: bar.bottom - s(3) }, rgb(196, 150, 72), rgb(232, 190, 110), s(8), 1);
             }
             self.text(dc, self.fonts.body, CREAM, RECT { left: r.left, top: r.top + s(146), right: r.right, bottom: r.top + s(170) }, &status.detail, DT_SINGLELINE | DT_END_ELLIPSIS);
-            let note = "Haiku is built once, on your PC, from your own dump: its code is recompiled and compiled here. That takes from about ten minutes to half an hour, depending on the PC. It runs at low priority, so you can keep using the computer.";
+            let note = if self.updating.is_some() {
+                "This version of Haiku needs the game's code built again, on your PC, from your own game: only what changed is compiled. The game starts by itself when it's done. It runs at low priority, so you can keep using the computer."
+            } else {
+                "The game's code is built once, on your PC, from your own dump: it is recompiled and compiled here. That takes from about ten minutes to half an hour, depending on the PC. It runs at low priority, so you can keep using the computer."
+            };
             self.text(dc, self.fonts.body, MUTED, RECT { left: r.left, top: r.top + s(186), right: r.right, bottom: r.top + s(260) }, note, DT_WORDBREAK);
-            self.text(dc, self.fonts.small, MUTED, RECT { left: r.left, top: r.top + s(266), right: r.right - s(170), bottom: r.top + s(290) }, "The log is Haiku Setup.log, beside Haiku Setup.", DT_SINGLELINE | DT_END_ELLIPSIS);
+            self.text(dc, self.fonts.small, MUTED, RECT { left: r.left, top: r.top + s(266), right: r.right - s(170), bottom: r.top + s(290) }, "The log is setup-work\\setup.log, beside Haiku.exe.", DT_SINGLELINE | DT_END_ELLIPSIS);
         }
 
         unsafe fn draw_failed(&self, dc: HDC, r: RECT) {
@@ -882,9 +1129,9 @@ mod imp {
             let sub = format!("It stopped at {:.0}%. What is done is kept: building again carries on from there.", percent.floor());
             self.text(dc, self.fonts.body, MUTED, RECT { left: r.left, top: r.top + s(38), right: r.right, bottom: r.top + s(64) }, &sub, DT_WORDBREAK);
             if stopped {
-                self.result_panel(dc, r.top + s(80), None, "Stopped as you asked", "Try again now, or start Haiku Setup later, to carry on.");
+                self.result_panel(dc, r.top + s(80), None, "Stopped as you asked", "Try again now, or start Haiku again later, to carry on.");
             } else {
-                self.result_panel(dc, r.top + s(80), Some(false), "What went wrong", &format!("{}\n\nThe log is Haiku Setup.log, beside Haiku Setup.", self.failure));
+                self.result_panel(dc, r.top + s(80), Some(false), "What went wrong", &format!("{}\n\nThe log is setup-work\\setup.log, beside Haiku.exe.", self.failure));
             }
         }
 
@@ -895,9 +1142,55 @@ mod imp {
             let dlc_count = std::fs::read_dir(&dlc_dir).map(|e| e.flatten().count()).unwrap_or(0);
             let dlc_line = if dlc_count > 0 { "The DLC is installed." } else { "No DLC is installed: the DLC maps aren't available. Change dump or DLC to add it." };
             let built = if self.built_note.is_empty() { String::new() } else { format!(" {}", self.built_note) };
-            let text = format!("Fire Emblem Fates, built from your dump.{built}\n{dlc_line}\nSaves and settings are kept in userdata\\haiku, beside Haiku.exe.");
-            self.text(dc, self.fonts.body, MUTED, RECT { left: r.left, top: r.top + s(40), right: r.right, bottom: r.top + s(130) }, &text, DT_WORDBREAK);
-            self.text(dc, self.fonts.small, MUTED, RECT { left: s(300), top: s(272), right: r.right, bottom: s(340) }, "Starts Haiku.exe and closes Haiku Setup. Next time you can start Haiku.exe yourself, or this again.", DT_WORDBREAK);
+            // versions: which are installed, and which plays
+            let installed = crate::layout::installed(&self.paths.root);
+            let versions = if installed.len() > 1 {
+                let playing = crate::layout::active(&self.paths.root);
+                // versions2: one line (the version's long name wrapped it)
+                format!("\nInstalled: {}; playing {}. Options, Interface, Game Version switches.", installed.iter().map(|v| v.folder()).collect::<Vec<_>>().join(", "), playing.map(|v| v.folder()).unwrap_or("none"))
+            } else {
+                String::new()
+            };
+            // versions2: Add a version said while there is one; with more,
+            // the line above says how they switch
+            let add = if installed.len() > 1 { "" } else { " Add a version installs another (US, European, Japanese) beside this one." };
+            let text = format!("Fire Emblem Fates, built from your dump.{built}\n{dlc_line}{versions}\nSaves and settings are kept in userdata\\haiku, beside Haiku.exe.{add}");
+            self.text(dc, self.fonts.body, MUTED, RECT { left: r.left, top: r.top + s(40), right: r.right, bottom: r.top + s(150) }, &text, DT_WORDBREAK);
+            self.text(dc, self.fonts.small, MUTED, RECT { left: s(300), top: s(272), right: r.right, bottom: s(340) }, "Starts the game. From now on Haiku.exe goes straight to the game; this screen is Options, Interface, Haiku Setup.", DT_WORDBREAK);
+        }
+
+        /// versions2: Remove a version: which, what goes and what stays
+        unsafe fn draw_remove(&self, dc: HDC, r: RECT) {
+            self.heading(dc, r, "Remove a version of the game.", "Choose the version to remove. The others, and every version's saves, aren't touched.");
+            let top = self.px(274);
+            let installed = crate::layout::installed(&self.paths.root);
+            if installed.len() < 2 {
+                self.result_panel(dc, top, Some(false), "The only version installed", "Haiku needs one version of the game, so this one can't be removed. Add another version first.");
+                return;
+            }
+            if let Some(error) = &self.remove_error {
+                self.result_panel(dc, top, Some(false), "Not removed", error);
+                return;
+            }
+            let (Some(version), Some(summary)) = (self.remove_pick, &self.remove_summary) else { return };
+            let size = if summary.bytes >= 1 << 30 { format!("{:.1} GB", summary.bytes as f64 / (1u64 << 30) as f64) } else { format!("{} MB", summary.bytes >> 20) };
+            let mods = match summary.mods {
+                0 => "its mods folder (empty)".to_owned(),
+                1 => "its mods (1 mod)".to_owned(),
+                n => format!("its mods ({n} mods)"),
+            };
+            let voices = if summary.voices { ", with its Japanese voices" } else { "" };
+            let mut message = format!(
+                "Deleted: games\\{}\\ ({size}, {} files): its game files and code (data\\{voices}), Haiku's files made from it (assets\\), its caches (cache\\) and {mods}.\nKept: every version's saves and your settings (userdata\\haiku), the other versions, and your dump.",
+                version.folder(),
+                summary.files
+            );
+            if summary.playing {
+                if let Some(next) = summary.next {
+                    message.push_str(&format!("\nIt's playing now: {} plays from now on.", next.name()));
+                }
+            }
+            self.result_panel(dc, top, None, &format!("Remove {}?", version.name()), &message);
         }
 
         fn hit(&self, x: i32, y: i32) -> Option<Id> {
@@ -1041,10 +1334,14 @@ mod imp {
         }
     }
 
-    pub fn run(options: Options) {
+    pub fn run(options: Options, start: Start) {
         let paths = Paths::new(crate::root());
+        let _ = std::fs::create_dir_all(&paths.work);
         log::open(&paths.log_file(), false);
-        log::line("Haiku Setup started");
+        log::line(format!("Haiku's setup started ({start:?})"));
+        for line in crate::layout::sweep(&paths.root) {
+            log::line(line); // versions2: what a removed version left
+        }
         // SAFETY: the window's whole life is in here, on this thread
         unsafe {
             SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
@@ -1081,6 +1378,7 @@ mod imp {
 
             let state = State::load(&paths);
             let status: Shared = Arc::new(Mutex::new(Status::default()));
+            let scripted = !options.script.is_empty(); // versions2
             let mut app = App {
                 hwnd,
                 scale,
@@ -1110,21 +1408,34 @@ mod imp {
                 script: options.script.into(),
                 wait: None,
                 voices: voices_ui::VoicesState::new(), // jpvoice
+                updating: None,
+                // versions2
+                adding: false,
+                can_return: false,
+                remove_pick: None,
+                remove_summary: None,
+                remove_error: None,
+                deleting: Vec::new(),
+                scripted,
             };
             // what an earlier run left: a built Haiku, or a choice and steps
-            if let Some(dump_path) = state.get("dump").map(PathBuf::from).filter(|p| p.exists()) {
-                app.set_game(&dump_path);
-                for dlc_path in state.dlc_paths().into_iter().filter(|p| p.exists()) {
-                    app.set_dlc(&dlc_path);
-                }
-                if state.get("dlc") == Some("") {
-                    app.no_dlc = true;
-                }
-            }
-            let built = state.get("built").is_some() && paths.exe().is_file() && zakuro_fs::datadir::is_game_dir(&paths.data());
+            app.restore_choice(); // versions2: as Back to Play does
+            // oneexe: built is the game installed and its module made for
+            // this Haiku.exe
+            let ready = pipeline::ready(&paths);
+            let built = ready == pipeline::Ready::Yes;
             app.resumable = !built && state.values.iter().any(|(k, v)| k.starts_with("done.") && !v.is_empty());
             app.screen = if built { Screen::Ready } else { Screen::Game };
+            app.can_return = built; // versions2
+            if let (Start::Update(why), pipeline::Ready::Update(_)) = (&start, &ready) {
+                log::line(format!("update: {why}"));
+                app.updating = Some(why.clone());
+            }
+            let update = app.updating.is_some();
             APP.with(|a| *a.borrow_mut() = Some(app));
+            if update {
+                with_app(|app| app.start_update());
+            }
             if !options.hidden {
                 ShowWindow(hwnd, SW_SHOW);
                 UpdateWindow(hwnd);
@@ -1145,7 +1456,12 @@ mod imp {
             if let Some(job) = job {
                 let _ = job.join();
             }
+            // versions2: a removed version's folder, deleted to the end
+            let deleting = APP.with(|a| a.borrow_mut().as_mut().map(|app| std::mem::take(&mut app.deleting)).unwrap_or_default());
+            for delete in deleting {
+                let _ = delete.join();
+            }
         }
-        log::line("Haiku Setup closed");
+        log::line("Haiku's setup closed");
     }
 }

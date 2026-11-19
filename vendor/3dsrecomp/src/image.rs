@@ -10,18 +10,40 @@ const PAGE_SIZE: usize = 0x1000;
 pub struct Segment {
     pub base: u32,
     pub bytes: Vec<u8>,
+    /// vow: places inside it that can't run, sorted and apart: a patched
+    /// executable's text reaching on to the pages a code mod made
+    /// executable past .data (patch::program_with) leaves .rodata and .data
+    /// between them, which hold no code. no code is found, decoded or read
+    /// there. empty for every image as it was loaded.
+    pub closed: Vec<(u32, u32)>,
 }
 
 impl Segment {
+    pub fn new(base: u32, bytes: Vec<u8>) -> Segment {
+        Segment { base, bytes, closed: Vec::new() }
+    }
+
     pub fn end(&self) -> u32 {
         self.base + self.bytes.len() as u32
     }
 
+    /// vow: whether start..end meets a closed place.
+    fn shut(&self, start: u32, end: u32) -> bool {
+        if self.closed.is_empty() {
+            return false;
+        }
+        let at = self.closed.partition_point(|&(_, closed_end)| closed_end <= start);
+        self.closed.get(at).is_some_and(|&(closed_start, _)| closed_start < end)
+    }
+
     pub fn contains(&self, address: u32) -> bool {
-        address >= self.base && address < self.end()
+        address >= self.base && address < self.end() && !self.shut(address, address + 1)
     }
 
     pub fn read32(&self, address: u32) -> Option<u32> {
+        if self.shut(address, address.wrapping_add(4)) {
+            return None;
+        }
         let offset = address.checked_sub(self.base)? as usize;
         let bytes = self.bytes.get(offset..offset + 4)?;
         Some(u32::from_le_bytes(bytes.try_into().unwrap()))
@@ -33,6 +55,9 @@ impl Segment {
     }
 
     pub fn read16(&self, address: u32) -> Option<u16> {
+        if self.shut(address, address.wrapping_add(2)) {
+            return None;
+        }
         let offset = address.checked_sub(self.base)? as usize;
         let bytes = self.bytes.get(offset..offset + 2)?;
         Some(u16::from_le_bytes(bytes.try_into().unwrap()))
@@ -66,12 +91,8 @@ impl Image {
     /// segments sit one after another in it, each padded to whole pages,
     /// the same way the loader maps them.
     pub fn from_code(header: &ExHeader, code: &[u8]) -> Image {
-        let segment = |info: CodeSetInfo, offset: usize| Segment {
-            base: info.address,
-            bytes: code
-                .get(offset..offset + info.size as usize)
-                .unwrap_or_default()
-                .to_vec(),
+        let segment = |info: CodeSetInfo, offset: usize| {
+            Segment::new(info.address, code.get(offset..offset + info.size as usize).unwrap_or_default().to_vec())
         };
         let rodata_offset = header.text.num_pages as usize * PAGE_SIZE;
         let data_offset = rodata_offset + header.rodata.num_pages as usize * PAGE_SIZE;
@@ -153,7 +174,7 @@ mod tests {
     const BASE: u32 = 0x0010_0000;
 
     fn segment(base: u32, words: &[u32]) -> Segment {
-        Segment { base, bytes: words.iter().flat_map(|w| w.to_le_bytes()).collect() }
+        Segment::new(base, words.iter().flat_map(|w| w.to_le_bytes()).collect())
     }
 
     #[test]

@@ -1,22 +1,25 @@
-//! Building Haiku from the player's dump, step by step:
+//! Setting Haiku up from the player's dump, step by step:
 //!
 //! 1. check the whole dump (and DLC) against their own hashes;
 //! 2. install the game's files into data/ (zakuro_fs::datadir, the same
 //!    installer as `Haiku.exe --install`);
 //! 3. install the DLC into data/dlc;
-//! 4. make Haiku's game-derived files (assets/, and the recompiler's
-//!    amiibo_icons.c) from them (derive.rs);
-//! 5. write the game's code as C (3dsrecomp, with Haiku's overrides);
-//! 6. compile it with the bundled GCC;
-//! 7. link it with the prebuilt engine (everything of Haiku that holds no
-//!    game code) into Haiku.exe.
+//! 4. make Haiku's game-derived files (assets/, and the amiibo icons the
+//!    game's module carries) from them (derive.rs);
+//! 5-7. recompile the game's code from data/ into its module,
+//!    data/code/game.dll (module.rs): write it as C (3dsrecomp, the
+//!    overrides left to Haiku.exe), compile what changed with the bundled
+//!    GCC, link it.
 //!
-//! A step that finished for the same dump and the same setup is not done
-//! again, and compiling picks up where it stopped (an object is kept once
-//! it is newer than its C), so a failed or cancelled build can be resumed.
-//! Nothing is written outside the folder Haiku Setup is in (and, only when
-//! that folder's path isn't ASCII, a junction in C:\Users\Public that is
-//! removed again).
+//! oneexe: Haiku.exe ships built (the engine and Haiku's overrides); no
+//! Haiku.exe is linked here any more. A step that finished for the same
+//! inputs is not done again: the install steps are keyed on the dump and
+//! DLC (an earlier Haiku's keys are taken too, upgrade.rs), Haiku's files on
+//! the recipes that make them, the module on its stamp (module.rs).
+//! Compiling picks up where it stopped, and keeps every object whose C
+//! didn't change, so building the module again is incremental. Nothing is
+//! written outside the folder Haiku.exe is in (and, only when that folder's
+//! path isn't ASCII, a junction in C:\Users\Public that is removed again).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -24,36 +27,72 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, UNIX_EPOCH};
 
-use crate::{derive, dlc, dump, log, toolchain};
+use crate::{derive, dlc, dump, log};
 
-/// the setup's version: a different one builds everything again.
-pub const SETUP_VERSION: &str = "1";
+/// the keys' version (oneexe: 2; 1.x keyed everything on the payload,
+/// upgrade.rs reads those)
+pub const SETUP_VERSION: &str = "2";
 
 #[derive(Clone)]
 pub struct Paths {
-    /// the folder Haiku Setup.exe is in, where Haiku.exe goes.
+    /// the folder Haiku.exe is in.
     pub root: PathBuf,
-    /// what the release brings: engine/, toolchain/, overrides/, derived.pack.
+    /// versions: the folder of the version these paths are for,
+    /// games\<version>\ (layout.rs), or root in a flat folder
+    pub game: PathBuf,
+    /// what the release brings: w64devkit/, derived*.pack, assets/.
     pub setup: PathBuf,
     /// intermediate files, and the state.
     pub work: PathBuf,
 }
 
 impl Paths {
+    /// the version that plays (layout::active), or the flat folder
     pub fn new(root: PathBuf) -> Paths {
-        Paths { setup: root.join("setup"), work: root.join("setup-work"), root }
+        let game = crate::layout::game_dir(&root);
+        Paths { setup: root.join("setup"), work: game.join("setup-work"), game, root }
+    }
+    /// versions: the same for one version, in games\<version>\; a
+    /// development folder (no setup\) stays flat
+    pub fn for_version(&self, version: crate::layout::Version) -> Paths {
+        if !self.managed() {
+            return self.clone();
+        }
+        let game = crate::layout::dir(&self.root, version);
+        Paths { setup: self.setup.clone(), work: game.join("setup-work"), game, root: self.root.clone() }
     }
     pub fn data(&self) -> PathBuf {
-        self.root.join("data")
+        self.game.join("data")
     }
+    /// Haiku's files made from the game
+    pub fn assets(&self) -> PathBuf {
+        self.game.join("assets")
+    }
+    /// the program to start to play: this one (Haiku.exe)
     pub fn exe(&self) -> PathBuf {
-        self.root.join("Haiku.exe")
+        std::env::current_exe().unwrap_or_else(|_| self.root.join("Haiku.exe"))
     }
     pub fn state_file(&self) -> PathBuf {
         self.work.join("state.txt")
     }
+    /// oneexe: the setup's log, in setup-work (1.x wrote Haiku Setup.log
+    /// beside Haiku Setup.exe; upgrade.rs moves it here)
     pub fn log_file(&self) -> PathBuf {
-        self.root.join("Haiku Setup.log")
+        // versions: one log for the whole folder
+        self.root.join("setup-work").join("setup.log")
+    }
+    /// oneexe: the game's module and its note
+    pub fn module_dir(&self) -> PathBuf {
+        crate::module::dir(&self.game)
+    }
+    /// oneexe: the amiibo icons made from the dump, which the module carries
+    pub fn amiibo(&self) -> PathBuf {
+        self.work.join("amiibo_icons.c")
+    }
+    /// oneexe: a release install (setup/ beside Haiku.exe), which the setup
+    /// keeps; a development or test folder has none
+    pub fn managed(&self) -> bool {
+        self.setup.join("payload.txt").is_file() || self.setup.join("w64devkit").is_dir()
     }
 }
 
@@ -109,19 +148,19 @@ const STEPS: &[(&str, f32)] = &[
     ("game", 9.0),
     ("dlc", 3.0),
     ("assets", 2.0),
-    ("generate", 9.0),
-    ("compile", 64.0),
-    ("link", 6.0),
+    ("generate", 11.0),
+    ("compile", 66.0),
+    ("link", 2.0),
 ];
 
-struct Progress {
+pub(crate) struct Progress {
     status: Shared,
     base: f32,
     weight: f32,
 }
 
 impl Progress {
-    fn begin(status: &Shared, name: &str, step: &str) -> Progress {
+    pub(crate) fn begin(status: &Shared, name: &str, step: &str) -> Progress {
         let base: f32 = STEPS.iter().take_while(|(n, _)| *n != name).map(|(_, w)| w).sum();
         let weight = STEPS.iter().find(|(n, _)| *n == name).map_or(0.0, |(_, w)| *w);
         {
@@ -133,7 +172,7 @@ impl Progress {
         log::line(format!("== {step}"));
         Progress { status: status.clone(), base, weight }
     }
-    fn at(&self, fraction: f32, detail: impl Into<String>) {
+    pub(crate) fn at(&self, fraction: f32, detail: impl Into<String>) {
         let mut s = self.status.lock().unwrap();
         s.percent = self.base + self.weight * fraction.clamp(0.0, 1.0);
         s.detail = detail.into();
@@ -150,14 +189,86 @@ fn file_key(path: &Path) -> String {
     format!("{}|{size}|{}", path.display(), mtime(path))
 }
 
-fn payload_key(paths: &Paths) -> String {
-    let id = std::fs::read_to_string(paths.setup.join("payload.txt")).unwrap_or_default();
-    format!("{SETUP_VERSION}|{}", id.lines().next().unwrap_or("dev"))
+/// a step done before for the same inputs (oneexe: or by Haiku 1.x, whose
+/// keys were `<inputs>|1|<payload>`, for the steps that only depend on the
+/// inputs: checking and installing the dump and DLC)
+fn done(state: &State, step: &str, key: &str) -> bool {
+    let Some(value) = state.get(&format!("done.{step}")) else { return false };
+    if value == key {
+        return true;
+    }
+    let inputs = key.strip_prefix(&format!("{SETUP_VERSION}|")).unwrap_or(key);
+    matches!(step, "verify" | "game" | "dlc") && !inputs.is_empty() && value.strip_prefix(inputs).is_some_and(|rest| rest.starts_with("|1|"))
 }
 
-/// a step done before for the same inputs.
-fn done(state: &State, step: &str, key: &str) -> bool {
-    state.get(&format!("done.{step}")) == Some(key)
+/// oneexe: what Haiku's game-derived files are made from: the game
+/// installed (data/install.txt) and the recipes and own files this release
+/// brings for it. A release whose recipes are the same keeps them.
+pub fn assets_key(paths: &Paths) -> String {
+    let mut hash = crate::module::FNV_START;
+    crate::module::fnv(&mut hash, &std::fs::read(paths.data().join(zakuro_fs::datadir::MANIFEST_FILE)).unwrap_or_default());
+    for pack in ["derived.pack", "derived-eur.pack", "derived-jpn.pack"] {
+        crate::module::fnv(&mut hash, pack.as_bytes());
+        crate::module::fnv(&mut hash, &std::fs::read(paths.setup.join(pack)).unwrap_or_default());
+    }
+    // the release's own assets, by name and size
+    let mut files = Vec::new();
+    let mut dirs = vec![paths.setup.join("assets")];
+    while let Some(dir) = dirs.pop() {
+        for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                dirs.push(path);
+            } else {
+                files.push((path.strip_prefix(&paths.setup).map(|p| p.to_string_lossy().replace('\\', "/")).unwrap_or_default(), entry.metadata().map(|m| m.len()).unwrap_or(0)));
+            }
+        }
+    }
+    files.sort();
+    for (name, size) in files {
+        crate::module::fnv(&mut hash, name.as_bytes());
+        crate::module::fnv(&mut hash, &size.to_le_bytes());
+    }
+    format!("{SETUP_VERSION}|assets|{hash:016X}")
+}
+
+/// oneexe: the title data/ holds (install.txt), if any
+pub fn installed_title(data: &Path) -> Option<u64> {
+    let text = std::fs::read_to_string(data.join(zakuro_fs::datadir::MANIFEST_FILE)).ok()?;
+    text.lines().find_map(|line| line.strip_prefix("title ")).and_then(|t| u64::from_str_radix(t.trim(), 16).ok())
+}
+
+/// oneexe: what Haiku.exe asks at start: whether it can play now, and if
+/// not, what the setup has to do. A release install (setup/ beside it)
+/// also has its game-derived files checked; a development folder only its
+/// module.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Ready {
+    /// play
+    Yes,
+    /// no game installed: the setup's first screens
+    Install,
+    /// the game is installed, but Haiku's files or the game's module have to
+    /// be made again (an update, an upgrade from 1.x): the setup does it by
+    /// itself, then plays
+    Update(String),
+}
+
+pub fn ready(paths: &Paths) -> Ready {
+    let data = paths.data();
+    if !zakuro_fs::datadir::is_game_dir(&data) {
+        return Ready::Install;
+    }
+    if paths.managed() {
+        let state = State::load(paths);
+        if !done(&state, "assets", &assets_key(paths)) || !paths.amiibo().is_file() || !paths.assets().is_dir() {
+            return Ready::Update("Haiku's files have to be made again".into());
+        }
+    }
+    match crate::module::check(&paths.module_dir(), installed_title(&data)) {
+        Ok(_) => Ready::Yes,
+        Err(why) => Ready::Update(why),
+    }
 }
 
 fn mark(state: &mut State, paths: &Paths, step: &str, key: &str) {
@@ -188,9 +299,20 @@ fn copy_dir(from: &Path, to: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// builds Haiku. Err holds a message for the player.
+/// sets Haiku up from a dump and its DLC: installs them, then makes
+/// Haiku's files and the game's module (finish). Err holds a message for
+/// the player.
 pub fn run(paths: &Paths, game: &dump::Game, dlcs: &[dlc::Dlc], status: &Shared, cancel: &AtomicBool) -> Result<String, String> {
     let started = Instant::now();
+    // versions: a dump installs into its own version's folder, beside the
+    // versions installed before (which it never touches); a dump of the
+    // version installed already replaces that one
+    let version = crate::layout::Version::of_region(game.region);
+    let routed = paths.for_version(version);
+    let paths = &routed;
+    if paths.managed() {
+        log::line(format!("versions: {} goes in {}", version.name(), paths.game.display()));
+    }
     std::fs::create_dir_all(&paths.work).map_err(|e| format!("The folder {} can't be written ({e}). Put Haiku in a folder you can write to, such as one in your Documents.", paths.work.display()))?;
     let mut state = State::load(paths);
     state.set("dump", game.path.display().to_string());
@@ -198,7 +320,9 @@ pub fn run(paths: &Paths, game: &dump::Game, dlcs: &[dlc::Dlc], status: &Shared,
     state.save(paths);
     let stopped = || cancel.load(Ordering::Relaxed);
     let stop = || Err::<String, String>("Stopped. Start the build again to carry on where it stopped.".into());
-    let dump_key = format!("{}|{}", file_key(&game.path), payload_key(paths));
+    let game_key = format!("{SETUP_VERSION}|{}", file_key(&game.path));
+    let dlc_files = dlcs.iter().map(|d| file_key(&d.path)).collect::<Vec<_>>().join(";");
+    let verify_key = format!("{SETUP_VERSION}|{}", file_key(&game.path));
     log::line(format!("building from {} ({}, {} bytes), {} DLC", game.path.display(), game.kind, game.size, dlcs.len()));
     // eurdlc: a DLC that can't serve this game is said before anything is
     // checked, installed or removed (the DLC installed before stays)
@@ -206,16 +330,14 @@ pub fn run(paths: &Paths, game: &dump::Game, dlcs: &[dlc::Dlc], status: &Shared,
         crate::jpn::dlc_fits(game.region, d.title_id).map_err(|why| format!("The DLC doesn't fit this game: {why}"))?;
     }
 
-    // 1. the whole dump against its hashes
+    // 1. the whole dump against its hashes (the DLC is checked when it is
+    // installed, below)
     let p = Progress::begin(status, "verify", "Checking your dump");
-    if done(&state, "verify", &dump_key) {
+    if done(&state, "verify", &verify_key) {
         log::line("checked before");
     } else {
-        dump::verify_romfs(game, &|f| p.at(f * 0.8, format!("Checking the game's data, {:.0}%", f * 100.0))).map_err(|e| e.message().to_owned())?;
-        for d in dlcs {
-            dlc::verify(d, &|f| p.at(0.8 + 0.2 * f, format!("Checking the DLC, {:.0}%", f * 100.0))).map_err(|e| e.message().to_owned())?;
-        }
-        mark(&mut state, paths, "verify", &dump_key);
+        dump::verify_romfs(game, &|f| p.at(f, format!("Checking the game's data, {:.0}%", f * 100.0))).map_err(|e| e.message().to_owned())?;
+        mark(&mut state, paths, "verify", &verify_key);
     }
     if stopped() {
         return stop();
@@ -224,7 +346,7 @@ pub fn run(paths: &Paths, game: &dump::Game, dlcs: &[dlc::Dlc], status: &Shared,
     // 2. the game's files
     let data = paths.data();
     let p = Progress::begin(status, "game", "Installing the game's files");
-    if done(&state, "game", &dump_key) && zakuro_fs::datadir::is_game_dir(&data) {
+    if done(&state, "game", &game_key) && zakuro_fs::datadir::is_game_dir(&data) {
         log::line("installed before");
     } else {
         state.set("done.game", "");
@@ -245,18 +367,21 @@ pub fn run(paths: &Paths, game: &dump::Game, dlcs: &[dlc::Dlc], status: &Shared,
         let tally = result.map_err(|e| format!("The game's files can't be installed: {}", crate::clean_error(&e.to_string())))?;
         log::line(format!("game: {} files, {} folders, {} MB", tally.files, tally.dirs, tally.bytes / 1_000_000));
         // the installer names the source in install.txt; it stays on this PC
-        mark(&mut state, paths, "game", &dump_key);
+        mark(&mut state, paths, "game", &game_key);
     }
     if stopped() {
         return stop();
     }
 
     // 3. the DLC
-    let dlc_key = format!("{}|{}", dlcs.iter().map(|d| file_key(&d.path)).collect::<Vec<_>>().join(";"), payload_key(paths));
+    let dlc_key = format!("{SETUP_VERSION}|{dlc_files}");
     let p = Progress::begin(status, "dlc", if dlcs.is_empty() { "No DLC" } else { "Installing the DLC" });
     if done(&state, "dlc", &dlc_key) {
         log::line("DLC as before");
     } else {
+        for d in dlcs {
+            dlc::verify(d, &|f| p.at(0.5 * f, format!("Checking the DLC, {:.0}%", f * 100.0))).map_err(|e| e.message().to_owned())?;
+        }
         let dlc_dir = data.join("dlc");
         // a Haiku folder picked as the DLC may be this very data/dlc
         let keep = dlcs.iter().any(|d| matches!(d.kind, dlc::Kind::Haiku) && d.path.starts_with(&dlc_dir));
@@ -264,7 +389,7 @@ pub fn run(paths: &Paths, game: &dump::Game, dlcs: &[dlc::Dlc], status: &Shared,
             remove_dir(&dlc_dir)?;
         }
         for (i, d) in dlcs.iter().enumerate() {
-            p.at(i as f32 / dlcs.len() as f32, format!("{} contents", d.contents.len()));
+            p.at(0.5 + 0.5 * i as f32 / dlcs.len() as f32, format!("{} contents", d.contents.len()));
             let said = dlc::install(d, &data).map_err(|e| format!("The DLC can't be installed: {e}"))?;
             log::line(format!("DLC {}: {said}", d.path.display()));
         }
@@ -286,11 +411,45 @@ pub fn run(paths: &Paths, game: &dump::Game, dlcs: &[dlc::Dlc], status: &Shared,
     if stopped() {
         return stop();
     }
+    let said = finish(paths, &mut state, status, cancel)?;
+    // versions: the version just set up is the one that plays
+    if paths.managed() {
+        if let Err(e) = crate::layout::set_active(&paths.root, version) {
+            log::line(format!("versions: the settings can't say {} plays ({e})", version.name()));
+        }
+    }
+    let took = started.elapsed().as_secs_f32();
+    log::line(format!("set up in {:.0} min {:.0} s: {said}", (took / 60.0).floor(), took % 60.0));
+    Ok(format!("Done in {} min {} s.", (took / 60.0).floor() as u32, (took % 60.0) as u32))
+}
+
+/// oneexe: what Haiku.exe does by itself when a new release (or an earlier
+/// Haiku's install) needs Haiku's files or the game's module made again:
+/// the game installed in data/ is all it reads.
+pub fn update(paths: &Paths, status: &Shared, cancel: &AtomicBool) -> Result<String, String> {
+    let started = Instant::now();
+    if !zakuro_fs::datadir::is_game_dir(&paths.data()) {
+        return Err("No game is installed yet: set Haiku up from your dump first.".into());
+    }
+    std::fs::create_dir_all(&paths.work).map_err(|e| format!("The folder {} can't be written ({e}). Put Haiku in a folder you can write to, such as one in your Documents.", paths.work.display()))?;
+    let mut state = State::load(paths);
+    let said = finish(paths, &mut state, status, cancel)?;
+    let took = started.elapsed().as_secs_f32();
+    log::line(format!("updated in {:.0} min {:.0} s: {said}", (took / 60.0).floor(), took % 60.0));
+    Ok(format!("Done in {} min {} s.", (took / 60.0).floor() as u32, (took % 60.0) as u32))
+}
+
+/// Haiku's game-derived files, and the game's module, each when what it is
+/// made of changed.
+fn finish(paths: &Paths, state: &mut State, status: &Shared, cancel: &AtomicBool) -> Result<String, String> {
+    let stopped = || cancel.load(Ordering::Relaxed);
+    let stop = || Err::<String, String>("Stopped. Start the build again to carry on where it stopped.".into());
+    let data = paths.data();
 
     // 4. Haiku's game-derived files
     let p = Progress::begin(status, "assets", "Making Haiku's own files from the game's");
-    let overrides = paths.work.join("overrides");
-    if done(&state, "assets", &dump_key) && paths.root.join("assets").is_dir() && overrides.join("amiibo_icons.c").is_file() {
+    let key = assets_key(paths);
+    if done(state, "assets", &key) && paths.assets().is_dir() && paths.amiibo().is_file() {
         log::line("made before");
     } else {
         let pack_bytes = std::fs::read(paths.setup.join("derived.pack")).map_err(|e| format!("setup/derived.pack is missing ({e}). Extract the whole Haiku download again."))?;
@@ -341,255 +500,53 @@ pub fn run(paths: &Paths, game: &dump::Game, dlcs: &[dlc::Dlc], status: &Shared,
                 .map_err(|e| format!("Haiku's files can't be made from your dump: {e}"))?
         };
         // the release's own assets (no game data) under the derived ones
-        let assets = paths.root.join("assets");
+        let assets = paths.assets();
         remove_dir(&assets)?;
         if paths.setup.join("assets").is_dir() {
             copy_dir(&paths.setup.join("assets"), &assets).map_err(|e| format!("copying Haiku's assets: {e}"))?;
         }
         copy_dir(&staging.join("assets"), &assets).map_err(|e| format!("copying Haiku's assets: {e}"))?;
-        // the recompiler's inputs: the overrides, and the one made here
-        remove_dir(&overrides)?;
-        copy_dir(&paths.setup.join("overrides"), &overrides).map_err(|e| format!("copying the overrides: {e}"))?;
-        copy_dir(&staging.join("overrides"), &overrides).map_err(|e| format!("copying the overrides: {e}"))?;
-        // eur: the overrides with the EUR game's addresses
-        if eur {
-            let n = crate::eur::translate_overrides(&overrides, &paths.setup.join("eur"))?;
-            log::line(format!("eur: {n} override files translated to the EUR addresses"));
-        }
-        // jpprep: and the Japanese game's, and its menus' font for Haiku's
-        // own menus (its kana and kanji), made from the dump
+        // oneexe: the amiibo icons, which the game's module carries (the
+        // overrides themselves are in Haiku.exe, for every region)
+        let icons = staging.join("overrides").join("amiibo_icons.c");
+        std::fs::copy(&icons, paths.amiibo()).map_err(|e| format!("The amiibo icons can't be made from your dump ({}: {e})", icons.display()))?;
+        // jpprep: the Japanese menus' font for Haiku's own menus (its kana
+        // and kanji), made from the dump
         if jpn {
             match crate::jpn::make_font(&data.join("romfs"), &assets) {
                 Ok(n) => log::line(format!("jpprep: the Japanese menus' font: {n} sheets")),
                 Err(e) => log::line(format!("jpprep: the Japanese menus' font can't be made ({e}): Haiku's menus show Latin letters only")),
             }
-            let n = crate::jpn::translate_overrides(&overrides, &paths.setup)?;
-            log::line(format!("jpprep: {n} override files translated to the Japanese addresses"));
         }
         remove_dir(&staging)?;
         log::line(format!("made {count} files"));
-        mark(&mut state, paths, "assets", &dump_key);
+        mark(state, paths, "assets", &key);
     }
     if stopped() {
         return stop();
     }
 
-    // Haiku.exe built from this dump by this setup: only the DLC changed
-    // (Change dump or DLC), so the code is as it was
-    if done(&state, "link", &dump_key) && paths.exe().is_file() {
-        log::line("Haiku.exe is built from this dump already");
-        state.set("built", format!("{}|{}", dump_key, file_key(&paths.exe())));
-        state.save(paths);
-        let mut s = status.lock().unwrap();
-        s.percent = 100.0;
-        s.step = "Done".into();
-        s.detail.clear();
-        let took = started.elapsed().as_secs_f32();
-        return Ok(format!("Done in {} min {} s.", (took / 60.0).floor() as u32, (took % 60.0) as u32));
-    }
-
-    // 5. the game's code as C
-    let p = Progress::begin(status, "generate", "Recompiling the game's code to C");
-    let code = paths.work.join("code");
-    let regenerated = paths.work.join("regenerated");
-    p.at(0.05, "Reading the game's code");
-    // the recompiler also reads hints a run of 3dsrecomp left in APPDATA;
-    // none from outside may change the code
-    std::env::set_var("APPDATA", paths.work.join("appdata"));
-    remove_dir(&regenerated)?;
-    let events = |e: recomp3ds::build::Event| log::line(format!("recomp: {e:?}"));
-    let generated = std::thread::scope(|scope| {
-        let job = scope.spawn(|| recomp3ds::build::generate(&game.path, |_| regenerated.clone(), Some(&overrides), recomp3ds::Mods::default(), &events));
-        let t0 = Instant::now();
-        while !job.is_finished() {
-            // about a minute on a fast machine
-            let f = (t0.elapsed().as_secs_f32() / 75.0).min(0.95);
-            p.at(f, "Writing the C");
-            std::thread::sleep(std::time::Duration::from_millis(150));
+    // 5-7. the game's module
+    match crate::module::check(&paths.module_dir(), installed_title(&data)) {
+        Ok(_) => {
+            log::line("the game's module is built for this Haiku already");
+            let mut s = status.lock().unwrap();
+            s.percent = 100.0;
+            s.step = "Done".into();
+            s.detail.clear();
+            Ok("Haiku's files are made; the game's code was built already.".into())
         }
-        job.join().unwrap()
-    })
-    .map_err(|e| format!("The game's code can't be recompiled: {}", crate::clean_error(&e)))?;
-    // only files that changed are copied over, so their objects stay
-    std::fs::create_dir_all(&code).map_err(|e| e.to_string())?;
-    let mut changed = Vec::new();
-    let mut folders = vec![(regenerated.clone(), code.clone())];
-    while let Some((from, to)) = folders.pop() {
-        std::fs::create_dir_all(&to).map_err(|e| e.to_string())?;
-        for entry in std::fs::read_dir(&from).map_err(|e| e.to_string())? {
-            let entry = entry.map_err(|e| e.to_string())?;
-            let target = to.join(entry.file_name());
-            if entry.file_type().map_err(|e| e.to_string())?.is_dir() {
-                folders.push((entry.path(), target));
-                continue;
-            }
-            let bytes = std::fs::read(entry.path()).map_err(|e| e.to_string())?;
-            if std::fs::read(&target).ok().as_deref() != Some(bytes.as_slice()) {
-                std::fs::write(&target, &bytes).map_err(|e| e.to_string())?;
-                changed.push(target);
-            }
+        Err(why) => {
+            log::line(format!("module: {why}: building it"));
+            let said = crate::module::build(&data, &paths.work.join("module"), &paths.module_dir(), Some(&paths.amiibo()), &paths.setup, status, cancel)?;
+            state.set("built", crate::module::Note::read(&paths.module_dir().join(crate::module::NOTE)).map(|n| n.stamp).unwrap_or_default());
+            state.save(paths);
+            let mut s = status.lock().unwrap();
+            s.percent = 100.0;
+            s.step = "Done".into();
+            s.detail.clear();
+            Ok(said)
         }
-    }
-    remove_dir(&regenerated)?;
-    let headers_changed = changed.iter().any(|p| p.extension().is_some_and(|e| e == "h"));
-    let pending: Vec<String> = generated
-        .sources
-        .iter()
-        .filter(|source| {
-            let path = code.join(source);
-            let modified = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
-            let stale = modified(&path.with_extension("o")).zip(modified(&path)).is_none_or(|(object, source)| object < source);
-            headers_changed || changed.contains(&path) || stale
-        })
-        .cloned()
-        .collect();
-    log::line(format!("{} C files, {} changed, {} to compile", generated.sources.len(), changed.len(), pending.len()));
-    if stopped() {
-        return stop();
-    }
-
-    // 6. compiling
-    let p = Progress::begin(status, "compile", "Compiling the game's code");
-    let tools = toolchain::Toolchain::prepare(&paths.setup, &paths.work)?;
-    let jobs = toolchain::jobs();
-    tools.enter(jobs);
-    log::line(format!("compiler {} ({} at once), temporary files in {}", tools.gcc.display(), jobs, tools.tmp.display()));
-    crate::spawn::quiet();
-    let compiler = recomp3ds::compile::check(None).map_err(|e| format!("The bundled compiler doesn't run: {e}"))?;
-    let total = pending.len();
-    let t0 = Instant::now();
-    let progress = |done: usize, total: usize| {
-        let eta = if done > 0 { t0.elapsed().as_secs_f32() / done as f32 * (total - done) as f32 } else { 0.0 };
-        p.at(done as f32 / total.max(1) as f32, format!("{done} of {total} files{}", if done > 2 { format!(", about {} min left", (eta / 60.0).ceil()) } else { String::new() }));
-        !cancel.load(Ordering::Relaxed)
-    };
-    if total > 0 {
-        // Cancel stops the compilers running now too (compile::cancel_running)
-        recomp3ds::compile::uncancel();
-        let finished = AtomicBool::new(false);
-        let result = std::thread::scope(|scope| {
-            scope.spawn(|| {
-                while !finished.load(Ordering::Relaxed) {
-                    if cancel.load(Ordering::Relaxed) {
-                        recomp3ds::compile::cancel_running();
-                        break;
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(100));
-                }
-            });
-            let result = recomp3ds::compile::objects(&compiler, &code, &pending, &progress, true);
-            finished.store(true, Ordering::Relaxed);
-            result
-        });
-        recomp3ds::compile::uncancel();
-        result.map_err(|e| {
-            if e == "stopped" {
-                "Stopped. Start the build again to carry on where it stopped.".to_string()
-            } else {
-                format!("Compiling the game's code failed ({e}). The log has the compiler's messages.")
-            }
-        })?;
-    }
-    log::line(format!("compiled {total} files in {:.0} s", t0.elapsed().as_secs_f32()));
-    if stopped() {
-        return stop();
-    }
-
-    // 7. linking
-    let p = Progress::begin(status, "link", "Linking Haiku.exe");
-    p.at(0.05, "Packing the game's code");
-    let library = code.join("librecomp.a");
-    let _ = std::fs::remove_file(&library);
-    let objects: Vec<String> = generated.sources.iter().map(|s| Path::new(s).with_extension("o").to_string_lossy().replace('\\', "/")).collect();
-    let mut ar = crate::spawn::command(&tools.ar);
-    ar.current_dir(&code).arg("rcs").arg("librecomp.a").args(&objects);
-    let status_ar = crate::spawn::run(ar, "ar");
-    if !status_ar.is_ok_and(|s| s.success()) {
-        return Err("Packing the game's code failed. The log has the tool's messages.".into());
-    }
-    p.at(0.2, "Linking");
-    let engine = paths.setup.join("engine");
-    // linked as Haiku.exe (the name the exe holds) in a folder of its own,
-    // then moved in place
-    let partial = paths.work.join("link").join("Haiku.exe");
-    remove_dir(&paths.work.join("link"))?;
-    std::fs::create_dir_all(paths.work.join("link")).map_err(|e| e.to_string())?;
-    link(&tools, &engine, &code, &partial, &paths.work)?;
-    p.at(0.9, "Putting Haiku.exe in place");
-    let exe = paths.exe();
-    if exe.exists() {
-        std::fs::remove_file(&exe).map_err(|e| format!("The old Haiku.exe can't be replaced ({e}). Close Haiku if it is running and try again."))?;
-    }
-    std::fs::rename(&partial, &exe).map_err(|e| format!("Haiku.exe can't be put in place ({e})."))?;
-    for dll in ["SDL3.dll"] {
-        let from = paths.setup.join(dll);
-        if from.is_file() {
-            std::fs::copy(&from, paths.root.join(dll)).map_err(|e| format!("{dll} can't be copied ({e}). Close Haiku if it is running and try again."))?;
-        }
-    }
-    state.set("built", format!("{}|{}", dump_key, file_key(&exe)));
-    state.set("done.link", dump_key.clone());
-    state.save(paths);
-    drop(tools);
-    // the C and the objects are 0.5 GB; a rebuild makes them again
-    if std::env::var("HAIKU_SETUP_KEEP").map_or(true, |v| v != "1") {
-        remove_dir(&code)?;
-        let _ = remove_dir(&paths.work.join("tmp"));
-        let _ = remove_dir(&paths.work.join("appdata"));
-        let _ = remove_dir(&paths.work.join("link"));
-    }
-    {
-        let mut s = status.lock().unwrap();
-        s.percent = 100.0;
-        s.step = "Done".into();
-        s.detail.clear();
-    }
-    let took = started.elapsed().as_secs_f32();
-    log::line(format!("built {} in {:.0} min {:.0} s", exe.display(), (took / 60.0).floor(), took % 60.0));
-    Ok(format!("Built in {} min {} s.", (took / 60.0).floor() as u32, (took % 60.0) as u32))
-}
-
-/// links the prebuilt engine and the game's code: engine/link.txt holds
-/// the linker's arguments as cargo gave them (one per line, paths relative
-/// to engine/), with @RECOMP@ for the folder librecomp.a is in and @OUT@
-/// for the program. gcc runs in engine/ and reads them from a response file.
-fn link(tools: &toolchain::Toolchain, engine: &Path, code: &Path, out: &Path, work: &Path) -> Result<(), String> {
-    let template = std::fs::read_to_string(engine.join("link.txt")).map_err(|e| format!("setup/engine/link.txt is missing ({e}). Extract the whole Haiku download again."))?;
-    let relative = |to: &Path| -> String { relative_path(engine, to).to_string_lossy().replace('\\', "/") };
-    let recomp = relative(code);
-    let output = relative(out);
-    let mut rsp = String::new();
-    // gcc looks for its startup files and libraries from the long path of
-    // gcc.exe, which a folder named outside the ANSI code page breaks: they
-    // are named here from the ASCII path the toolchain runs from
-    if let Some(tc) = tools.bin.parent() {
-        let tc = tc.to_string_lossy().replace('\\', "/");
-        for arg in [
-            format!("-B{tc}/lib/gcc/x86_64-w64-mingw32/16.2.0/"),
-            format!("-B{tc}/lib/"),
-            format!("-L{tc}/lib/gcc/x86_64-w64-mingw32/16.2.0"),
-            format!("-L{tc}/lib"),
-            format!("--sysroot={tc}"),
-        ] {
-            rsp += &format!("\"{arg}\"\n");
-        }
-    }
-    for arg in template.lines().filter(|l| !l.is_empty()) {
-        let arg = arg.replace("@RECOMP@", &recomp).replace("@OUT@", &output);
-        // the response file's quoting: backslashes and quotes escaped
-        rsp += &format!("\"{}\"\n", arg.replace('\\', "\\\\").replace('"', "\\\""));
-    }
-    let rsp_path = work.join("link.rsp");
-    std::fs::write(&rsp_path, rsp).map_err(|e| e.to_string())?;
-    let rsp_rel = relative(&rsp_path);
-    log::line(format!("linking in {} with @{rsp_rel}", engine.display()));
-    let mut gcc = crate::spawn::command(&tools.gcc);
-    gcc.current_dir(engine).arg(format!("@{rsp_rel}"));
-    let status = crate::spawn::run(gcc, "link");
-    match status {
-        Ok(s) if s.success() && out.is_file() => Ok(()),
-        Ok(s) => Err(format!("Linking Haiku.exe failed ({s}). The log has the linker's messages.")),
-        Err(e) => Err(format!("The linker doesn't run ({e}).")),
     }
 }
 

@@ -177,7 +177,7 @@ impl Module {
     pub fn program(&self, bytes: &[u8], imported: &[u32]) -> Option<Program> {
         let segment = self.segments.iter().find(|s| s.kind == CODE && s.size > 0)?;
         let range = segment.offset as usize..(segment.offset + segment.size) as usize;
-        let mut text = image::Segment { base: segment.offset, bytes: bytes.get(range)?.to_vec() };
+        let mut text = image::Segment::new(segment.offset, bytes.get(range)?.to_vec());
 
         let mut seeds: Vec<_> = self.code_exports().into_iter().map(|address| (address, Source::Export)).collect();
         seeds.extend(imported.iter().map(|&address| (address, Source::Import)));

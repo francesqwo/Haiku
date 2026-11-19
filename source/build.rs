@@ -2,25 +2,20 @@ use std::env::var;
 
 #[path = "icon.rs"]
 mod icon; // builder
+#[path = "hosted_build.rs"]
+mod hosted_build; // oneexe
 
 fn main() {
     let dir = var("CARGO_MANIFEST_DIR").unwrap();
     let family = var("CARGO_CFG_TARGET_FAMILY").unwrap_or_default();
     let env = var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
-    // worktrees share the one prebuilt archive: FATES_RECOMP_DIR points at
-    // the directory holding librecomp.a when it is not beside this file
-    println!("cargo:rerun-if-env-changed=FATES_RECOMP_DIR");
-    let code = var("FATES_RECOMP_DIR").unwrap_or_else(|_| format!("{dir}/code"));
-    println!("cargo:rerun-if-changed={code}/librecomp.a");
-    if env == "msvc" {
-        // MSVC's linker looks for recomp.lib, the same archive by its name
-        let out = var("OUT_DIR").unwrap();
-        std::fs::copy(format!("{code}/librecomp.a"), format!("{out}/recomp.lib")).unwrap();
-        println!("cargo:rustc-link-search=native={out}");
-    } else {
-        println!("cargo:rustc-link-search=native={code}");
-    }
-    println!("cargo:rustc-link-lib=static=recomp");
+    // oneexe: the game's code is no longer linked in. The player's PC
+    // recompiles it into a module of its own (data/code/game.dll, made by
+    // the setup in this exe), which Haiku.exe loads and binds at start
+    // (src/module.rs, src/hosted.rs). Haiku's own overrides are compiled
+    // here, into Haiku.exe, with every game address a variable the binding
+    // fills for the module's region (hosted_build.rs).
+    hosted(&dir);
     // native-final: FATES_LINK_MAP=<file> writes the linker's map, which
     // lists every function linked into Haiku.exe (dev/native-final/linked.py)
     println!("cargo:rerun-if-env-changed=FATES_LINK_MAP");
@@ -90,3 +85,87 @@ fn main() {
         }
     }
 }
+
+/// oneexe: Haiku's overrides, compiled into Haiku.exe (hosted_build.rs).
+fn hosted(dir: &str) {
+    let out = std::path::PathBuf::from(var("OUT_DIR").unwrap());
+    let overrides = std::path::Path::new(dir).join("..").join("overrides");
+    let recomp = std::path::Path::new(dir).join("..").join("vendor").join("3dsrecomp");
+    println!("cargo:rerun-if-changed={}", overrides.display());
+    let scan = hosted_build::scan(&overrides);
+    for (name, _) in &scan.files {
+        println!("cargo:rerun-if-changed={}", overrides.join(name).display());
+    }
+    let ov = out.join("ov");
+    let _ = std::fs::remove_dir_all(&ov);
+    std::fs::create_dir_all(&ov).unwrap();
+    std::fs::copy(recomp.join("abi").join("recomp.h"), ov.join("recomp.h")).unwrap();
+    std::fs::write(ov.join("overrides.h"), hosted_build::overrides_h(&scan)).unwrap();
+    let mut sources = vec!["haiku_hosted.c".to_owned()];
+    std::fs::write(ov.join("haiku_hosted.c"), hosted_build::hosted_c(&scan)).unwrap();
+    for (name, text) in &scan.files {
+        std::fs::write(ov.join(name), text).unwrap();
+        sources.push(name.clone());
+    }
+    // the flags 3dsrecomp compiles generated code and overrides with
+    // (compile.rs FLAGS): no fused multiply-add, as the guest rounds
+    const FLAGS: &[&str] = &["-O2", "-ffp-contract=off", "-fno-math-errno", "-w", "-DRECOMP_IMPORTED=1"];
+    let mut rerun = Vec::new();
+    let recompiler = hosted_build::recompiler_hash(&recomp, &mut rerun);
+    for path in rerun {
+        println!("cargo:rerun-if-changed={path}");
+    }
+    std::fs::write(out.join("hosted_interface.rs"), hosted_build::interface_rs(&scan, recompiler, FLAGS)).unwrap();
+    println!("cargo:rerun-if-env-changed=HAIKU_CC");
+    let cc = var("HAIKU_CC").unwrap_or_else(|_| "gcc".to_owned());
+    let jobs: usize = var("NUM_JOBS").ok().and_then(|n| n.parse().ok()).unwrap_or(4).clamp(1, 8);
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let failed = std::sync::Mutex::new(Vec::new());
+    std::thread::scope(|scope| {
+        for _ in 0..jobs {
+            scope.spawn(|| loop {
+                let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let Some(source) = sources.get(i) else { break };
+                let object = ov.join(source).with_extension("o");
+                let output = std::process::Command::new(&cc)
+                    .args(FLAGS)
+                    .arg(format!("-ffile-prefix-map={}=haiku", ov.display()))
+                    .arg("-I")
+                    .arg(&ov)
+                    .arg("-c")
+                    .arg(ov.join(source))
+                    .arg("-o")
+                    .arg(&object)
+                    .output();
+                match output {
+                    Ok(o) if o.status.success() => {}
+                    Ok(o) => failed.lock().unwrap().push(format!("{source}: {}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr))),
+                    Err(e) => failed.lock().unwrap().push(format!("{source}: {cc} doesn't run ({e})")),
+                }
+            });
+        }
+    });
+    let failed = failed.into_inner().unwrap();
+    if !failed.is_empty() {
+        panic!("compiling Haiku's overrides (oneexe) failed:
+{}", failed.join("
+"));
+    }
+    // an archive, linked where librecomp.a was (before the C runtime the
+    // overrides call), every object of it kept: the exe reaches the
+    // overrides through haiku_hosted.c's tables
+    let archive = out.join("libhaikuov.a");
+    let _ = std::fs::remove_file(&archive);
+    let ar = var("HAIKU_AR").unwrap_or_else(|_| "ar".to_owned());
+    let status = std::process::Command::new(&ar)
+        .arg("rcs")
+        .arg(&archive)
+        .args(sources.iter().map(|source| ov.join(source).with_extension("o")))
+        .status()
+        .unwrap_or_else(|e| panic!("{ar} doesn't run ({e})"));
+    assert!(status.success(), "archiving Haiku's overrides failed");
+    println!("cargo:rerun-if-env-changed=HAIKU_AR");
+    println!("cargo:rustc-link-search=native={}", out.display());
+    println!("cargo:rustc-link-lib=static:+whole-archive=haikuov");
+}
+

@@ -91,6 +91,9 @@ fn schedule(system: &mut System) -> bool {
     }
     let mut next = pick_next(kernel);
     kernel.all_blocked = next.is_none();
+    // savemods: new threads whose maker hasn't let the core go since (see
+    // Newborn), kept from the starvation rule and Aging
+    let held = if HOLDING.load(std::sync::atomic::Ordering::Relaxed) { NEWBORN.lock().unwrap().held(&kernel.threads) } else { Vec::new() };
     if let Some(chosen) = next {
         let thread = &mut kernel.threads[chosen as usize];
         if thread.waited {
@@ -101,14 +104,18 @@ fn schedule(system: &mut System) -> bool {
             let priority = thread.priority;
             kernel.relief = !kernel.relief;
             if kernel.relief {
-                next = pick_other(kernel, chosen, priority).or(next);
+                next = pick_other(kernel, chosen, priority, &held).or(next);
             }
         }
     }
     // savehang: in real time, a thread kept from the core too long gets a
     // turn, whatever runs above it (see Aging)
     if super::rt::realtime() {
-        next = AGING.lock().unwrap().pass(&kernel.threads, tick, next);
+        next = AGING.lock().unwrap().pass_holding(&kernel.threads, tick, next, &held);
+    }
+    // savemods: one that priority itself picks runs, as on the console
+    if let Some(chosen) = next.filter(|chosen| held.contains(chosen)) {
+        NEWBORN.lock().unwrap().ran(chosen);
     }
     if let Some(chosen) = next {
         let thread = &mut kernel.threads[chosen as usize];
@@ -194,6 +201,13 @@ impl Aging {
     /// one scheduling pass: the thread to run, given the one the policy
     /// picked.
     pub fn pass(&mut self, threads: &[crate::kernel::thread::Thread], tick: u64, picked: Option<ThreadId>) -> Option<ThreadId> {
+        self.pass_holding(threads, tick, picked, &[])
+    }
+
+    /// savemods: pass, never giving a turn to the threads in held (new
+    /// threads whose maker hasn't let the core go since it made them, see
+    /// Newborn); they don't age until they are let go.
+    pub fn pass_holding(&mut self, threads: &[crate::kernel::thread::Thread], tick: u64, picked: Option<ThreadId>, held: &[ThreadId]) -> Option<ThreadId> {
         self.waiting_since.resize(threads.len(), None);
         let mut next = picked;
         match self.turn {
@@ -201,7 +215,7 @@ impl Aging {
             _ => {
                 self.turn = None;
                 let oldest = (0..threads.len())
-                    .filter(|&id| Some(id as ThreadId) != picked && threads[id].is_runnable())
+                    .filter(|&id| Some(id as ThreadId) != picked && threads[id].is_runnable() && !held.contains(&(id as ThreadId)))
                     .filter_map(|id| self.waiting_since[id].filter(|&since| tick.saturating_sub(since) >= AGE_TICKS).map(|since| (since, id)))
                     .min();
                 if let Some((_, id)) = oldest {
@@ -212,7 +226,7 @@ impl Aging {
             }
         }
         for (id, thread) in threads.iter().enumerate() {
-            let waiting = thread.is_runnable() && Some(id as ThreadId) != next;
+            let waiting = thread.is_runnable() && Some(id as ThreadId) != next && !held.contains(&(id as ThreadId));
             let since = &mut self.waiting_since[id];
             *since = if waiting { Some(since.unwrap_or(tick)) } else { None };
         }
@@ -220,13 +234,83 @@ impl Aging {
     }
 }
 
-/// the most urgent runnable thread besides one, at its priority or below.
-fn pick_other(kernel: &Kernel, chosen: ThreadId, priority: u32) -> Option<ThreadId> {
+/// savemods (GitHub issue #10): a new thread doesn't run before the thread
+/// that made it lets the core go, when it isn't more urgent than its maker.
+///
+/// On the console a thread made at a lower priority than its maker (or the
+/// same) first runs once the maker waits: strict priority. The game counts
+/// on that. Backup::Initialize (0x00105580) starts the Backup controller,
+/// the thread at 63 that reads and writes every save file, and only then
+/// clears the controller's stop flag (+0xCC), which the controller looks at
+/// before each job. The controller's 0xD0 bytes come from the heap, so
+/// until that store the flag holds whatever was there before. The
+/// starvation rule (relief) and Aging (savehang) both give the core to a
+/// lower thread when the one above has run long without waiting, and in
+/// real time that is measured on the wall clock: a boot that is slow there
+/// (mods laid over the files, a code mod's module, texture packs, a cold
+/// disk cache, a busy PC) has main past that mark at the very
+/// svcCreateThread. The controller then ran first, found a stale nonzero
+/// flag and returned: the thread was gone, no save file was ever read
+/// again, and every slot of the save and load lists spun forever. Whether
+/// the next start did the same was down to timing, which is why turning a
+/// mod off and on, with restarts in between, seemed to fix it.
+///
+/// So a new thread no more urgent than its maker is held: neither rule
+/// picks it until its maker waits or ends, or priority itself picks it.
+/// Every other thread, and the order once the maker has waited, is as
+/// before.
+#[derive(Default)]
+pub struct Newborn {
+    /// (the new thread's slot and guest id, its maker's slot and guest id)
+    held: Vec<(ThreadId, u32, ThreadId, u32)>,
+}
+
+pub(crate) static NEWBORN: std::sync::Mutex<Newborn> = std::sync::Mutex::new(Newborn { held: Vec::new() });
+/// whether any thread is held, so the passes in between don't lock.
+static HOLDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+impl Newborn {
+    /// a thread was made, by maker (the thread that was running).
+    pub fn made(&mut self, threads: &[crate::kernel::thread::Thread], new: ThreadId, maker: Option<ThreadId>) {
+        self.held.retain(|&(id, ..)| id != new);
+        let Some(born) = threads.get(new as usize) else { return };
+        let Some((maker, made_by)) = maker.and_then(|maker| Some((maker, threads.get(maker as usize)?))) else { return };
+        // a more urgent one runs at once by priority, as on the console
+        if maker != new && born.priority >= made_by.priority {
+            self.held.push((new, born.guest_id, maker, made_by.guest_id));
+        }
+        HOLDING.store(!self.held.is_empty(), std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// the threads held now; one whose maker has waited or ended since (or
+    /// that ended itself) is let go.
+    pub fn held(&mut self, threads: &[crate::kernel::thread::Thread]) -> Vec<ThreadId> {
+        if self.held.is_empty() {
+            return Vec::new();
+        }
+        let same = |id: ThreadId, guest: u32| threads.get(id as usize).filter(|thread| thread.guest_id == guest);
+        self.held.retain(|&(id, guest, maker, maker_guest)| {
+            same(id, guest).is_some_and(|thread| thread.status != ThreadStatus::Dead) && same(maker, maker_guest).is_some_and(|thread| thread.is_runnable())
+        });
+        HOLDING.store(!self.held.is_empty(), std::sync::atomic::Ordering::Relaxed);
+        self.held.iter().map(|&(id, ..)| id).collect()
+    }
+
+    /// priority itself picked a held thread: it is let go.
+    pub fn ran(&mut self, id: ThreadId) {
+        self.held.retain(|&(held, ..)| held != id);
+        HOLDING.store(!self.held.is_empty(), std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// the most urgent runnable thread besides one, at its priority or below,
+/// and not held (savemods: see Newborn).
+fn pick_other(kernel: &Kernel, chosen: ThreadId, priority: u32, held: &[ThreadId]) -> Option<ThreadId> {
     kernel
         .threads
         .iter()
         .enumerate()
-        .filter(|&(id, t)| id as ThreadId != chosen && t.is_runnable() && t.priority >= priority)
+        .filter(|&(id, t)| id as ThreadId != chosen && t.is_runnable() && t.priority >= priority && !held.contains(&(id as ThreadId)))
         .min_by_key(|(_, t)| t.priority)
         .map(|(id, _)| id as ThreadId)
 }
@@ -787,7 +871,9 @@ fn create_thread(system: &mut System) {
     let [priority, entry, arg, stack_top, processor_id] =
         [system.cpu.regs[0], system.cpu.regs[1], system.cpu.regs[2], system.cpu.regs[3], system.cpu.regs[4]];
     let name = format!("thread{}", system.kernel.next_guest_id);
+    let maker = system.kernel.current_thread;
     let id = system.kernel.create_thread(name, entry, stack_top, arg, priority, processor_id as i32);
+    NEWBORN.lock().unwrap().made(&system.kernel.threads, id, maker); // savemods
     // the new thread's TLS page has to exist before it runs
     system.map_tls_page(id);
     let handle = system.kernel.thread_handle(id);

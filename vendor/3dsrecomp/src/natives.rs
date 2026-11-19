@@ -223,7 +223,7 @@ mod tests {
             bytes[uidiv + at..uidiv + at + 4].copy_from_slice(&((word & 0xFF00_0000) | offset).to_le_bytes());
         }
         let addresses = [uldiv, ldiv, idiv, uidiv].map(|at| BASE + at as u32);
-        (Segment { base: BASE, bytes }, addresses)
+        (Segment::new(BASE, bytes), addresses)
     }
 
     #[test]

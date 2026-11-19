@@ -45,7 +45,7 @@ pub fn dispatch(system: &mut System, number: u32) {
     }
     // gate: a request to an online service, answered offline natively, or a
     // library-applet request to APT
-    if number == 0x32 && (super::net::request(system) || super::applet::request(system) || super::local::request(system)) {
+    if number == 0x32 && (super::net::request(system) || super::applet::request(system) || super::local::request(system) || super::irrst::request(system)) {
         return;
     }
     unanswered(system, number);

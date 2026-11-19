@@ -518,19 +518,25 @@ impl Settings {
                     log::warn!("could not read {}, {error}, using the defaults, it is kept as {}", path.display(), aside.display());
                     Settings::default()
                 });
+                crate::haiku_versions::settings_loaded(&mut settings); // versions2: the playing version's own
                 // bottom2: settings from older versions, brought up once
                 if settings.pc.migrate() {
                     settings.save();
                 }
                 settings
             }
-            Err(_) => Settings::default(),
+            Err(_) => {
+                let mut settings = Settings::default();
+                crate::haiku_versions::settings_loaded(&mut settings); // versions2
+                settings
+            }
         }
     }
 
     pub fn save(&self) {
         let Some(path) = path() else { return };
-        let written = toml::to_string_pretty(self)
+        let file = crate::haiku_versions::settings_saved(self); // versions2: into the playing version's own
+        let written = toml::to_string_pretty(&*file)
             .map_err(|error| error.to_string())
             .and_then(|text| write(&path, &text).map_err(|error| error.to_string()));
         if let Err(error) = written {
@@ -1018,6 +1024,30 @@ pub struct PcSettings {
     // too), Zig downloaded once, or the compiler that came with Haiku.
     #[serde(deserialize_with = "or_default")]
     pub code_mods_compiler: CodeModsCompiler,
+    // versions: the version of the game Haiku plays when more than one is
+    // installed ("usa", "eur" or "jpn"; empty: the first installed). Haiku.exe
+    // reads it at start (haiku-setup's layout.rs); Options, Interface, Game
+    // Version sets it, and a restart applies it.
+    pub game_version: String,
+    // versions2: what each version of the game keeps of its own, by its
+    // tag ("usa", "eur", "jpn"): the game language and the voices
+    // ([pc.per_version.<tag>]). The version playing reads its entry at
+    // start into `language` and `voices` above (haiku_versions.rs), which
+    // the options change as before; a save writes them back into its
+    // entry, the shared lines kept as they were (the default for a version
+    // without an entry). Only in a Haiku folder with games\<version>\.
+    pub per_version: std::collections::BTreeMap<String, VersionSettings>,
+}
+
+/// versions2: one version's own settings (PcSettings::per_version); each
+/// left out follows the shared one.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct VersionSettings {
+    #[serde(deserialize_with = "or_default")]
+    pub language: Option<Language>,
+    #[serde(deserialize_with = "or_default")]
+    pub voices: Option<Voices>,
 }
 
 /// pulse: how many charges of Divine Pulse a map gives.
@@ -1279,6 +1309,8 @@ impl Default for PcSettings {
             voices: Voices::English, // jpvoice
             japanese_english_menus: false, // jpprep
             code_mods_compiler: CodeModsCompiler::Ask, // zigdl
+            game_version: String::new(), // versions
+            per_version: std::collections::BTreeMap::new(), // versions2
         }
     }
 }

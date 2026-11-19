@@ -234,6 +234,29 @@ pub struct Unit<'a> {
 /// contents. the overrides take the place of the functions they replace,
 /// which overrides.h lets them still call.
 pub fn generate(units: &[Unit], overrides: &[Override]) -> Vec<(String, String)> {
+    generate_named(units, overrides, &[]).0
+}
+
+/// oneexe: what a host that links the overrides in itself needs to know of
+/// the executable's generated code: for each override, whether there is a
+/// generated function for its original (overrides.h's original_ wrapper
+/// then exists); and for each address asked for, the generated C function
+/// that runs it (as its code was generated, before any override took the
+/// address), which the host's overrides call by name.
+#[derive(Debug, Default, Clone)]
+pub struct Named {
+    /// the overrides of the executable whose original_ wrapper exists, by
+    /// address (bit 0 set for Thumb).
+    pub originals: BTreeSet<u32>,
+    /// the C function for each address asked for, None when no function
+    /// runs it.
+    pub functions: Vec<(u32, Option<String>)>,
+}
+
+/// generate, and the names of the executable's functions at wanted (bit 0
+/// set for Thumb), see Named.
+pub fn generate_named(units: &[Unit], overrides: &[Override], wanted: &[u32]) -> (Vec<(String, String)>, Named) {
+    let mut named = Named::default();
     let mut files = vec![("recomp.h".to_owned(), HEADER.to_owned())];
     let mut sources: Vec<String> = Vec::new();
     let mut source = String::new();
@@ -284,6 +307,15 @@ pub fn generate(units: &[Unit], overrides: &[Override]) -> Vec<(String, String)>
             emit!(originals, "    {original}(ctx);");
             emit!(originals, "}}\n");
             original_headers.insert(header.clone());
+        }
+
+        // oneexe: the names a host linking the overrides in needs
+        if unit.module.is_none() {
+            named.originals = original_of.keys().copied().collect();
+            named.functions = wanted
+                .iter()
+                .map(|&key| (key, original_of.get(&key).or_else(|| names.get(&key)).filter(|name| !name.starts_with("override_")).cloned()))
+                .collect();
         }
 
         let mut prototypes = String::new();
@@ -396,7 +428,7 @@ pub fn generate(units: &[Unit], overrides: &[Override]) -> Vec<(String, String)>
         files.push(("overrides.h".to_owned(), header));
     }
     files.extend(sources.into_iter().enumerate().map(|(i, source)| (format!("code{i:03}.c"), source)));
-    files
+    (files, named)
 }
 
 /// the stretches of code a function was made from, as runs of instructions
@@ -631,7 +663,7 @@ mod tests {
     /// the files for ARM code at BASE, entered at its start.
     fn files(words: &[u32], overrides: &[Override]) -> BTreeMap<String, String> {
         let program = Program {
-            text: Segment { base: BASE, bytes: words.iter().flat_map(|w| w.to_le_bytes()).collect() },
+            text: Segment::new(BASE, words.iter().flat_map(|w| w.to_le_bytes()).collect()),
             seeds: vec![(BASE, Source::Entry)],
             slots: None,
         };
@@ -738,7 +770,7 @@ mod tests {
     #[test]
     fn units_that_share_a_file_compile() {
         let program = Program {
-            text: Segment { base: BASE, bytes: [0xEB00_0000u32, 0xE12F_FF1E, 0xE12F_FF1E].iter().flat_map(|w| w.to_le_bytes()).collect() },
+            text: Segment::new(BASE, [0xEB00_0000u32, 0xE12F_FF1E, 0xE12F_FF1E].iter().flat_map(|w| w.to_le_bytes()).collect()),
             seeds: vec![(BASE, Source::Entry)],
             slots: None,
         };

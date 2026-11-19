@@ -490,6 +490,14 @@ fn confirm_text(confirm: &Confirm, pending: bool) -> String {
         // qol: the same dialog asks before Exit to Desktop
         return "Exit to the desktop? Anything you haven't saved will be lost.".to_owned();
     }
+    if crate::haiku_setup_entry::asking() {
+        // oneexe: and before Haiku Setup
+        return "Close the game and open Haiku Setup? Anything you haven't saved will be lost.".to_owned();
+    }
+    if crate::haiku_versions::asking() {
+        // versions: and before the restart that plays another version
+        return "Restart the game with the version as set? Anything you haven't saved will be lost.".to_owned();
+    }
     if crate::haiku_voices::asking() {
         // jpvoice: and before the restart that changes the voices
         return "Restart the game with the voices as set? Anything you haven't saved will be lost.".to_owned();

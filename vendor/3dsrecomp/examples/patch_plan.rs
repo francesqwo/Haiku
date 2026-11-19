@@ -21,7 +21,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .collect();
     let started = std::time::Instant::now();
-    let program = patch::program(&exheader, &code, &changed);
+    // vow: with the game's own exheader (Haiku writes it too), code may run
+    // in the pages the mod's adds past .data and .bss
+    let executable = match std::fs::read(dir.join("game-exheader.bin")) {
+        Ok(game) => patch::added_pages(&recomp3ds::rom::ExHeader::read(&game), &exheader),
+        Err(_) => Vec::new(),
+    };
+    for &(start, end) in &executable {
+        println!("executable 0x{start:08X}..0x{end:08X}");
+    }
+    let program = patch::program_with(&exheader, &code, &changed, &executable);
     let (made, program) = patch::plan(&base, program, &changed);
     println!(
         "{} functions changed, {} to recompile, {} new instructions, {} entries with no code now, {} of Haiku's own replaced, {} holes, {} dead ends, {:.1} s",
@@ -124,6 +133,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     // the C, as Haiku would write it
     match patch::source(&made, &program, &base, base.digest(), 0) {
+        Ok(module) if std::env::var("PLAN_LEFT").is_ok() => {
+            // vow: each instruction left to the host, and the function holding it
+            for &at in &module.left_to_host {
+                let holder = made.functions.iter().find(|(_, f)| f.instructions.binary_search(&at).is_ok());
+                println!("left 0x{at:08X} in {:?}", holder.map(|(entry, f)| (format!("0x{entry:08X}"), f.mode, f.source)));
+            }
+        }
         Ok(module) => println!(
             "source: {} files, {} lines; {} instructions left to the host{}",
             module.files.len(),

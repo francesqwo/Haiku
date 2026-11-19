@@ -1,5 +1,6 @@
-"""builder: the Rust crates compiled into Haiku.exe's engine and into Haiku
-Setup, with their licences, for the release's LICENSES/Rust-crates.txt.
+"""builder: the Rust crates compiled into Haiku.exe (oneexe: its engine and
+Haiku Setup, which is a library in it now), with their licences, for the
+release's LICENSES/Rust-crates.txt.
 
   python -I dev/builder/crates.py <repo>                  the list
   python -I dev/builder/crates.py <repo> --texts          every crate's own
@@ -42,12 +43,13 @@ def main():
     repo = Path(sys.argv[1])
     texts = "--texts" in sys.argv[2:]
     seen = {}
-    for manifest in (repo / "source" / "Cargo.toml", repo / "builder" / "Cargo.toml"):
+    # oneexe: haiku-setup (builder/) is one of Haiku.exe's crates now
+    for manifest in (repo / "source" / "Cargo.toml",):
         for p in packages(manifest):
             seen[(p["name"], p["version"])] = p
     if not texts:
-        print(r"Rust crates compiled into Haiku.exe (setup\engine) and Haiku Setup.exe")
-        print("=======================================================================")
+        print(r"Rust crates compiled into Haiku.exe (its engine and Haiku Setup)")
+        print("================================================================")
         print()
         print("Each crate's licence as its Cargo.toml states it; the licence and notice")
         print("files each crate ships are in Rust-crates-licences.txt. The Rust standard")
@@ -59,8 +61,8 @@ def main():
             lic = p.get("license") or ("see " + (p.get("license_file") or "the crate"))
             print(f"{name} {version}: {lic}")
         return
-    print("Licence and notice files of the Rust crates in Haiku.exe and Haiku Setup.exe")
-    print("=============================================================================")
+    print("Licence and notice files of the Rust crates in Haiku.exe")
+    print("========================================================")
     print()
     print("Each crate's own LICENSE, COPYING and NOTICE files, as it ships them in its")
     print("package. A text that is the same as an earlier crate's is named, not repeated.")

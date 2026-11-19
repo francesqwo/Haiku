@@ -1,44 +1,37 @@
 //! Fire Emblem Fates Special Edition USA, recompiled ahead of time by 3dsrecomp and run by Zakuro. it
 //! still reads the game for everything but the code, so it takes the path
 //! to a copy of it the way Zakuro does.
+//!
+//! oneexe: Haiku.exe is the one program a player runs. It holds the engine,
+//! Haiku's overrides (compiled in by build.rs) and its setup (haiku-setup,
+//! once Haiku Setup.exe). The game's code is a module the setup recompiles
+//! on the player's PC from their own game (data/code/game.dll), which this
+//! loads and binds at start (module.rs). The first launch, and any launch
+//! that finds the module or Haiku's game-derived files out of date for this
+//! Haiku.exe, opens the setup's window instead, which builds what is
+//! needed and starts Haiku.exe again to play.
 
 // qol3: a Windows program, so no console window opens beside the game;
 // console.rs keeps redirected and console output working
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 use std::ffi::c_void;
-use std::ptr::addr_of;
+
 
 mod console; // qol3
 mod install;
+mod module; // oneexe
+mod updscreen; // updscreen: the game's code built in the game's window
 
 // codemods: Haiku's overrides by address and file (build.rs)
 include!(concat!(env!("OUT_DIR"), "/override_names.rs"));
 
 extern "C" {
-    static recomp_abi: u32;
-    static recomp_generation: u32;
-    static recomp_entry_count: u32;
-    static recomp_entries: u8;
-    static recomp_module_count: u32;
-    static recomp_modules: u8;
-    static recomp_origins: u8;
-    // eur: the title the code is recompiled from (overrides/eur_region.c)
-    static haiku_code_title: u64;
-    // hooks: the overrides' tails registry (recomp.h, CALL_THEN)
-    fn recomp_tails_forget(tls: u32);
-    // pulsefix: the tails waiting, kept and put back with the console's
-    // state; and the overrides' own variables that are part of it
-    // (overrides/keep.c)
-    fn recomp_tails_keep(out: *mut zakuro_core::state::keep::Tail, max: u32) -> u32;
-    fn recomp_tails_put(kept: *const zakuro_core::state::keep::Tail, count: u32);
+    // oneexe: the game's code and its tables (recomp_entries, the tails
+    // registry...) are in the game's module now, bound at start (module.rs)
+    // pulsefix: the overrides' own variables that are part of the console's
+    // state (overrides/keep.c, in this exe)
     fn haiku_keep_regions(out: *mut *const zakuro_core::state::keep::Region) -> u32;
-    // codemods: the registry patch modules and plugins' after-hooks share
-    static mut recomp_tails_pending: u32;
-    fn recomp_tail_defer(ctx: *mut c_void, ret: u32, sp: u32, tail: zakuro_core::codemods::Tail, name: *const std::ffi::c_char, words: *const u32);
-    fn recomp_tails_due(ctx: *mut c_void);
-    fn recomp_tail_count(tail: zakuro_core::codemods::Tail, name: *const std::ffi::c_char, how: i32);
-    static mut recomp_tails_counting: u8;
     // wide: overrides/widescreen.c asks the host for the top screen's aspect
     static mut fates_wide_aspect_hook: Option<extern "C" fn() -> f32>;
     // wide2: and tells the native renderer of the wallpapers it stretched
@@ -236,16 +229,35 @@ fn main() {
     // Portable, process-local storage. This runs before the runtime creates
     // threads and does not change the user's Windows environment.
     // FATES_ROOT overrides the portable folder, for development runs
-    let root = match std::env::var_os("FATES_ROOT") {
+    // versions: HAIKU_HOME first, which this program sets for the
+    // processes it starts (a restart, the setup) when FATES_ROOT is a
+    // version's folder (below)
+    let root = match std::env::var_os("HAIKU_HOME").or_else(|| std::env::var_os("FATES_ROOT")) {
         Some(root) => std::path::PathBuf::from(root),
         None => std::env::current_exe().expect("executable location")
             .parent().expect("executable directory").to_path_buf(),
     };
+    // oneexe: what the game's module has to be built for (build.rs)
+    haiku_setup::module::set_spec(module::spec());
+    // oneexe: the setup's command line (it was Haiku Setup.exe's):
+    // --build, --check-game, --check-dlc, --voices, --voices-dlc,
+    // --apply-derived, --rebuild, --setup...
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if let Some(code) = haiku_setup::cli(&args) {
+        std::process::exit(code);
+    }
     // os: `Haiku --install <dump> [dlc.cia ...]` extracts the game into
     // data/ once; `--verify-data` checks data/ against the dump
     if let Some(code) = install::run(&root) {
         std::process::exit(code);
     }
+    // oneexe: an earlier Haiku's folder extracted over (upgrade.rs), then
+    // the setup when something has to be made, then the game's module
+    // updscreen: or the game's code to build first, in the game's window
+    let start = setup_and_bind(&root, &args);
+    let game_dir = match &start {
+        Start::Play(_, dir) | Start::Build(_, dir) => dir.clone(),
+    };
     // the project is called Haiku: settings, saves and caches moved from
     // userdata/zakuro and cache/zakuro, once
     for (base, old, new) in [("userdata", "zakuro", "haiku"), ("cache", "zakuro", "haiku")] {
@@ -257,10 +269,25 @@ fn main() {
         }
     }
     std::env::set_var("APPDATA", root.join("userdata"));
-    std::env::set_var("LOCALAPPDATA", root.join("cache"));
+    // versions: what belongs to one version of the game (its data, Haiku's
+    // files made from it, its mods and their list, its caches) is in its
+    // folder, games\<version>\ (haiku_setup::layout); the game finds them
+    // through FATES_ROOT, the shared settings and saves through APPDATA
+    std::env::set_var("LOCALAPPDATA", game_dir.join("cache"));
+    if game_dir != root {
+        std::env::set_var("HAIKU_HOME", &root);
+        std::env::set_var("FATES_ROOT", &game_dir);
+        std::env::set_var("HAIKU_MODS_LIST", game_dir.join(haiku_setup::layout::MODS_LIST));
+        let installed = haiku_setup::layout::installed(&root);
+        std::env::set_var("HAIKU_VERSIONS", installed.iter().map(|v| v.tag()).collect::<Vec<_>>().join(","));
+        if let Some(active) = haiku_setup::layout::active(&root) {
+            std::env::set_var("HAIKU_VERSION", active.tag());
+            eprintln!("versions: playing {} from {} (installed: {})", active.tag(), game_dir.display(), installed.iter().map(|v| v.tag()).collect::<Vec<_>>().join(", "));
+        }
+    }
     // os: the game is read from data/ as plain files; the ROM image is only
     // a fallback for a setup that hasn't been installed yet
-    let data = root.join("data");
+    let data = game_dir.join("data");
     let game = if zakuro_fs::datadir::is_game_dir(&data) {
         data
     } else {
@@ -269,6 +296,48 @@ fn main() {
     };
     std::env::set_var("FATES_DEFAULT_ROM", game);
     std::env::set_var("FATES_ORIGINAL_UI", "1");
+    // Haiku's icon on the window and the taskbar (the exe's own icon is made
+    // from the same picture by build.rs; builder: assets/icon/haiku.png)
+    let _ = zakuro::WINDOW_ICON_PNG.set(include_bytes!("../../assets/icon/haiku.png"));
+    // gfx-hfr: the native renderer is the default (pc.native_graphics, the
+    // options' Renderer: Native / Compatibility); FATES_NATIVE_GFX and
+    // FATES_GFX_NATIVE3D still override it, =0 the emulated GPU
+    // native-final: the pure build has no emulated GPU, so the native
+    // renderer is the only one, whatever the environment says
+    if !cfg!(feature = "emulation") {
+        std::env::set_var("FATES_NATIVE_GFX", "1");
+        std::env::set_var("FATES_GFX_NATIVE3D", "1");
+    }
+    if std::env::var_os("FATES_NATIVE_GFX").is_none() {
+        let native = zakuro::native_graphics_setting();
+        std::env::set_var("FATES_NATIVE_GFX", if native { "1" } else { "0" });
+        if native && std::env::var_os("FATES_GFX_NATIVE3D").is_none() {
+            std::env::set_var("FATES_GFX_NATIVE3D", "1");
+        }
+    }
+    match start {
+        Start::Play(bound, _) => {
+            let code = wire(bound);
+            zakuro::run(Some(code));
+        }
+        // updscreen: the window opens as for the game, shows the game's code
+        // being built in the game's look, and the game starts in it after
+        // (wire, once the module is built and bound). The region's art and
+        // words on the screen from the game installed
+        Start::Build(work, _) => {
+            if let Some(title) = work.title() {
+                zakuro_core::region::set(title);
+            }
+            zakuro::run_after(Box::new(work));
+        }
+    }
+}
+
+/// what binding the game's module sets before its code runs: the tables and
+/// hooks the frontend and the overrides reach each other through. updscreen:
+/// a start that builds the module first does this once it is built, on the
+/// window's thread, before the game starts.
+fn wire(bound: module::Bound) -> zakuro::Linked {
     // os: the overrides that replace SDK calls into the OS reach the
     // native platform layer through this hook
     // SAFETY: set once, before any recompiled code runs
@@ -278,44 +347,26 @@ fn main() {
         }
     }
     // eur: USA or EUR code; the Rust side maps its USA addresses by it.
-    // SAFETY: a constant the recompiled code defines
-    let code_title = unsafe { haiku_code_title };
+    // oneexe: the module's title (its recomp_hosted_title)
+    let code_title = bound.title;
     zakuro_core::region::set(code_title);
-    // SAFETY: the tables 3dsrecomp wrote beside the code build.rs links in
-    let code = unsafe {
-        zakuro::Linked::new(
-            code_title,
-            recomp_abi,
-            addr_of!(recomp_entries) as *const c_void,
-            recomp_entry_count,
-            addr_of!(recomp_modules) as *const c_void,
-            recomp_module_count,
-        )
-        // so that functions a mod or an update changed run in the interpreter
-        .with_origins(recomp_generation, addr_of!(recomp_origins) as *const c_void)
-    };
+    // the tables 3dsrecomp wrote in the module, which stays loaded
+    // (so that functions a mod or an update changed run in the interpreter)
+    let code = bound.linked;
     // hooks: a loaded state or an ended thread drops the overrides' tails
     // waiting in it; FATES_HOOKS_STATS=1 counts how each tail ran, printed
     // at exit. SAFETY: set before the game's code runs
-    zakuro_core::recompiled::set_tails_forget(recomp_tails_forget);
+    zakuro_core::recompiled::set_tails_forget(bound.tails_forget);
     // pulsefix: what of the overrides goes with Divine Pulse's moments and
     // saved states, besides the console's memory. Set before the game's
     // code runs, so the variables' first values are what they start from
-    zakuro_core::state::keep::set_hooks(zakuro_core::state::keep::Hooks { regions: haiku_keep_regions, tails_keep: recomp_tails_keep, tails_put: recomp_tails_put });
+    zakuro_core::state::keep::set_hooks(zakuro_core::state::keep::Hooks { regions: haiku_keep_regions, tails_keep: bound.tails_keep, tails_put: bound.tails_put });
     zakuro::haiku_codemods::set_override_names(OVERRIDE_NAMES); // codemods
-    // codemods: SAFETY: the code's own registry, whose C types these are
-    // (recomp.h); a Context pointer is passed through as it came
-    unsafe {
-        zakuro_core::codemods::set_imports(zakuro_core::codemods::Imports {
-            tails_pending: std::ptr::addr_of_mut!(recomp_tails_pending),
-            tails_counting: std::ptr::addr_of_mut!(recomp_tails_counting),
-            tail_defer: std::mem::transmute::<unsafe extern "C" fn(*mut c_void, u32, u32, zakuro_core::codemods::Tail, *const std::ffi::c_char, *const u32), _>(recomp_tail_defer),
-            tails_due: std::mem::transmute::<unsafe extern "C" fn(*mut c_void), _>(recomp_tails_due),
-            tail_count: recomp_tail_count,
-        });
-    }
+    // codemods: the code's own registry (recomp.h), in the module
+    zakuro_core::codemods::set_imports(bound.imports);
     if std::env::var("FATES_HOOKS_STATS").is_ok_and(|value| value == "1") {
-        unsafe { recomp_tails_counting = 1 };
+        // SAFETY: the registry's own flag, before the code runs
+        unsafe { *bound.imports.tails_counting = 1 };
     }
     // mods: the Main Menu's Mods entry (FATES_MODS_TITLE=0 leaves it out),
     // and no mod's code changes: the code is recompiled ahead of time, so
@@ -371,25 +422,6 @@ fn main() {
     // cameras: the free camera's and the castle walk's input, from the
     // frontend. SAFETY: set before the game's code runs
     unsafe { fates_cameras_hook = Some(zakuro::cameras::game_hook) };
-    // Haiku's icon on the window and the taskbar (the exe's own icon is made
-    // from the same picture by build.rs; builder: assets/icon/haiku.png)
-    let _ = zakuro::WINDOW_ICON_PNG.set(include_bytes!("../../assets/icon/haiku.png"));
-    // gfx-hfr: the native renderer is the default (pc.native_graphics, the
-    // options' Renderer: Native / Compatibility); FATES_NATIVE_GFX and
-    // FATES_GFX_NATIVE3D still override it, =0 the emulated GPU
-    // native-final: the pure build has no emulated GPU, so the native
-    // renderer is the only one, whatever the environment says
-    if !cfg!(feature = "emulation") {
-        std::env::set_var("FATES_NATIVE_GFX", "1");
-        std::env::set_var("FATES_GFX_NATIVE3D", "1");
-    }
-    if std::env::var_os("FATES_NATIVE_GFX").is_none() {
-        let native = zakuro::native_graphics_setting();
-        std::env::set_var("FATES_NATIVE_GFX", if native { "1" } else { "0" });
-        if native && std::env::var_os("FATES_GFX_NATIVE3D").is_none() {
-            std::env::set_var("FATES_GFX_NATIVE3D", "1");
-        }
-    }
     // gfx: the native renderer, when FATES_NATIVE_GFX asks for it
     // SAFETY: nothing runs game code yet, so nothing reads the table
     fates_gfx::install(unsafe { &mut *std::ptr::addr_of_mut!(fates_gfx_hooks) });
@@ -412,5 +444,114 @@ fn main() {
     fates_gfx::install_live2d(unsafe { &mut *std::ptr::addr_of_mut!(fates_gfx_hooks_live2d) });
     // drawdist: far grass in batches, the batch overrides/drawdist.c fills
     fates_gfx::drawdist::set_batch(unsafe { std::ptr::addr_of_mut!(drawdist_batch) });
-    zakuro::run(Some(code));
+    code
+}
+
+/// oneexe: how the game starts. updscreen: Build, the game's module to build
+/// first (an update, a version switched to), in the game's window
+enum Start {
+    Play(module::Bound, std::path::PathBuf),
+    Build(updscreen::Work, std::path::PathBuf),
+}
+
+/// oneexe: what has to happen before the game can start, then the game's
+/// module loaded and bound. A release install (setup/ beside Haiku.exe)
+/// that has nothing installed yet gets the setup's window, which installs
+/// and starts Haiku.exe again; this process ends there. updscreen: one whose
+/// module or Haiku's files are out of date for this Haiku.exe gets
+/// Start::Build, built in the game's own window before the game starts. A
+/// development or test folder (no setup/, or HAIKU_GAME_MODULE given) and a
+/// headless run never build anything: they say why and stop (exit 3).
+fn setup_and_bind(root: &std::path::Path, args: &[String]) -> Start {
+    use haiku_setup::pipeline::{self, Paths, Ready};
+    let headless = args.iter().any(|arg| arg == "--headless");
+    let forced = std::env::var_os("HAIKU_GAME_MODULE").is_some();
+    let just_built = std::env::var_os("HAIKU_SETUP_DONE").is_some();
+    std::env::remove_var("HAIKU_SETUP_DONE");
+    if Paths::new(root.to_path_buf()).managed() && !forced {
+        // versions: tidy also moves a flat install into games\<version>\
+        for line in haiku_setup::upgrade::tidy(root) {
+            eprintln!("oneexe: {line}");
+        }
+    }
+    // versions: the version that plays (the setting, else the first
+    // installed), or the folder itself when it is laid out flat
+    let paths = Paths::new(root.to_path_buf());
+    let game = paths.game.clone();
+    // a development or test folder (no setup/) plays from data/ or game/ as
+    // it is, with the module it was given: only a release install is set up
+    let ready = if forced || !paths.managed() { Ready::Yes } else { pipeline::ready(&paths) };
+    let needed = match ready {
+        Ready::Yes => None,
+        Ready::Install => Some(haiku_setup::ui::Start::Install),
+        Ready::Update(why) => Some(haiku_setup::ui::Start::Update(why)),
+    };
+    let stop = |why: &str| -> ! {
+        eprintln!("oneexe: the game can't start: {why}");
+        if !headless {
+            message(&format!("Haiku can't start the game: {why}.\n\nsetup-work\\setup.log, beside Haiku.exe, has the details."));
+        }
+        std::process::exit(3);
+    };
+    if let Some(start) = needed {
+        if headless || !paths.managed() {
+            stop(&match start {
+                haiku_setup::ui::Start::Install => "no game is installed (run Haiku.exe without --headless, or `Haiku.exe --build <dump>`)".to_owned(),
+                haiku_setup::ui::Start::Update(why) => format!("{why} (`Haiku.exe --rebuild` builds it; a development folder: dev/recomp.sh, or HAIKU_GAME_MODULE)"),
+                haiku_setup::ui::Start::Setup => String::new(),
+            });
+        }
+        if just_built {
+            stop(&format!("the setup just ran, and still finds something to make ({start:?})"));
+        }
+        // updscreen: an installed game whose module or Haiku's files are out
+        // of date: built in the game's window, in the game's look, and the
+        // game starts there after (HAIKU_UPDATE_SETUP=1: the setup's own
+        // window, as before). Nothing installed: the setup's first screens
+        if let haiku_setup::ui::Start::Update(why) = &start {
+            if std::env::var_os("HAIKU_UPDATE_SETUP").is_none() {
+                eprintln!("updscreen: {why}: building the game's code in the game's window");
+                return Start::Build(updscreen::Work::new(root, &paths, why), game);
+            }
+        }
+        haiku_setup::ui::run(haiku_setup::ui::Options::from_env(), start);
+        std::process::exit(0);
+    }
+    let path = module::find(&game);
+    let title = haiku_setup::pipeline::installed_title(&game.join("data"));
+    match module::load(&path, if forced { None } else { title }) {
+        Ok(bound) => Start::Play(bound, game),
+        Err(why) => {
+            // a module the checks passed that still can't be bound (damaged,
+            // half written): built again, once (updscreen: in the game's
+            // window)
+            if !headless && paths.managed() && !forced && !just_built {
+                eprintln!("oneexe: {why}: building the game's code again");
+                let _ = std::fs::remove_file(module::dir(&game).join(haiku_setup::module::NOTE));
+                if std::env::var_os("HAIKU_UPDATE_SETUP").is_none() {
+                    return Start::Build(updscreen::Work::new(root, &paths, &why), game);
+                }
+                haiku_setup::ui::run(haiku_setup::ui::Options::from_env(), haiku_setup::ui::Start::Update(why));
+                std::process::exit(0);
+            }
+            stop(&why)
+        }
+    }
+}
+
+/// oneexe: a message box, for a windowed start that can't go on
+fn message(text: &str) {
+    #[cfg(windows)]
+    {
+        #[link(name = "user32")]
+        extern "system" {
+            fn MessageBoxW(hwnd: *mut c_void, text: *const u16, caption: *const u16, kind: u32) -> i32;
+        }
+        let wide = |s: &str| s.encode_utf16().chain([0]).collect::<Vec<u16>>();
+        let (text, caption) = (wide(text), wide("Haiku"));
+        // SAFETY: NUL-terminated strings; no owner window
+        unsafe { MessageBoxW(std::ptr::null_mut(), text.as_ptr(), caption.as_ptr(), 0x10) };
+    }
+    #[cfg(not(windows))]
+    let _ = text;
 }
