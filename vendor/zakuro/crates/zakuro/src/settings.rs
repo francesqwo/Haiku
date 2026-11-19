@@ -1013,6 +1013,11 @@ pub struct PcSettings {
     // Japanese; this shows them in English instead (for an English
     // translation mod). No effect on the USA and EUR games.
     pub japanese_english_menus: bool,
+    // zigdl: which compiler code mods are compiled with when the computer
+    // has none: asked the first time (when Haiku Setup's compiler is there
+    // too), Zig downloaded once, or the compiler that came with Haiku.
+    #[serde(deserialize_with = "or_default")]
+    pub code_mods_compiler: CodeModsCompiler,
 }
 
 /// pulse: how many charges of Divine Pulse a map gives.
@@ -1065,6 +1070,16 @@ impl Default for OnlineSettings {
             allow_cheated_units: false,
         }
     }
+}
+
+/// zigdl: the compiler for code mods (PcSettings::code_mods_compiler).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CodeModsCompiler {
+    #[default]
+    Ask,
+    Zig,
+    Haiku,
 }
 
 /// jpvoice: the language of the voices (PcSettings::voices).
@@ -1263,6 +1278,7 @@ impl Default for PcSettings {
             save_state_slot: 0,
             voices: Voices::English, // jpvoice
             japanese_english_menus: false, // jpprep
+            code_mods_compiler: CodeModsCompiler::Ask, // zigdl
         }
     }
 }

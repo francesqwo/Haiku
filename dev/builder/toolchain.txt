@@ -2,6 +2,8 @@
 # copies them into setup/w64devkit). Found by tracing a build: gcc -M over
 # the recompiled code and the overrides (headers), and gcc -v -Wl,--trace
 # over the engine's link (startup objects and libraries).
+# zigdl: and lib/dllcrt2.o, which linking a code mod's DLL needs (Haiku.exe
+# compiles code mods with this compiler when the player chooses it, or Zig fails).
 bin/gcc.exe
 bin/as.exe
 bin/ld.exe
@@ -14,6 +16,7 @@ lib/gcc/x86_64-w64-mingw32/16.2.0/crtend.o
 lib/gcc/x86_64-w64-mingw32/16.2.0/libgcc.a
 lib/gcc/x86_64-w64-mingw32/16.2.0/libgcc_eh.a
 lib/crt2.o
+lib/dllcrt2.o
 lib/libadvapi32.a
 lib/libavrt.a
 lib/libbcrypt.a

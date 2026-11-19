@@ -109,9 +109,12 @@ A **Cheats** tab, off by default:
 ### Mods
 
 - A **Mods** screen, from the Main Menu or the options: turn mods on and off, set their load order, see file conflicts and missing dependencies, and **Apply and Restart**.
-- Mods go in the `mods` folder next to Haiku.exe, as folders or zips. Luma3DS-style (LayeredFS) and plain `romfs/` mods work as they are, including replacement **music and sounds**, text, models and maps. File patches (.ips, .bps) are supported.
+- Mods go in the `mods` folder next to Haiku.exe, as folders or zips, the way you downloaded them. Luma3DS-style (LayeredFS) and plain `romfs/` mods work as they are, including replacement **music and sounds**, text, models and maps. File patches (.ips, .bps) are supported.
+- **Other layouts work too:** a mod made of the game's own folders (such as `GameData`, `m` or `bu`) with no `romfs/` folder around them, and a mod that holds several releases, whose folder for each release (named by the game's title id) is up to two folders down. Folders of optional files are left alone.
 - **Texture packs**, including **Citra-format HD texture packs**. Large downloads (zips within zips, or packs split into several parts) are recognised and unpacked once, in the background.
-- **Code mods**: `code.ips`, IPS32, `code.bps`, `code.bin` and `exheader.bin` patches are **recompiled to native code**, not interpreted. Haiku needs a C compiler for that and asks before downloading one.
+- **Code mods**: `code.ips`, IPS32, `code.bps`, `code.bin` and `exheader.bin` patches are **recompiled to native code**, not interpreted. Haiku needs a C compiler for that. It asks first, and offers two: **Zig**, a one-time 96 MB download that compiles in under a minute, or **the compiler that comes with Haiku**, which needs no download but takes several minutes for a big code mod. The Mods page's **Code Mod Compiler** row changes the choice, and Haiku's compiler is the backup if Zig can't be downloaded.
+- **A mod with several code patches** uses `code.ips` (or the one its readme names). Pick another with the mod's `code_patch` option in `userdata/haiku/mods.toml`; the mod's note on the Mods screen says how.
+- **A code mod that can't be compiled** is left out with a note saying why, and the other mods, other code mods included, still run.
 - **Native plugins** in C (or anything that makes a DLL), with hooks before and after the game's functions, per-frame callbacks, memory access and options: see [`sdk/haiku_mod.h`](sdk/haiku_mod.h).
 - **No mods come with Haiku.** Mods made by others, HD texture packs for example, belong to their authors; get them from them.
 - **Haiku's own text is kept under text mods.** When a mod replaces a message file, Haiku adds its own lines to it (Kana's chosen gender, same-gender S-supports, End Turn, the Sunglasses) and fills in any line the mod's file lacks from the game's, so nothing shows up blank.
@@ -178,7 +181,7 @@ No. The game's code is recompiled into a native program ahead of time, and the 3
 No. Without it, the DLC maps aren't available. You can add it later from Haiku Setup without rebuilding the game.
 
 **Does Haiku go online?**
-Only when you play online (online battles talk directly to the other player, with a public STUN server to find a way through routers), or when you agree to download a compiler for a code mod. Haiku Setup never uses the network.
+Only when you play online (online battles talk directly to the other player, with a public STUN server to find a way through routers), or when you choose to download Zig, a compiler for code mods. The compiler that comes with Haiku needs no download, and Haiku Setup never uses the network.
 
 **Where are my settings and saves?**
 In `userdata\haiku`, next to Haiku.exe. Haiku Setup writes a log, `Haiku Setup.log`, next to itself.

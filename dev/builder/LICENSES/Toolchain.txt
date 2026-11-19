@@ -2,7 +2,7 @@ The compiler in setup\w64devkit, and where to get its source
 ============================================================
 
 Haiku Setup compiles the game's recompiled code on your PC with a part of
-w64devkit 2.11.0 (x64), unchanged: 178 of its files, listed in Haiku's
+w64devkit 2.11.0 (x64), unchanged: 179 of its files, listed in Haiku's
 source as dev/builder/toolchain.txt. w64devkit is by Christopher Wellons
 (https://github.com/skeeto/w64devkit) and is built from source by its own
 Dockerfile.
@@ -18,8 +18,8 @@ What is in setup\w64devkit, and its licence
   offered below with GCC's.
 - GNU Binutils 2.47: as.exe, ld.exe, ar.exe. GNU General Public License
   version 3 (GPL-3.0.txt).
-- The MinGW-w64 v14.0.0 runtime: the startup object, import libraries,
-  libmingwex, winpthreads and the C headers. Their licences are in
+- The MinGW-w64 v14.0.0 runtime: the startup objects (for programs and
+  DLLs), import libraries, libmingwex, winpthreads and the C headers. Their licences are in
   MinGW-w64-runtime.txt (mostly the Zope Public License 2.1, MIT-style
   licences and public domain).
 - w64devkit itself, the build that made them: the Unlicense (public

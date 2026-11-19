@@ -18,6 +18,11 @@
 //! mods/<name>.zip                 any of the above, zipped
 //! ```
 //!
+//! modfix: also the game's own RomFS folders with no romfs/ around them
+//! (bu/, GameData/, m/...), alone or beside a Luma folder; a title id
+//! folder a few folders down (a pack of releases); and a folder of several
+//! code patches, one picked by the code_patch option (haiku_modlayout.rs).
+//!
 //! codemods: code changes (code.ips, code.bps, code.bin, exheader.bin) and
 //! native plugins (plugin.dll) are code mods, which haiku_codemods
 //! recompiles and loads. Code modules in the RomFS (cro/*.cro, static.crs)
@@ -215,6 +220,12 @@ pub struct ModInfo {
     /// fanpatch: a mod made for another release (Team If's layout, a
     /// Japanese or EUR title): what Haiku made of it
     pub fanpatch: Option<crate::haiku_fanpatch::FanPatch>,
+    /// modfix: its code patches when it has several to pick from (the
+    /// code_patch option picks one)
+    pub code_choices: Option<crate::haiku_modlayout::CodeChoices>,
+    /// modfix: its folders holding the game's RomFS folders with no romfs/
+    /// around them, which its content folder was laid out from
+    pub roots: Vec<PathBuf>,
 }
 
 impl ModInfo {
@@ -347,6 +358,9 @@ impl ModList {
         }
         if let Some(cache) = &self.cache {
             prune_cache(cache, &small);
+            // modfix: the layouts of mods that are gone
+            let live: Vec<PathBuf> = found.iter().filter_map(|info| info.content.clone()).collect();
+            crate::haiku_modlayout::prune(cache, &live);
         }
         // ids are unique: a second mod with one is told apart by its file
         let mut seen = HashSet::new();
@@ -384,6 +398,11 @@ impl ModList {
         self.options = config.mods.iter().filter(|entry| !entry.options.is_empty()).map(|entry| (entry.id.to_lowercase(), entry.options.clone())).collect();
         self.mods = ordered;
         self.enabled = enabled;
+        // modfix: the code patch each mod's code_patch option picks
+        for index in 0..self.mods.len() {
+            let choice = self.options_of(index).get(CODE_PATCH).copied().unwrap_or(0);
+            choose_code(&mut self.mods[index], choice);
+        }
         for index in 0..self.mods.len() {
             if self.enabled[index] && !self.can_enable(index) {
                 let info = &self.mods[index];
@@ -489,6 +508,11 @@ impl ModList {
     pub fn set_option(&mut self, index: usize, id: &str, value: i64) {
         let Some(info) = self.mods.get(index) else { return };
         self.options.entry(info.id.to_lowercase()).or_default().insert(id.to_owned(), value);
+        // modfix: another code patch
+        if id == CODE_PATCH {
+            choose_code(&mut self.mods[index], value);
+            self.check();
+        }
         self.save();
     }
 
@@ -638,6 +662,10 @@ impl ModList {
                 } else {
                     note.push(Note { warning: false, text: format!("Code mod ({files}): Haiku recompiles the code it changes.") });
                 }
+            }
+            // modfix: which of its code patches is used
+            if let Some(text) = choice_note(info, self.options_of(index).get(CODE_PATCH).copied().unwrap_or(0)) {
+                note.push(Note { warning: false, text });
             }
             if let Some(code_notes) = self.code_notes.get(&info.id) {
                 note.extend(code_notes.iter().cloned());
@@ -862,6 +890,33 @@ fn read_mod(source: &Path, cache: Option<&Path>) -> ModInfo {
         None => content,
     };
     info.fanpatch = fanpatch.map(|(fan, _)| fan);
+    // modfix: the game's RomFS folders with no romfs/ around them (Nyx
+    // Veil Fix's bu/ and bx/, Expanded Fates' GameData/ and m/, Re-Fates'
+    // "Mod files/" beside its luma/), laid out with its romfs/ as one
+    // content folder in the cache. the code stays where it is
+    let code_dir = content.clone();
+    let converted = info.fanpatch.as_ref().is_some_and(|fan| fan.converted);
+    let mut roots = if converted { Vec::new() } else { crate::haiku_modlayout::loose_roots(&folder) };
+    if !converted && content != folder && !roots.contains(&content) && crate::haiku_modlayout::romfs_root(&content) {
+        roots.push(content.clone());
+    }
+    let content = if roots.is_empty() {
+        content
+    } else {
+        match crate::haiku_modlayout::lay_out(&info.id, &roots, &content, cache) {
+            Ok(laid) => {
+                let names: Vec<String> = roots.iter().map(|root| root.strip_prefix(&folder).ok().filter(|rel| !rel.as_os_str().is_empty()).map_or_else(|| ".".to_owned(), |rel| rel.display().to_string())).collect();
+                log::info!("mods: {} has the game's folders in {} with no romfs/ around them: used as its RomFS", info.name, names.join(", "));
+                info.roots = roots;
+                laid
+            }
+            Err(problem) => {
+                log::warn!("mods: {}'s files can't be laid out, {problem}", info.name);
+                info.problem = Some(format!("Its files can't be laid out: {problem}."));
+                content
+            }
+        }
+    };
     // the game's files: romfs/, romfs_ext/ (a patch or stub stands for the
     // file it changes) and dlc/<IIII>/ for the DLC
     let mut files = Vec::new();
@@ -928,12 +983,21 @@ fn read_mod(source: &Path, cache: Option<&Path>) -> ModInfo {
             info.textures = Some(folder.clone());
         }
     }
-    info.code = zakuro_core::mods::code_files(&content).iter().filter_map(|path| Some(path.file_name()?.to_string_lossy().into_owned())).collect();
+    info.code = zakuro_core::mods::code_files(&code_dir).iter().filter_map(|path| Some(path.file_name()?.to_string_lossy().into_owned())).collect();
     // codemods: the patches and the plugin, which haiku_codemods uses; a
     // plugin's DLL sits in the mod's folder (a Luma layout's content folder
     // or the mod's own)
-    let mut files = crate::haiku_codemods::code_files(&content, plugin.as_deref());
-    if files.plugin.is_none() && content != folder {
+    let mut files = crate::haiku_codemods::code_files(&code_dir, plugin.as_deref());
+    // modfix: several code patches, of which one is used (code_patch)
+    if let Some(mut choices) = crate::haiku_modlayout::code_choices(&code_dir) {
+        choices.standard = files.patches.clone();
+        if files.patches.is_empty() {
+            files.patches = vec![choices.patches[0].clone()];
+        }
+        info.options.push(ModOption { id: CODE_PATCH.to_owned(), label: "Code patch".to_owned(), default: 0, min: Some(0), max: Some(choices.patches.len() as i64 - 1) });
+        info.code_choices = Some(choices);
+    }
+    if files.plugin.is_none() && code_dir != folder {
         files.plugin = crate::haiku_codemods::code_files(&folder, plugin.as_deref()).plugin;
     }
     if let Some(dll) = &files.plugin {
@@ -942,6 +1006,7 @@ fn read_mod(source: &Path, cache: Option<&Path>) -> ModInfo {
     if files.changes_code() || files.plugin.is_some() {
         info.code_files = Some(files);
     }
+    choose_code(&mut info, 0); // modfix
     // code modules in the RomFS (cro/*.cro, static.crs): Fates has none and
     // never loads one (3dsrecomp finds 0 modules in it), so they can't run
     for file in info.files.iter().filter(|file| !file.starts_with("dlc/") && (file.ends_with(".cro") || file.ends_with(".crs"))) {
@@ -998,7 +1063,8 @@ fn wrapped(folder: &Path) -> PathBuf {
     let mut current = folder.to_path_buf();
     for _ in 0..4 {
         // hdpacks: textures/ too, a texture pack's own folder
-        if find_ci(&current, "mod.toml").is_some() || find_ci(&current, "romfs").is_some() || find_ci(&current, "luma").is_some() || find_ci(&current, "textures").is_some() || crate::haiku_fanpatch::stops_unwrap(&current) {
+        // modfix: and a folder of the game's own RomFS folders (bu/ alone)
+        if find_ci(&current, "mod.toml").is_some() || find_ci(&current, "romfs").is_some() || find_ci(&current, "luma").is_some() || find_ci(&current, "textures").is_some() || crate::haiku_fanpatch::stops_unwrap(&current) || crate::haiku_modlayout::romfs_root(&current) {
             break;
         }
         let Ok(entries) = std::fs::read_dir(&current) else { break };
@@ -1015,20 +1081,56 @@ fn wrapped(folder: &Path) -> PathBuf {
 /// luma/titles/<title id>/, Citra's <title id>/, or the folder itself; and
 /// the title id when it was one (eur2: the running game's, else the other
 /// build's).
+/// modfix: also load/mods/<title id>, and any of them a few folders down
+/// (Gay Fates' "Unofficial Gay Fates/<title id>/"), the shallowest first.
 fn content_folder(folder: &Path) -> (PathBuf, Option<&'static str>) {
     for id in program_ids() {
-        let luma = find_ci(folder, "luma").and_then(|luma| find_ci(&luma, "titles")).and_then(|titles| find_ci(&titles, id));
-        if let Some(luma) = luma {
-            return (luma, Some(id));
-        }
-        if let Some(titles) = find_ci(folder, "titles").and_then(|titles| find_ci(&titles, id)) {
-            return (titles, Some(id));
-        }
-        if let Some(citra) = find_ci(folder, id) {
-            return (citra, Some(id));
+        if let Some(found) = crate::haiku_modlayout::title_in(folder, id) {
+            return (found, Some(id));
         }
     }
     (folder.to_path_buf(), None)
+}
+
+/// modfix: the code_patch option, which of a mod's code patches is used.
+pub const CODE_PATCH: &str = "code_patch";
+
+/// modfix: uses the code patch the code_patch option picks, of a mod that
+/// has several (the first, by default), and names it with its code.
+fn choose_code(info: &mut ModInfo, choice: i64) {
+    let Some(choices) = &info.code_choices else { return };
+    let Some(files) = info.code_files.as_mut() else { return };
+    if choices.patches.is_empty() {
+        return;
+    }
+    let at = (choice.max(0) as usize).min(choices.patches.len() - 1);
+    files.patches = if at == 0 && !choices.standard.is_empty() { choices.standard.clone() } else { vec![choices.patches[at].clone()] };
+    let is_patch = |name: &String| {
+        let name = name.to_ascii_lowercase();
+        name.ends_with(".ips") || name.ends_with(".bps")
+    };
+    info.code.retain(|name| !is_patch(name));
+    let names: Vec<String> = files.patches.iter().filter_map(|path| Some(path.file_name()?.to_string_lossy().into_owned())).collect();
+    info.code.splice(0..0, names);
+}
+
+/// modfix: the note on a mod with several code patches.
+fn choice_note(info: &ModInfo, choice: i64) -> Option<String> {
+    let choices = info.code_choices.as_ref()?;
+    let name = |path: &PathBuf| path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+    let count = choices.patches.len();
+    let at = (choice.max(0) as usize).min(count.checked_sub(1)?);
+    let why = if at != 0 {
+        " (its code_patch option)".to_owned()
+    } else if choices.readme_default {
+        format!(", as {} says", choices.readme.as_deref().map_or("its readme".to_owned(), |readme| format!("\"{readme}\"")))
+    } else if !choices.standard.is_empty() {
+        ", the one Luma3DS loads".to_owned()
+    } else {
+        String::new()
+    };
+    let others: Vec<String> = (0..count).filter(|&other| other != at).map(|other| format!("{CODE_PATCH} = {other} for {}", name(&choices.patches[other]))).collect();
+    Some(format!("It has {count} code patches, and one can be used: {} is used{why}. To use another, set {} in mods.toml.", name(&choices.patches[at]), others.join(", or ")))
 }
 
 /// the entry of dir named name, in any case.
@@ -1352,6 +1454,63 @@ mod tests {
             assert_eq!(list.mods[index].pictures.len(), 1, "{}", list.mods[index].id);
         }
         assert!(list.mods[2].textures.as_ref().unwrap().ends_with("textures"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// modfix (issue #4): mods as players download them, made by hand here
+    /// in their shapes: the game's folders at the top of a zip or folder (no
+    /// romfs/), a Luma folder beside a folder of the game's folders and a
+    /// Citra copy, and a pack of releases whose USA folder has two code
+    /// patches and a readme saying to pick one.
+    #[test]
+    fn mods_laid_out_as_downloaded_are_read() {
+        let root = folder("downloaded");
+        let mods = root.join("mods");
+        put(&mods, "veil/bu/uHead_F_x.bch.lz", b"head");
+        put(&mods, "veil/bx/acc_Mask_x.bch.lz", b"mask");
+        std::fs::write(mods.join("expanded.zip"), zip(&[("Expanded Scripts/GameData/GameData.bin.lz", b"g"), ("Expanded Scripts/m/@E/Shop.bin.lz", b"m"), ("Expanded Scripts/castle/join.bin.lz", b"c")])).unwrap();
+        put(&mods, "retold/Project/luma/titles/0004000000179800/romfs/Unit/Head/a.bch.lz", b"luma");
+        put(&mods, "retold/Project/citra/unit/Head/a.bch.lz", b"citra");
+        put(&mods, "retold/Project/Mod files/GameData/GameData.bin.lz", b"g2");
+        put(&mods, "retold/Project/Mod files/m/@E/Story.bin.lz", b"m2");
+        put(&mods, "retold/Project/readme.txt", b"hi");
+        let pack = "pack/Pack v2";
+        put(&mods, &format!("{pack}/Installation Instructions.txt"), b"pick the folder for your game");
+        put(&mods, &format!("{pack}/Optional Files/Extra/GameData/GameData.bin.lz"), b"optional");
+        put(&mods, &format!("{pack}/Optional Files/Other/romfs/GameData/GameData.bin.lz"), b"optional");
+        put(&mods, &format!("{pack}/Paragon Imports/a.json"), b"{}");
+        put(&mods, &format!("{pack}/Pack/0004000000179800/code.ips"), b"PATCHEOF");
+        put(&mods, &format!("{pack}/Pack/0004000000179800/old code patch - endings.ips"), b"PATCHEOF");
+        put(&mods, &format!("{pack}/Pack/0004000000179800/read this - pick one code patch only.txt"), b"code.ips is the new one. Rename the old code patch to code.ips if you want it.");
+        put(&mods, &format!("{pack}/Pack/0004000000179800/romfs/m/@E/Support.bin.lz"), b"s");
+        put(&mods, &format!("{pack}/Pack/000400000017A800/code.ips"), b"PATCHEOF");
+        put(&mods, &format!("{pack}/Pack/000400000017A800/romfs/m/@U/Support.bin.lz"), b"s");
+        let data = root.join("userdata");
+        let mut list = ModList::load(&root, Some(&data), Some(&root.join("cache")));
+        let at = |list: &ModList, id: &str| list.mods.iter().position(|info| info.id == id).unwrap();
+        let veil = at(&list, "veil");
+        assert_eq!(list.mods[veil].files, ["bu/uhead_f_x.bch.lz", "bx/acc_mask_x.bch.lz"]);
+        assert!(list.can_enable(veil), "the game's folders with no romfs/ are its RomFS");
+        let expanded = at(&list, "expanded");
+        assert_eq!(list.mods[expanded].files, ["castle/join.bin.lz", "gamedata/gamedata.bin.lz", "m/@e/shop.bin.lz"]);
+        let retold = at(&list, "retold");
+        assert_eq!(list.mods[retold].files, ["gamedata/gamedata.bin.lz", "m/@e/story.bin.lz", "unit/head/a.bch.lz"]);
+        let laid = list.mods[retold].content.clone().unwrap();
+        assert_eq!(std::fs::read(laid.join("romfs/Unit/Head/a.bch.lz")).unwrap(), b"luma", "its Luma romfs/ wins over the Citra copy");
+        assert_eq!(list.mods[retold].title.as_deref(), Some(PROGRAM_ID));
+        let pack = at(&list, "pack");
+        assert_eq!(list.mods[pack].files, ["m/@e/support.bin.lz"], "the USA folder only: no optional files, no EUR text");
+        assert_eq!(list.mods[pack].title.as_deref(), Some(PROGRAM_ID));
+        let patches = |list: &ModList| list.mods[pack].code_files.as_ref().unwrap().patches.iter().map(|p| p.file_name().unwrap().to_string_lossy().into_owned()).collect::<Vec<_>>();
+        assert_eq!(patches(&list), ["code.ips"], "code.ips, as its readme says");
+        assert!(list.notes[pack].iter().any(|note| note.text.starts_with("It has 2 code patches") && note.text.contains("code_patch = 1")), "{:?}", list.notes[pack]);
+        list.set_option(pack, CODE_PATCH, 1);
+        assert_eq!(patches(&list), ["old code patch - endings.ips"]);
+        assert_eq!(list.mods[pack].code[0], "old code patch - endings.ips");
+        // the choice is kept in mods.toml
+        let again = ModList::load(&root, Some(&data), Some(&root.join("cache")));
+        let pack_again = at(&again, "pack");
+        assert_eq!(again.mods[pack_again].code_files.as_ref().unwrap().patches[0].file_name().unwrap(), "old code patch - endings.ips");
         std::fs::remove_dir_all(root).unwrap();
     }
 

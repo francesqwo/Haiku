@@ -209,18 +209,26 @@ pub fn judge_title(program_id: u64, product: &str, wanted_game: bool) -> Result<
     }
     if product.starts_with("CTR-P-BF") && product.len() == 10 {
         let letter = product.chars().last().unwrap_or('?');
-        if letter != 'E' {
-            return Err(Problem::WrongRegion(format!(
-                "This is Fire Emblem Fates for {} ({product}). Haiku is made for the USA Special Edition (CTR-P-BFZE) and runs only that one.",
-                region(letter)
-            )));
-        }
+        // regions: Haiku runs the USA, EUR and Japanese Special Editions, so
+        // only another region is a wrong one; a single-route dump of these
+        // three is told which Special Edition it needs
+        let (name, edition) = match letter {
+            'E' => ("US", "CTR-P-BFZE"),
+            'P' => ("European", "CTR-P-BFZP"),
+            'J' => ("Japanese", "CTR-P-BFZJ"),
+            _ => {
+                return Err(Problem::WrongRegion(format!(
+                    "This is Fire Emblem Fates for {} ({product}). Haiku runs the US, European and Japanese Special Editions (CTR-P-BFZE, CTR-P-BFZP and CTR-P-BFZJ).",
+                    region(letter)
+                )))
+            }
+        };
         return Err(Problem::SingleRoute(format!(
-            "This is a USA Fire Emblem Fates dump ({product}), but not the Special Edition: Birthright and Conquest cartridges hold one route. Haiku needs the Special Edition cartridge (CTR-P-BFZE), which has all three routes on it."
+            "This is a {name} Fire Emblem Fates dump ({product}), but not the Special Edition: Birthright and Conquest, on cartridge or from the eShop, hold one route. Haiku needs the {name} Special Edition cartridge ({edition}), which has all three routes on it."
         )));
     }
     Err(Problem::WrongGame(format!(
-        "This is a different game ({}, title {program_id:016X}), not Fire Emblem Fates Special Edition (USA).",
+        "This is a different game ({}, title {program_id:016X}), not Fire Emblem Fates Special Edition.",
         if product.trim().is_empty() { "no product code" } else { product }
     )))
 }
@@ -318,7 +326,8 @@ pub fn check_game(path: &Path) -> Result<Game, Problem> {
     }
     if !jpn && ((!eur && hex != CODE_SHA256) || (eur && hex != crate::eur::CODE_SHA256)) {
         return Err(Problem::WrongVersion(format!(
-            "This is Fire Emblem Fates Special Edition (USA), but its code is not the version Haiku is made for (it reports version {remaster}). The dump may have an update or a code mod merged into it, or come from a different printing. Dump the original Special Edition cartridge."
+            "This is Fire Emblem Fates Special Edition ({}), but its code is not the version Haiku is made for (it reports version {remaster}). The dump may have an update or a code mod merged into it, or come from a different printing. Dump the original Special Edition cartridge.",
+            if eur { "Europe" } else { "USA" } // regions
         )));
     }
     let romfs_offset = ncch_offset + u32_at(&header, 0x1B0) as u64 * MEDIA;
@@ -376,21 +385,28 @@ fn cia_game(dump: &mut Dump) -> Result<u64, Problem> {
 /// the game's executable in a folder Citra or Azahar installed it in
 /// (sdmc/Nintendo 3DS/<id>/<id>/title/00040000/00179800/content), or a
 /// folder holding a dump.
+/// regions: the editions an emulator's sdmc folder is searched for (title
+/// low words, as Citra and Azahar name the folders), USA first, then EUR, then
+/// the Japanese Special Edition and single-route cartridges.
+const INSTALLED: [&str; 5] = ["00179800", "0017a800", "0012de00", "0012dc00", "0012dd00"];
+
 fn find_installed_game(dir: &Path) -> Result<PathBuf, Problem> {
     let mut apps = Vec::new();
     let mut dumps = Vec::new();
     find_files(dir, 0, &mut |path| {
         let lower = path.to_string_lossy().to_lowercase().replace('\\', "/");
         let ext = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
-        if ext == "app" && lower.contains("/00040000/00179800/content") {
-            apps.push(path.to_path_buf());
+        // regions: any of the editions Haiku builds, in INSTALLED's order
+        if let Some(rank) = (ext == "app").then(|| INSTALLED.iter().position(|id| lower.contains(&format!("/00040000/{id}/content")))).flatten() {
+            apps.push((rank, path.to_path_buf()));
         } else if ["3ds", "cci", "cia", "cxi"].contains(&ext.as_str()) {
             dumps.push(path.to_path_buf());
         }
     });
-    // the executable content is the largest of the title's
-    apps.sort_by_key(|p| std::cmp::Reverse(std::fs::metadata(p).map(|m| m.len()).unwrap_or(0)));
-    if let Some(app) = apps.first() {
+    // the first edition installed; its executable content is the largest of
+    // the title's
+    apps.sort_by_key(|(rank, p)| (*rank, std::cmp::Reverse(std::fs::metadata(p).map(|m| m.len()).unwrap_or(0))));
+    if let Some((_, app)) = apps.first() {
         return Ok(app.clone());
     }
     // a single dump in the folder
@@ -490,4 +506,46 @@ pub fn verify_romfs(game: &Game, progress: &dyn Fn(f32)) -> Result<(), Problem> 
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod regions_tests {
+    use super::*;
+
+    fn says(product: &str) -> String {
+        judge_title(0x0004_0000_0000_0001, product, true).unwrap_err().message().to_owned()
+    }
+
+    #[test]
+    fn every_edition_haiku_builds_is_accepted() {
+        assert!(judge_title(TITLE_ID, PRODUCT, true).is_ok());
+        assert!(judge_title(crate::eur::TITLE_ID, crate::eur::PRODUCT, true).is_ok());
+        assert!(judge_title(crate::jpn::SPECIAL_EDITION, "CTR-P-BFZJ", true).is_ok());
+    }
+
+    #[test]
+    fn no_message_says_usa_only() {
+        for product in ["CTR-P-BFXP", "CTR-P-BFWE", "CTR-P-BFZK", "CTR-P-BFZC", "CTR-P-ABCD", ""] {
+            let message = says(product);
+            assert!(!message.contains("runs only"), "{product}: {message}");
+            assert!(!message.contains("(USA)"), "{product}: {message}");
+        }
+        assert!(says("CTR-P-BFXP").contains("European Special Edition cartridge (CTR-P-BFZP)"));
+        assert!(says("CTR-P-BFXE").contains("US Special Edition cartridge (CTR-P-BFZE)"));
+        assert!(says("CTR-P-BFZK").contains("US, European and Japanese"));
+    }
+
+    #[test]
+    fn emulator_folders_of_every_edition_are_found() {
+        let root = std::env::temp_dir().join(format!("haiku-regions-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for id in ["0017a800", "0012de00"] {
+            let content = root.join(id).join("sdmc/Nintendo 3DS/0/0/title/00040000").join(id).join("content");
+            std::fs::create_dir_all(&content).unwrap();
+            std::fs::write(content.join("00000000.app"), b"").unwrap();
+            // find_installed_game hands the content on; check_game reads it
+            assert_eq!(find_installed_game(&root.join(id)).unwrap(), content.join("00000000.app"));
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

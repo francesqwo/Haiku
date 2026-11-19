@@ -32,7 +32,9 @@ use crate::rom::ExHeader;
 /// the version of what this module writes, part of every cache key.
 /// codemods2: 2, the entries a patch left no code at (recomp_patch_gone),
 /// and the analysis that guesses what changed code still is.
-pub const VERSION: u32 = 2;
+/// modfix: 3, holes only guessed code goes to are dead ends, and msr writes
+/// the cpsr as user mode does.
+pub const VERSION: u32 = 3;
 
 /// a function of the program, as its tables describe it.
 #[derive(Debug, Clone, PartialEq)]
@@ -419,7 +421,14 @@ pub fn plan(base: &Base, mut program: Program, changed: &[(u32, u32)]) -> (Plan,
                 }
                 None => {
                     let gap = discover::Gap { to: transfer.to, mode: transfer.mode, from: transfer.from, function: entry, way: transfer.way };
-                    if discover::decodes(&program.text, transfer.to, transfer.mode) {
+                    // modfix: a place only code that may not be code at all
+                    // goes to (a Thumb guess of the program read over ARM
+                    // code, which a patch wrote over, calling into the ARM
+                    // code beside it) is left to the host, as the
+                    // instructions such code has that the generator can't
+                    // lower are: the CPU would never go there either. only
+                    // code sure to be code refuses the module
+                    if discover::decodes(&program.text, transfer.to, transfer.mode) && !maybe_data(&program, function) {
                         holes.insert(gap);
                     } else {
                         dead_ends.insert(gap);
@@ -523,6 +532,26 @@ pub fn source(plan: &Plan, program: &Program, base: &Base, base_digest: u64, cod
     let module_header = codegen::HEADER.replacen("extern RecompImports recomp_imports;", "extern RECOMP_EXPORT RecompImports recomp_imports;", 1);
     debug_assert!(module_header != codegen::HEADER, "recomp.h declares recomp_imports another way now");
     let mut files = vec![("recomp.h".to_owned(), module_header), ("patch.h".to_owned(), header)];
+    // every label, preferring the function it starts
+    let mut entries: BTreeMap<u32, String> = BTreeMap::new();
+    for (&entry, function) in &plan.functions {
+        let name = codegen::function_name(PREFIX, entry, function.mode == Mode::Thumb);
+        for &label in &function.labels {
+            let slot = entries.entry(key(label, function.mode)).or_insert_with(|| name.clone());
+            if label == entry {
+                slot.clone_from(&name);
+            }
+        }
+    }
+    // modfix: an override whose original the patch changed calls the
+    // module's function the host finds for that address (entries); there
+    // the code at the address is the mod's, not a way back to the override.
+    // Gay Fates puts code where debug::Menu::MoveToNext was (0x00421114,
+    // which supports.c overrides) and branches into it from its other
+    // changed code: each pass through it called the override, which called
+    // the original, which went to the override again, and My Castle's menu
+    // never opened
+    let originals: BTreeMap<u32, String> = plan.replaced.iter().filter_map(|&replaced| Some((replaced, entries.get(&replaced)?.clone()))).collect();
     let mut source = String::new();
     let mut size = 0;
     let mut sources = Vec::new();
@@ -532,7 +561,7 @@ pub fn source(plan: &Plan, program: &Program, base: &Base, base_digest: u64, cod
         if source.is_empty() {
             source.push_str("#define RECOMP_IMPORTED 1\n#include \"recomp.h\"\n#include \"patch.h\"\n\n");
         }
-        let left = codegen::write_patch_function(&mut source, program, &names, PREFIX, entry, function);
+        let left = codegen::write_patch_function(&mut source, program, &names, &originals, PREFIX, entry, function);
         if maybe_data(program, function) {
             left_to_host.extend(left);
         } else {
@@ -549,17 +578,6 @@ pub fn source(plan: &Plan, program: &Program, base: &Base, base_digest: u64, cod
     }
     if let Some(&first) = interpreted.first() {
         return Err(Unrecompilable { count: interpreted.len(), first });
-    }
-    // every label, preferring the function it starts
-    let mut entries: BTreeMap<u32, String> = BTreeMap::new();
-    for (&entry, function) in &plan.functions {
-        let name = codegen::function_name(PREFIX, entry, function.mode == Mode::Thumb);
-        for &label in &function.labels {
-            let slot = entries.entry(key(label, function.mode)).or_insert_with(|| name.clone());
-            if label == entry {
-                slot.clone_from(&name);
-            }
-        }
     }
     let mut table = String::from("#define RECOMP_IMPORTED 1\n#include \"recomp.h\"\n#include \"patch.h\"\n\n");
     table.push_str("/* filled in by the host before any of the module runs */\nRECOMP_EXPORT RecompImports recomp_imports;\n");
@@ -705,6 +723,40 @@ mod tests {
         assert!(header.contains("override_stub_00100008"));
     }
 
+    /// modfix: a patch writes code over a function Haiku overrides and
+    /// branches into it from code it changed (Gay Fates at 0x00421114): the
+    /// module's function holding that code is the override's original, so
+    /// the code there runs, never a way back to the override (which called
+    /// that original: the game went round for ever).
+    #[test]
+    fn code_a_patch_writes_over_an_override_runs_as_its_original() {
+        let own = [
+            0xEB00_0002, // bl BASE + 0x10
+            0xE12F_FF1E, // bx lr
+            0xE3A0_0001, // mov r0, #1: a function Haiku overrides
+            0xE12F_FF1E, // bx lr
+            0xE3A0_0003, // mov r0, #3
+            0xE12F_FF1E, // bx lr
+        ];
+        let mut patched = own;
+        patched[2] = 0xE3A0_0002; // mov r0, #2: the mod's code there now
+        patched[5] = 0xEAFF_FFFB; // b BASE + 8, into it
+        let mut base = base_of(&own);
+        base.entries.insert(BASE + 8, None);
+        let changed = changed_ranges(BASE, &bytes(&own), &bytes(&patched));
+        let program = Program { text: segment(&patched), seeds: vec![(BASE, Source::Entry)], slots: None };
+        let (made, program) = plan(&base, program, &changed);
+        assert_eq!(made.replaced, [BASE + 8]);
+        let module = source(&made, &program, &base, 0, 0).unwrap();
+        let table = &module.files.iter().find(|(name, _)| name == "patch.c").unwrap().1;
+        let holder = table.lines().find(|line| line.contains("{0x00100008u,")).and_then(|line| line.split(", ").nth(1)).map(|name| name.trim_end_matches("},").to_owned()).unwrap();
+        let code: String = module.files.iter().filter(|(name, _)| name.starts_with("patch0")).map(|(_, c)| c.clone()).collect();
+        let body = code.split(&format!("void {holder}(Context *ctx) {{")).nth(1).unwrap_or_else(|| panic!("{code}"));
+        let body = body.split("\nvoid ").next().unwrap();
+        assert!(!body.contains("CALL(override_stub_00100008)"), "{body}");
+        assert!(body.contains("/* 00100008 E3A00002 */"), "{body}");
+    }
+
     /// codemods2: FE1 writes strings over functions whose callers it changed
     /// too. the function is no code any more: the module builds, with the
     /// entry gone or its data left to the host, never refused.
@@ -796,6 +848,131 @@ mod tests {
         image.extend_from_slice(&bytes(&[0xE3A0_0002, 0xE12F_FF1E]));
         let program = program(&exheader, &image, &[(BASE + 0x1000, BASE + 0x1008)]);
         assert_eq!(program.text.end(), BASE + 8, ".text doesn't run on into .rodata");
+    }
+
+    /// modfix: the program's analysis guessed Thumb code over bytes a patch
+    /// then writes; read again, the guess calls into the ARM function
+    /// beside it as Thumb, a place no code holds in that mode. only a guess
+    /// goes there, so it is left to the host, and the module builds (Gay
+    /// Fates' S-rank patch writes over such a guess at 0x00421172).
+    #[test]
+    fn a_guess_going_where_no_code_is_does_not_refuse_the_module() {
+        let own = [
+            0xEB00_0002, // bl BASE + 0x10
+            0xE12F_FF1E, // bx lr
+            0x0000_0000, // a Thumb guess of the program's (below)
+            0x0000_0000,
+            0xE3A0_0001, // mov r0, #1
+            0xE12F_FF1E, // bx lr
+        ];
+        let mut patched = own;
+        patched[2] = 0xF802_F000; // Thumb: bl BASE + 0x10, into the ARM code
+        patched[3] = 0x46C0_4770; // Thumb: bx lr; nop
+        let mut base = base_of(&own);
+        let guess = base.functions.len();
+        base.functions.push(BaseFunction { start: BASE + 8, thumb: true, spans: vec![(BASE + 8, BASE + 0xC)] });
+        base.entries.insert(BASE + 9, Some(guess));
+        let changed = changed_ranges(BASE, &bytes(&own), &bytes(&patched));
+        let program = Program { text: segment(&patched), seeds: vec![(BASE, Source::Entry)], slots: None };
+        let (plan, program) = plan(&base, program, &changed);
+        assert!(plan.holes.is_empty(), "{:X?}", plan.holes);
+        assert!(plan.dead_ends.iter().any(|gap| gap.to == BASE + 0x10 && gap.mode == Mode::Thumb), "{:X?}", plan.dead_ends);
+        assert!(source(&plan, &program, &base, 0, 0).is_ok());
+    }
+
+    /// modfix: msr writing the control or extension field of the cpsr
+    /// (text a patch put where code was reads as one: Gay Fates' "S_%s" at
+    /// 0x001519BC is msrvc cpsr_sc) is what user mode makes of it, the flags
+    /// and the GE bits, not an instruction that refuses the module. one that
+    /// sets E, big-endian data, is still the interpreter's.
+    #[test]
+    fn msr_of_privileged_fields_writes_what_user_mode_can() {
+        let own = [
+            0xEB00_0001, // bl BASE + 0xC
+            0xE12F_FF1E, // bx lr
+            0xE320_F000, // nop
+            0xE3A0_0001, // mov r0, #1
+            0xE3A0_0002, // mov r0, #2
+            0xE12F_FF1E, // bx lr
+        ];
+        let mut patched = own;
+        patched[3] = 0xE325_F80F; // msr cpsr_sc, #0x000F0000
+        patched[4] = 0xE129_F000; // msr cpsr_fc, r0
+        let base = base_of(&own);
+        let changed = changed_ranges(BASE, &bytes(&own), &bytes(&patched));
+        let program = Program { text: segment(&patched), seeds: vec![(BASE, Source::Entry)], slots: None };
+        let (made, program) = plan(&base, program, &changed);
+        let module = source(&made, &program, &base, 0, 0).expect("msr with the control field is lowered");
+        let code: String = module.files.iter().filter(|(name, _)| name.starts_with("patch0")).map(|(_, c)| c.clone()).collect();
+        assert!(code.contains("ctx->ge = (value >> 16) & 0xF;") && code.contains("0x000F0000u"), "{code}");
+        assert!(code.contains("= value >> 31;"), "{code}");
+        assert!(!code.contains("INTERPRET"), "{code}");
+        // setting E is left to the interpreter: sure code refuses the module
+        patched[3] = 0xE322_FC02; // msr cpsr_x, #0x200
+        let changed = changed_ranges(BASE, &bytes(&own), &bytes(&patched));
+        let program = Program { text: segment(&patched), seeds: vec![(BASE, Source::Entry)], slots: None };
+        let (made, program) = plan(&base, program, &changed);
+        assert!(source(&made, &program, &base, 0, 0).is_err());
+    }
+
+    /// modfix: Thumb code a patch adds in free space, reached with an ARM
+    /// blx, is found and recompiled in the module.
+    #[test]
+    fn a_thumb_cave_reached_by_blx_is_recompiled() {
+        let own = [
+            0xEB00_0001, // bl BASE + 0xC
+            0xE12F_FF1E, // bx lr
+            0xE320_F000, // nop
+            0xE3A0_0001, // mov r0, #1
+            0xE12F_FF1E, // bx lr
+            0x0000_0000, // free space
+            0x0000_0000,
+        ];
+        let mut patched = own;
+        patched[3] = 0xFA00_0000; // blx BASE + 0x14 (Thumb)
+        patched[5] = 0x4770_2005; // Thumb: movs r0, #5; bx lr
+        let base = base_of(&own);
+        let changed = changed_ranges(BASE, &bytes(&own), &bytes(&patched));
+        let program = Program { text: segment(&patched), seeds: vec![(BASE, Source::Entry)], slots: None };
+        let (made, program) = plan(&base, program, &changed);
+        let cave = made.functions.values().find(|f| f.mode == Mode::Thumb && f.instructions.contains(&(BASE + 0x14)));
+        assert!(cave.is_some_and(|f| f.instructions.contains(&(BASE + 0x16))), "{:X?}", made.functions.keys());
+        assert!(made.holes.is_empty() && made.new_instructions >= 2);
+        let module = source(&made, &program, &base, 0, 0).unwrap();
+        let table = &module.files.iter().find(|(name, _)| name == "patch.c").unwrap().1;
+        assert!(table.contains("{0x00100015u,"), "the cave's Thumb entry: {table}");
+    }
+
+    /// modfix: Thumb code a patch adds, reached through a pointer it writes
+    /// in a literal (ldr r12, =cave + 1; bx r12), is found and recompiled.
+    #[test]
+    fn a_thumb_cave_reached_through_a_literal_is_recompiled() {
+        let own = [
+            0xEB00_0001, // bl BASE + 0xC
+            0xE12F_FF1E, // bx lr
+            0xE320_F000, // nop
+            0xE3A0_0001, // mov r0, #1
+            0xE12F_FF1E, // bx lr
+            0x0000_0000, // free space
+            0x0000_0000,
+            0x0000_0000,
+            0x0000_0000,
+        ];
+        let mut patched = own;
+        patched[3] = 0xE59F_C008; // ldr r12, [pc, #8]: the word at BASE + 0x1C
+        patched[4] = 0xE12F_FF1C; // bx r12
+        patched[7] = BASE + 0x21; // the cave, Thumb
+        patched[8] = 0x4770_2005; // Thumb: movs r0, #5; bx lr
+        let base = base_of(&own);
+        let changed = changed_ranges(BASE, &bytes(&own), &bytes(&patched));
+        let program = Program { text: segment(&patched), seeds: vec![(BASE, Source::Entry)], slots: None };
+        let (made, program) = plan(&base, program, &changed);
+        let cave = made.functions.values().find(|f| f.mode == Mode::Thumb && f.instructions.contains(&(BASE + 0x20)));
+        assert!(cave.is_some(), "{:X?}", made.functions.keys());
+        assert!(made.holes.is_empty());
+        let module = source(&made, &program, &base, 0, 0).unwrap();
+        let table = &module.files.iter().find(|(name, _)| name == "patch.c").unwrap().1;
+        assert!(table.contains("{0x00100021u,"), "{table}");
     }
 
     /// codemods2: a module links into a library with the compiler CC names

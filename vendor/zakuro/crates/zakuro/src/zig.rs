@@ -60,10 +60,18 @@ fn folder(tools: &Path) -> PathBuf {
     tools.join(format!("zig-{VERSION}"))
 }
 
+/// Zig's program in its folder.
+const PROGRAM: &str = if cfg!(windows) { "zig.exe" } else { "zig" };
+
+/// zigdl: the file in Zig's folder while it is being unpacked; a folder
+/// with it is a download that didn't finish.
+const UNPACKING: &str = ".unpacking";
+
 /// the compiler, when it has been downloaded into tools.
 pub fn installed(tools: &Path) -> Option<Compiler> {
-    let program = folder(tools).join(if cfg!(windows) { "zig.exe" } else { "zig" });
-    program.is_file().then(|| Compiler::new(program, &["cc"]))
+    let program = folder(tools).join(PROGRAM);
+    // zigdl: not one being unpacked, or whose unpacking stopped midway
+    (program.is_file() && !folder(tools).join(UNPACKING).exists()).then(|| Compiler::new(program, &["cc"]))
 }
 
 /// the program downloads go through, curl, which Linux, macOS and Windows
@@ -126,12 +134,36 @@ pub fn can_download() -> bool {
 /// in a random order, and ziglang.org last, as it asks of tools, and what
 /// arrives has to match the SHA-256 above whichever served it.
 pub fn download(tools: &Path, progress: &dyn Fn(f32), cancel: &AtomicBool) -> Result<Compiler, String> {
-    let archive = archive().ok_or("Zakuro has no compiler to download for this system")?;
+    download_then(tools, progress, &|| {}, cancel)
+}
+
+/// zigdl: download, telling unpacking when the archive is all there and
+/// checked and the unpacking (a minute or more) starts, so a progress bar
+/// doesn't sit at 100% meanwhile.
+pub fn download_then(tools: &Path, progress: &dyn Fn(f32), unpacking: &dyn Fn(), cancel: &AtomicBool) -> Result<Compiler, String> {
+    let mut archive = archive().ok_or("Zakuro has no compiler to download for this system")?;
     let fetcher = Fetcher::find().ok_or("Zakuro downloads with curl or wget, and this computer has neither")?;
+    let sources = match test_source() {
+        // zigdl: a test's stand-in server, in a build with debug assertions
+        Some((source, size, sha256)) => {
+            log::warn!("zigdl: HAIKU_ZIG_TEST: Zig from {source} instead ({size} bytes)");
+            (archive.size, archive.sha256) = (size, sha256);
+            vec![source]
+        }
+        None => {
+            let mut sources = mirrors(fetcher);
+            sources.push(format!("https://ziglang.org/download/{VERSION}"));
+            sources
+        }
+    };
+    from_sources(fetcher, tools, &archive, sources, progress, unpacking, cancel)
+}
+
+/// downloads archive from the first of sources that has it whole, and
+/// unpacks it into tools.
+fn from_sources(fetcher: Fetcher, tools: &Path, archive: &Archive, sources: Vec<String>, progress: &dyn Fn(f32), unpacking: &dyn Fn(), cancel: &AtomicBool) -> Result<Compiler, String> {
     std::fs::create_dir_all(tools).map_err(|error| format!("could not create {}, {error}", tools.display()))?;
     let partial = tools.join(format!("{}.part", archive.name));
-    let mut sources = mirrors(fetcher);
-    sources.push(format!("https://ziglang.org/download/{VERSION}"));
     let mut last = String::new();
     for source in sources {
         if cancel.load(Ordering::Relaxed) {
@@ -139,12 +171,17 @@ pub fn download(tools: &Path, progress: &dyn Fn(f32), cancel: &AtomicBool) -> Re
         }
         let url = format!("{}/{}", source.trim_end_matches('/'), archive.name);
         log::info!("downloading Zig from {url}");
-        match fetch(fetcher, &url, &partial, archive.size, progress, cancel).and_then(|()| verify(&partial, &archive)) {
+        match fetch(fetcher, &url, &partial, archive.size, progress, cancel).and_then(|()| verify(&partial, archive)) {
             Ok(()) => {
+                log::info!("zigdl: Zig arrived and its SHA-256 matches; unpacking it");
+                unpacking();
+                let started = std::time::Instant::now();
                 let unpacked = unpack(&partial, tools);
                 let _ = std::fs::remove_file(&partial);
                 unpacked?;
-                return installed(tools).ok_or_else(|| "Zig was unpacked but its zig program is missing".to_owned());
+                log::info!("zigdl: Zig unpacked into {} in {:.1} s", folder(tools).display(), started.elapsed().as_secs_f32());
+                // an antivirus can take the program away once it is there
+                return installed(tools).ok_or_else(|| format!("it was unpacked, but {} is gone from its folder (an antivirus may have removed it)", PROGRAM));
             }
             Err(error) => {
                 log::warn!("Zig from {url}: {error}");
@@ -157,6 +194,20 @@ pub fn download(tools: &Path, progress: &dyn Fn(f32), cancel: &AtomicBool) -> Re
         return Err("cancelled".to_owned());
     }
     Err(format!("could not download Zig, from ziglang.org or any of its mirrors, the last said {last}"))
+}
+
+/// zigdl: where a test serves its stand-in for Zig's archive, from
+/// HAIKU_ZIG_TEST="<base url> <size> <sha256>" (the archive keeps its
+/// name). Only a build with debug assertions reads it: a release or ship
+/// build never downloads from anywhere but the Zig project's mirrors.
+fn test_source() -> Option<(String, u64, &'static str)> {
+    if !cfg!(debug_assertions) {
+        return None;
+    }
+    let value = std::env::var("HAIKU_ZIG_TEST").ok()?;
+    let mut words = value.split_whitespace();
+    let (source, size, sha256) = (words.next()?.to_owned(), words.next()?.parse().ok()?, words.next()?);
+    Some((source, size, Box::leak(sha256.to_ascii_lowercase().into_boxed_str())))
 }
 
 /// the mirrors the Zig project lists, in a random order, none when the list
@@ -234,34 +285,53 @@ fn verify(path: &Path, archive: &Archive) -> Result<(), String> {
 }
 
 /// unpacks the archive into its folder in tools with tar, which reads the
-/// zip on Windows too. the archive holds a single folder, renamed to
-/// zig-<version> once it is all there.
+/// zip on Windows too. the archive holds a single folder, whose contents go
+/// straight into zig-<version> (tar's --strip-components).
+///
+/// zigdl: it used to be unpacked into a folder beside it and that folder
+/// renamed into place, but Windows refuses to rename a folder while any
+/// file in it is open, by anyone, and an antivirus, the search indexer or
+/// OneDrive open the new files as tar writes them (zig.exe, 190 MB, takes
+/// a while to scan): the rename then failed with "Access is denied (os
+/// error 5)" after a minute of unpacking (GitHub issue #8). Nothing is
+/// renamed now; the .unpacking file in the folder says it isn't finished,
+/// and is deleted last.
 fn unpack(archive: &Path, tools: &Path) -> Result<(), String> {
-    let staging = tools.join(format!("zig-{VERSION}.unpacking"));
-    let _ = std::fs::remove_dir_all(&staging);
-    std::fs::create_dir_all(&staging).map_err(|error| error.to_string())?;
+    let target = folder(tools);
+    // what an earlier download left: a half-unpacked folder, or the
+    // staging folder the renaming way used
+    let _ = std::fs::remove_dir_all(&target);
+    let _ = std::fs::remove_dir_all(tools.join(format!("zig-{VERSION}.unpacking")));
+    std::fs::create_dir_all(&target).map_err(|error| format!("its folder {} can't be made, {error}", target.display()))?;
+    let unpacking = target.join(UNPACKING);
+    std::fs::write(&unpacking, b"").map_err(|error| format!("{} can't be written, {error}", unpacking.display()))?;
     let xz = archive.to_string_lossy().ends_with(".tar.xz.part");
-    let status = no_window(&mut Command::new("tar")) // nowindow
+    // its messages are read: started without a console window (nowindow),
+    // what it says would go nowhere
+    let output = no_window(&mut Command::new("tar"))
         .arg(if xz { "-xJf" } else { "-xf" })
         .arg(archive)
+        .arg("--strip-components=1")
         .arg("-C")
-        .arg(&staging)
-        .status()
+        .arg(&target)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
         .map_err(|error| format!("tar could not start, {error}"))?;
-    if !status.success() {
-        let _ = std::fs::remove_dir_all(&staging);
-        return Err("tar could not unpack it".to_owned());
+    if !output.status.success() {
+        let said = String::from_utf8_lossy(&output.stderr);
+        for line in said.lines() {
+            log::warn!("zigdl: tar: {line}");
+        }
+        let first = said.lines().map(str::trim).find(|line| !line.is_empty()).unwrap_or("no message");
+        return Err(format!("it couldn't be unpacked ({}; tar said: {first})", output.status));
     }
-    let inner = std::fs::read_dir(&staging)
-        .map_err(|error| error.to_string())?
-        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-        .find(|path| path.is_dir())
-        .ok_or("the archive held no folder")?;
-    let target = folder(tools);
-    let _ = std::fs::remove_dir_all(&target);
-    std::fs::rename(&inner, &target).map_err(|error| error.to_string())?;
-    let _ = std::fs::remove_dir_all(&staging);
-    Ok(())
+    if !target.join(PROGRAM).is_file() {
+        return Err(format!("it was unpacked, but {PROGRAM} isn't in it"));
+    }
+    // last: the folder is whole. if this fails the next start downloads again
+    std::fs::remove_file(&unpacking).map_err(|error| format!("{} can't be deleted, {error}", unpacking.display()))
 }
 
 #[cfg(test)]
@@ -294,6 +364,146 @@ mod tests {
         let wget = args(Fetcher::Wget.command("https://x/z", Some(Path::new("/t/z.part")), 1800));
         assert!(wget.windows(2).any(|pair| pair == ["-O", "/t/z.part"]) && wget.last().map(String::as_str) == Some("https://x/z"));
         assert!(args(Fetcher::Wget.command("https://x/list", None, 30)).windows(2).any(|pair| pair == ["-O", "-"]));
+    }
+
+    /// zigdl: an archive laid out as Zig's (one folder holding the program
+    /// and a lib folder), made with the tar the download unpacks with, and
+    /// its size and SHA-256.
+    fn stand_in(dir: &Path) -> (PathBuf, Archive) {
+        use sha2::{Digest, Sha256};
+        let top = dir.join("src").join("zig-x86_64-test-0.17.0");
+        std::fs::create_dir_all(top.join("lib").join("std")).unwrap();
+        std::fs::write(top.join(PROGRAM), b"a stand-in for zig").unwrap();
+        std::fs::write(top.join("lib").join("std").join("std.zig"), b"// std").unwrap();
+        let name = if cfg!(windows) { "zig-x86_64-test-0.17.0.zip" } else { "zig-x86_64-test-0.17.0.tar.xz" };
+        let path = dir.join(name);
+        let made = Command::new("tar")
+            .arg(if cfg!(windows) { "-acf" } else { "-cJf" })
+            .arg(&path)
+            .arg("-C")
+            .arg(dir.join("src"))
+            .arg("zig-x86_64-test-0.17.0")
+            .status()
+            .unwrap();
+        assert!(made.success());
+        let bytes = std::fs::read(&path).unwrap();
+        let sha256: String = Sha256::digest(&bytes).iter().map(|byte| format!("{byte:02x}")).collect();
+        (path, Archive { name: Box::leak(name.to_owned().into_boxed_str()), size: bytes.len() as u64, sha256: Box::leak(sha256.into_boxed_str()) })
+    }
+
+    /// zigdl: serves file at /<its name> on 127.0.0.1 to the next few
+    /// requests, a 404 for anything else; the base URL.
+    fn serve(file: PathBuf) -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let name = format!("/{}", file.file_name().unwrap().to_string_lossy());
+        std::thread::spawn(move || {
+            for stream in listener.incoming().take(8) {
+                let Ok(mut stream) = stream else { continue };
+                let mut request = Vec::new();
+                let mut byte = [0u8; 1];
+                while !request.ends_with(b"\r\n\r\n") && stream.read(&mut byte).is_ok_and(|n| n == 1) {
+                    request.push(byte[0]);
+                }
+                let line = String::from_utf8_lossy(&request).lines().next().unwrap_or("").to_owned();
+                let body = if line.split_whitespace().nth(1) == Some(name.as_str()) { std::fs::read(&file).ok() } else { None };
+                let _ = match body {
+                    Some(body) => stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).as_bytes()).and_then(|()| stream.write_all(&body)),
+                    None => stream.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"),
+                };
+            }
+        });
+        base
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("zakuro-zigdl-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// zigdl: the whole download, from a server on 127.0.0.1 (never the
+    /// internet), with the curl or wget and the tar the player has: a source
+    /// without it is passed over, the archive is checked and unpacked into
+    /// zig-<version>, and nothing else is left in tools.
+    #[test]
+    fn zig_is_downloaded_checked_and_unpacked_into_its_folder() {
+        let Some(fetcher) = Fetcher::find() else { return };
+        let dir = scratch("download");
+        let (path, archive) = stand_in(&dir);
+        let base = serve(path);
+        let tools = dir.join("tools");
+        let unpacked = std::sync::atomic::AtomicBool::new(false);
+        let never = AtomicBool::new(false);
+        let sources = vec![format!("{base}/missing"), base];
+        let compiler = from_sources(fetcher, &tools, &archive, sources, &|_| {}, &|| unpacked.store(true, Ordering::Relaxed), &never).unwrap();
+        assert_eq!(compiler, Compiler::new(folder(&tools).join(PROGRAM), &["cc"]));
+        assert!(unpacked.load(Ordering::Relaxed));
+        assert!(folder(&tools).join("lib").join("std").join("std.zig").is_file());
+        let left: Vec<String> = std::fs::read_dir(&tools).unwrap().map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        assert_eq!(left, [format!("zig-{VERSION}")]);
+        assert_eq!(installed(&tools), Some(compiler));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// zigdl, issue #8: something keeping the new zig open as it is
+    /// unpacked (an antivirus scanning it, OneDrive, the indexer) made the
+    /// rename into place fail with "Access is denied" on Windows. Nothing is
+    /// renamed now, so it doesn't matter.
+    #[test]
+    fn a_program_holding_the_new_zig_open_does_not_stop_the_install() {
+        let Some(fetcher) = Fetcher::find() else { return };
+        let dir = scratch("held");
+        let (path, archive) = stand_in(&dir);
+        let base = serve(path);
+        let tools = dir.join("tools");
+        let done = std::sync::Arc::new(AtomicBool::new(false));
+        // a scanner: opens zig as soon as it is there, sharing everything as
+        // scanners do, and keeps it open until the download is over
+        let scanner = {
+            let (tools, done) = (tools.clone(), done.clone());
+            std::thread::spawn(move || {
+                let mut held = Vec::new();
+                while !done.load(Ordering::Relaxed) {
+                    for program in [folder(&tools).join(PROGRAM), tools.join(format!("zig-{VERSION}.unpacking")).join("zig-x86_64-test-0.17.0").join(PROGRAM)] {
+                        if held.is_empty() {
+                            if let Ok(file) = std::fs::File::open(&program) {
+                                held.push(file);
+                            }
+                        }
+                    }
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                !held.is_empty()
+            })
+        };
+        let never = AtomicBool::new(false);
+        let result = from_sources(fetcher, &tools, &archive, vec![base], &|_| {}, &|| {}, &never);
+        done.store(true, Ordering::Relaxed);
+        let held = scanner.join().unwrap();
+        assert!(result.is_ok(), "{result:?}");
+        assert!(held, "the scanner never caught zig");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// zigdl: a folder whose unpacking didn't finish isn't a compiler, and
+    /// tar's own words say why it couldn't unpack.
+    #[test]
+    fn a_half_unpacked_zig_is_not_installed_and_tar_says_why_it_failed() {
+        let dir = scratch("half");
+        let tools = dir.join("tools");
+        std::fs::create_dir_all(folder(&tools)).unwrap();
+        std::fs::write(folder(&tools).join(PROGRAM), b"").unwrap();
+        std::fs::write(folder(&tools).join(UNPACKING), b"").unwrap();
+        assert!(installed(&tools).is_none());
+        let broken = dir.join(if cfg!(windows) { "broken.zip.part" } else { "broken.tar.xz.part" });
+        std::fs::write(&broken, b"not an archive at all").unwrap();
+        let error = unpack(&broken, &tools).unwrap_err();
+        assert!(error.contains("couldn't be unpacked") && error.contains("tar said:"), "{error}");
+        assert!(installed(&tools).is_none());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

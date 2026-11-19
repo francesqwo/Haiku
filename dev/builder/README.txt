@@ -63,9 +63,14 @@ Playing
 -------
 
 Esc (or the controller's Guide button) opens the options. Mods go in the
-mods folder next to Haiku.exe; none come with Haiku. Controllers,
-keyboard, widescreen, frame rate and the bottom screen are all in the
-options.
+mods folder next to Haiku.exe, as you downloaded them; none come with
+Haiku. Controllers, keyboard, widescreen, frame rate and the bottom screen
+are all in the options.
+
+Code mods need a C compiler. Haiku asks first, and offers to download Zig
+(96 MB, fast) or to use the compiler in setup\w64devkit, which came with
+Haiku (no download, slower on big code mods). The Mods page's Code Mod
+Compiler row changes the choice.
 
 
 Fan translations of the Japanese game

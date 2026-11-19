@@ -515,12 +515,16 @@ fn pieces(spans: impl Iterator<Item = (u32, u32)>) -> Vec<(u32, u32)> {
 /// addresses it left to the interpreter, which a patch module must have
 /// none of (a host without an interpreter could not run them), so it is
 /// written once.
-pub(crate) fn write_patch_function(out: &mut String, program: &Program, names: &BTreeMap<u32, String>, prefix: &str, entry: u32, function: &Function) -> Vec<u32> {
+/// modfix: originals, the module's function each override whose original a
+/// patch changed runs as that original (by the replaced address), so that
+/// code reaching the address inside that function runs the mod's code there
+/// rather than going back to the override, which called it (as the
+/// program's own containers do, Scope::redirect).
+pub(crate) fn write_patch_function(out: &mut String, program: &Program, names: &BTreeMap<u32, String>, originals: &BTreeMap<u32, String>, prefix: &str, entry: u32, function: &Function) -> Vec<u32> {
     let interpreted = std::cell::RefCell::new(Vec::new());
     let own = key(entry, function.mode);
     let own_name = name(prefix, entry, function.mode == Mode::Thumb);
-    let originals = BTreeMap::new();
-    let scope = Scope { labels: &function.labels, functions: names, prefix, relative: false, interpreted: &interpreted, entry: own, originals: &originals, own_name: &own_name, patch: true };
+    let scope = Scope { labels: &function.labels, functions: names, prefix, relative: false, interpreted: &interpreted, entry: own, originals, own_name: &own_name, patch: true };
     write_function(out, program, &scope, entry, function, 0);
     interpreted.take()
 }

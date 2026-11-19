@@ -139,14 +139,22 @@ fn status_register(out: &mut String, scope: &Scope, a: u32, op: u32) -> bool {
         return true;
     }
     let mask = (op >> 16) & 0xF;
-    if mask & 0b0011 != 0 {
+    // modfix: the control field (mode, T, I and F) and the extension field
+    // are privileged: a 3DS title runs in user mode, where the CPU leaves
+    // them as they are and writes only the flags and the GE bits. so the
+    // write is the same as one without those fields; only E (bit 9, big
+    // endian data), which user mode may set, is the interpreter's when an
+    // immediate sets it. code mods write such instructions (and text a
+    // patch put where code was can read as one), which refused the module
+    let immediate = op & (1 << 25) != 0;
+    let constant = (op & 0xFF).rotate_right(((op >> 8) & 0xF) * 2);
+    if mask & 0b0010 != 0 && immediate && constant & (1 << 9) != 0 {
         return interpret(out, scope, a, op);
     }
-    let value = if op & (1 << 25) != 0 {
-        format!("0x{:08X}u", (op & 0xFF).rotate_right(((op >> 8) & 0xF) * 2))
-    } else {
-        reg(scope, op & 0xF, a + 8)
-    };
+    if mask & 0b1100 == 0 {
+        return true;
+    }
+    let value = if immediate { format!("0x{constant:08X}u") } else { reg(scope, op & 0xF, a + 8) };
     emit!(out, "    {{");
     emit!(out, "    uint32_t value = {value};");
     if mask & 0b1000 != 0 {

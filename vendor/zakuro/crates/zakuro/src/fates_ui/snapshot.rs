@@ -340,12 +340,18 @@ const SCENES: &[Scene] = &[
     } },
     Scene { name: "mods-download", setup: |f, _, s| {
         options_at(f, 6, Page::Main, 5);
-        f.options.ask_download(96);
+        f.options.ask_download(super::codemods::Ask { mb: 96, setup: false });
+        s.pc.glyphs = crate::settings::Glyphs::Xbox;
+    } },
+    // zigdl: the choice between Zig and the compiler that came with Haiku
+    Scene { name: "mods-compiler-choice", setup: |f, _, s| {
+        options_at(f, 6, Page::Main, 5);
+        f.options.ask_download(super::codemods::Ask { mb: 96, setup: true });
         s.pc.glyphs = crate::settings::Glyphs::Xbox;
     } },
     Scene { name: "mods-compiling", setup: |f, _, s| {
         options_at(f, 6, Page::Main, 5);
-        f.env.mods.job = Some(super::codemods::JobView { title: "Preparing Gameplay Tweaks".into(), line: "Compiling... 2 of 3".into(), fraction: 0.72 });
+        f.env.mods.job = Some(super::codemods::JobView { title: "Preparing Gameplay Tweaks".into(), line: "Compiling... 2 of 3".into(), fraction: 0.72, hint: String::new() });
         s.pc.glyphs = crate::settings::Glyphs::Xbox;
     } },
     Scene { name: "keyboard", setup: |_, v, _| {

@@ -22,6 +22,7 @@ pub mod haiku_builtin; // sunglasses: Haiku's own RomFS layer (assets/builtin)
 pub mod haiku_voices; // jpvoice: the Japanese voice layer (data/voices-ja)
 pub mod haiku_import; // hdpacks: downloads (split, zips of zips) unpacked into mod folders
 pub mod haiku_fanpatch; // fanpatch: mods for other releases (Team If), Haiku's text under mods'
+pub mod haiku_modlayout; // modfix: mods laid out as players get them (loose RomFS folders, title folders deeper down, a choice of code patches)
 pub mod jpn_english; // jpn2: Haiku's lines and menus in English under a translation on the Japanese game
 // hfr: high frame rates, display modes and pacing
 pub mod display;

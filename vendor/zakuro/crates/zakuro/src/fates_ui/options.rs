@@ -155,6 +155,8 @@ pub enum Item {
     Mod(usize),
     ModsNone,
     ModsFolder,
+    /// zigdl: which compiler code mods use
+    ModsCompiler,
     ModsApply,
     // qol: the Gameplay tab's rows
     GameSpeed,
@@ -593,7 +595,7 @@ pub fn row(item: Item, settings: &Settings, env: &Env, armed: Option<Item>, rebi
             }
             (name, Some(value), s("Press, then press the controller button to use. Esc cancels."))
         }
-        Item::Mod(_) | Item::ModsNone | Item::ModsFolder | Item::ModsApply => super::mods::row(item, env), // mods
+        Item::Mod(_) | Item::ModsNone | Item::ModsFolder | Item::ModsCompiler | Item::ModsApply => super::mods::row(item, env), // mods
         Item::Cheat(id) => super::cheats::row(id, settings), // cheats
         // qol
         Item::GameSpeed => (
@@ -909,7 +911,7 @@ pub fn adjust(item: Item, dir: i32, settings: &mut Settings, env: &Env) -> Optio
         Item::Pad(index) => return (dir == 0).then_some(Effect::RebindPad(index)),
         Item::KeyboardPage | Item::ControllerPage => return None,
         // mods: the Mods page's
-        Item::Mod(_) | Item::ModsNone | Item::ModsFolder | Item::ModsApply => return super::mods::adjust(item, dir, env),
+        Item::Mod(_) | Item::ModsNone | Item::ModsFolder | Item::ModsCompiler | Item::ModsApply => return super::mods::adjust(item, dir, env),
         Item::Cheat(id) => return super::cheats::adjust(id, dir, settings), // cheats
         // qol: a speed chosen other than 1x is also what the key switches to
         Item::GameSpeed => {
@@ -1024,7 +1026,7 @@ fn changes(item: Item) -> bool {
             | Item::ExitDesktop // qol
             | Item::ReturnTitle // qol4
             | Item::VoicesRestart // jpvoice
-            | Item::ModsNone | Item::ModsFolder | Item::ModsApply // mods
+            | Item::ModsNone | Item::ModsFolder | Item::ModsApply // mods (zigdl: ModsCompiler changes with left and right)
     )
 }
 
@@ -1127,8 +1129,8 @@ impl OptionsMenu {
     }
 
     /// codemods: puts up the compiler download question, for the screenshots.
-    pub fn ask_download(&mut self, mb: u64) {
-        self.confirm = Some(super::mods::Confirm { yes: true, download: Some(mb), exit: false, title: false });
+    pub fn ask_download(&mut self, ask: super::codemods::Ask) {
+        self.confirm = Some(super::mods::Confirm { yes: true, download: Some(ask), exit: false, title: false });
 
     }
 
@@ -1359,11 +1361,12 @@ impl OptionsMenu {
         // closes the menu, the unpacking goes on
         let unpacking = (self.open && self.tab() == Tab::Mods).then(crate::haiku_import::running).flatten();
         // codemods: the compiler download question, when the app asks it
-        if let Some(mb) = env.mods.ask_download {
+        if let Some(ask) = env.mods.ask_download {
             if self.confirm.as_ref().is_none_or(|confirm| confirm.download.is_none()) {
-                self.confirm = Some(super::mods::Confirm { yes: true, download: Some(mb), exit: false, title: false });
+                self.confirm = Some(super::mods::Confirm { yes: true, download: Some(ask), exit: false, title: false });
             }
         }
+        super::mods::set_compiler_row(env.mods.compiler_row.then_some(settings.pc.code_mods_compiler)); // zigdl
         // codemods: the compile's dialog takes the input while it is up
         if unpacking.is_some() && env.mods.job.is_none() {
             if nav.back || nav.close || input.pointer.secondary_clicked() {
@@ -1377,6 +1380,7 @@ impl OptionsMenu {
         } else if let Some(confirm) = &mut self.confirm {
             // mods: the restart dialog takes the input while it is up
             let download = confirm.download.is_some();
+            let choice = confirm.download.is_some_and(|ask| ask.setup); // zigdl
             match super::mods::confirm_nav(confirm, canvas, input, nav, env.mods.pending) {
                 Some(super::mods::Answer::Yes) if confirm.exit => {
                     self.confirm = None;
@@ -1393,7 +1397,12 @@ impl OptionsMenu {
                     self.confirm = None;
                     effects.push(Effect::Mods(if download { super::mods::ModsEffect::Download(true) } else { super::mods::ModsEffect::Restart }));
                 }
-                Some(super::mods::Answer::No) => {
+                // zigdl: on the compiler choice, No is the other compiler
+                Some(super::mods::Answer::No) if choice => {
+                    self.confirm = None;
+                    effects.push(Effect::Mods(super::mods::ModsEffect::UseSetupCompiler));
+                }
+                Some(super::mods::Answer::No) | Some(super::mods::Answer::Cancel) => {
                     self.confirm = None;
                     if download {
                         effects.push(Effect::Mods(super::mods::ModsEffect::Download(false)));

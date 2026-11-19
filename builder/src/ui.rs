@@ -364,7 +364,7 @@ mod imp {
                 (Screen::Ready, Id::VoicesJapanese) => self.voices_choose(true),
                 (Screen::Game, Id::PickFile) => {
                     let filter = [("3DS game dumps (*.3ds, *.cci, *.cia, *.cxi)", "*.3ds;*.cci;*.cia;*.cxi;*.app"), ("All files", "*.*")];
-                    if let Some(p) = pick_file(self.hwnd, "Select your Fire Emblem Fates Special Edition (USA) dump", &filter) {
+                    if let Some(p) = pick_file(self.hwnd, "Select your Fire Emblem Fates Special Edition dump", &filter) {
                         self.set_game(&p);
                     }
                 }
@@ -768,8 +768,8 @@ mod imp {
             self.heading(
                 dc,
                 r,
-                "Select your Fire Emblem Fates Special Edition (USA) dump.",
-                "A decrypted .3ds (.cci), .cia or .cxi of the cartridge, or Citra's or Azahar's sdmc folder with the game installed. You can also drop the file on this window. It is only read.",
+                "Select your Fire Emblem Fates Special Edition dump.",
+                "The US, European or Japanese release, decrypted: a .3ds (.cci), .cia or .cxi of the cartridge, or Citra's or Azahar's sdmc folder with it installed. You can also drop it here. It is only read.",
             );
             let top = self.px(274);
             match &self.game {

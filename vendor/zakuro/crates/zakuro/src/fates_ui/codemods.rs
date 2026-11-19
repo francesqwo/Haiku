@@ -12,6 +12,7 @@ use super::kit::{Art, Canvas, TEXT_CREAM, TEXT_DARK};
 use super::options::{PANEL_H, PANEL_Y, WIDTH};
 use crate::haiku_codemods::{self as codemods, Game, Job, Stage};
 use crate::haiku_mods::Note;
+use crate::settings::CodeModsCompiler;
 use crate::App;
 use zakuro_core::codemods::CodeMods;
 
@@ -21,6 +22,8 @@ pub struct JobView {
     pub title: String,
     pub line: String,
     pub fraction: f32,
+    /// zigdl: a second, smaller line (how long the slow compiler takes)
+    pub hint: String,
 }
 
 impl JobView {
@@ -28,12 +31,24 @@ impl JobView {
         let stage = job.stage();
         let line = match &stage {
             Stage::Downloading(f) => format!("Downloading the compiler... {:.0}%", f * 100.0),
+            Stage::Unpacking => "Unpacking the compiler...".to_owned(), // zigdl
             Stage::Analysing => "Finding the code the mods change...".to_owned(),
+            // zigdl: the compiler that came with Haiku takes minutes on a
+            // big code mod: the time so far shows it is going
+            Stage::Compiling { done, total } if job.slow.load(std::sync::atomic::Ordering::Relaxed) => {
+                let seconds = job.started.elapsed().as_secs();
+                format!("Compiling, {done} of {total} done, {}:{:02} so far...", seconds / 60, seconds % 60)
+            }
             Stage::Compiling { done, total } => format!("Compiling... {done} of {total}"),
             Stage::Done => "Done.".to_owned(),
             Stage::Failed(error) => error.clone(),
         };
-        JobView { title: format!("Preparing {}", job.names.join(", ")), line, fraction: stage.fraction() }
+        let hint = if job.slow.load(std::sync::atomic::Ordering::Relaxed) && matches!(stage, Stage::Analysing | Stage::Compiling { .. }) {
+            "With the compiler that came with Haiku: a big code mod takes several minutes.".to_owned()
+        } else {
+            String::new()
+        };
+        JobView { title: format!("Preparing {}", job.names.join(", ")), line, fraction: stage.fraction(), hint }
     }
 }
 
@@ -46,14 +61,36 @@ pub struct CodeModsState {
     /// restart once the job is done.
     pub restart_after: bool,
     /// the consent dialog's question, while it is up: the download's size.
-    pub asking: Option<u64>,
+    pub asking: Option<Ask>,
+}
+
+/// zigdl: the compiler question: Zig's download size, and whether the
+/// compiler that came with Haiku is there to choose instead.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Ask {
+    pub mb: u64,
+    pub setup: bool,
 }
 
 const DIALOG_W: f32 = 300.0;
 
 /// the consent dialog's text.
-pub fn download_text(mb: u64) -> String {
+pub fn download_text(ask: Ask) -> String {
+    let mb = ask.mb;
+    if ask.setup {
+        // zigdl: the choice, when Haiku Setup's compiler is there
+        return format!("Code mods need a compiler. Zig is a one-time download of {mb}\u{a0}MB and compiles code mods in under a minute. The compiler that came with Haiku needs no download, but a big code mod takes several minutes. You can change this on the Mods page.");
+    }
     format!("Code mods need a compiler: a one-time download of {mb}\u{a0}MB from ziglang.org. Download it now?")
+}
+
+/// zigdl: the answers to the question.
+pub fn answers(ask: Ask) -> [&'static str; 2] {
+    if ask.setup {
+        ["Download Zig", "Use Haiku's compiler"]
+    } else {
+        ["Yes", "No"]
+    }
 }
 
 /// draws the compile's progress over the menu, as the game's dialog with a
@@ -62,7 +99,9 @@ pub fn draw_job(canvas: &Canvas, job: &JobView, now: f64) {
     let white = Color32::WHITE;
     canvas.fill(0.0, 0.0, WIDTH, super::options::HEIGHT, Color32::from_black_alpha(90));
     let lines = canvas.kit.wrap_even(&job.title, DIALOG_W - 36.0, 0.9);
-    let height = lines.len() as f32 * 15.0 + 22.0 + 40.0;
+    // zigdl: the slow compiler's hint, under the line
+    let hint = if job.hint.is_empty() { Vec::new() } else { canvas.kit.wrap_even(&job.hint, DIALOG_W - 50.0, 0.62) };
+    let height = lines.len() as f32 * 15.0 + 22.0 + 40.0 + hint.len() as f32 * 10.0;
     let x = (WIDTH - DIALOG_W) / 2.0;
     let y = PANEL_Y + (PANEL_H - height) / 2.0;
     canvas.nine(Art::Dialog, x, y, DIALOG_W, height, [22.0, 22.0, 22.0, 22.0], 0.5, white);
@@ -81,6 +120,9 @@ pub fn draw_job(canvas: &Canvas, job: &JobView, now: f64) {
     let line = job.line.trim_end_matches("...").to_owned();
     let line = if job.line.ends_with("...") { format!("{line}{dots}") } else { line };
     canvas.text_centered(x + DIALOG_W / 2.0, bar_y + 14.0, &line, 0.72, TEXT_DARK);
+    for (index, line) in hint.iter().enumerate() {
+        canvas.text_centered(x + DIALOG_W / 2.0, bar_y + 27.0 + index as f32 * 10.0, line, 0.62, TEXT_DARK); // zigdl
+    }
     let _ = TEXT_CREAM;
 }
 
@@ -171,7 +213,51 @@ impl App {
             }
         };
         let list = &mut self.fates.mods;
-        let plan = codemods::plan(list, &game, digest);
+        // modfix: the code mods that failed to compile with the others are
+        // left out, and the others run without them (never all of them for
+        // one that can't be compiled); their notes say why
+        let build_now = self.options.headless.is_some() || std::env::var("FATES_CODEMODS_BUILD").is_ok_and(|value| value == "1");
+        let left_alone = |list: &mut crate::haiku_mods::ModList, failed: &[(usize, codemods::Failure)]| {
+            let fresh: Vec<(usize, codemods::Failure)> = failed.iter().filter(|(index, _)| !list.left_out.contains(&list.mods[*index].id)).cloned().collect();
+            for (index, failure) in fresh {
+                leave_out(list, &[index], &format!("{} The other code mods run without it.", codemods::failure_note(&failure)));
+            }
+        };
+        let (mut plan, failed) = codemods::plan_past_failures(list, &game, digest);
+        left_alone(list, &failed);
+        loop {
+            if !plan.patches() || codemods::is_built(&plan) {
+                break;
+            }
+            let patching: Vec<usize> = plan.mods.iter().map(|(index, _)| *index).collect();
+            match codemods::pick(self.settings.pc.code_mods_compiler).filter(|_| build_now) { // zigdl: as chosen
+                Some(compiler) => {
+                    log::info!("codemods: compiling {} with {}", plan.names().join(", "), compiler.describe());
+                    let never = std::sync::atomic::AtomicBool::new(false);
+                    let Err(failure) = codemods::build(&plan, &game, &base, &compiler, &|stage| log::debug!("codemods: {stage:?}"), &never) else { break };
+                    log::warn!("codemods: the code mods could not be compiled: {failure}");
+                    codemods::record_failure(plan.key, &failure);
+                    // modfix: about some of them: the rest go on without them
+                    let (next, more) = codemods::plan_past_failures(list, &game, digest);
+                    if more.is_empty() {
+                        leave_out_failed(list, &patching, &failure, "");
+                        break;
+                    }
+                    left_alone(list, &more);
+                    plan = next;
+                }
+                // codemods2: why it failed last time, rather than "not
+                // compiled yet", until the player tries again
+                None => {
+                    match codemods::last_failure(plan.key) {
+                        Some(failure) => leave_out_failed(list, &patching, &failure, " Choose Apply and Restart to try again."),
+                        None if build_now => leave_out(list, &patching, "Its code isn't compiled, and there is no compiler: open the Mods screen and choose Apply and Restart."),
+                        None => leave_out(list, &patching, "Its code isn't compiled yet: choose Apply and Restart to compile it."),
+                    }
+                    break;
+                }
+            }
+        }
         for (index, problem) in &plan.problems {
             leave_out(list, &[*index], &format!("Its code can't be used: {problem}. It stays out until that is fixed."));
         }
@@ -180,27 +266,6 @@ impl App {
             list.code_notes.entry(id).or_default().extend(notes.iter().map(|text| Note { warning: true, text: text.clone() }));
         }
         let patching: Vec<usize> = plan.mods.iter().map(|(index, _)| *index).collect();
-        if plan.patches() && !codemods::is_built(&plan) {
-            let build_now = self.options.headless.is_some() || std::env::var("FATES_CODEMODS_BUILD").is_ok_and(|value| value == "1");
-            match codemods::compiler().filter(|_| build_now) {
-                Some(compiler) => {
-                    log::info!("codemods: compiling {} with {}", plan.names().join(", "), compiler.describe());
-                    let never = std::sync::atomic::AtomicBool::new(false);
-                    if let Err(failure) = codemods::build(&plan, &game, &base, &compiler, &|stage| log::debug!("codemods: {stage:?}"), &never) {
-                        log::warn!("codemods: the code mods could not be compiled: {failure}");
-                        codemods::record_failure(plan.key, &failure);
-                        leave_out_failed(list, &patching, &failure, "");
-                    }
-                }
-                // codemods2: why it failed last time, rather than "not
-                // compiled yet", until the player tries again
-                None => match codemods::last_failure(plan.key) {
-                    Some(failure) => leave_out_failed(list, &patching, &failure, " Choose Apply and Restart to try again."),
-                    None if build_now => leave_out(list, &patching, "Its code isn't compiled, and there is no compiler: open the Mods screen and choose Apply and Restart."),
-                    None => leave_out(list, &patching, "Its code isn't compiled yet: choose Apply and Restart to compile it."),
-                },
-            }
-        }
         let list = &mut self.fates.mods;
         let mods = if patching.iter().any(|index| list.left_out.contains(&list.mods[*index].id)) {
             // never half the code mods: with one of them out, the patched
@@ -220,7 +285,12 @@ impl App {
                         codemods::log_overlaps(&plan.names(), &built.replaced);
                         for &index in &patching {
                             let id = list.mods[index].id.clone();
-                            list.code_notes.entry(id).or_default().extend(codemods::built_notes(&built).into_iter().map(|text| Note { warning: text.contains("Off while it runs"), text }));
+                            let notes = list.code_notes.entry(id).or_default();
+                            notes.extend(codemods::built_notes(&built).into_iter().map(|text| Note { warning: text.contains("Off while it runs"), text }));
+                            // zigdl: which compiler, when Zig failed: first, so the box shows it
+                            if !built.compiler_note.is_empty() {
+                                notes.insert(0, Note { warning: false, text: built.compiler_note.clone() });
+                            }
                         }
                     }
                     mods
@@ -270,6 +340,15 @@ impl App {
     /// compiled. if not, compiling starts (or the player is asked to
     /// download the compiler), and the restart follows once it is done.
     pub(crate) fn fates_code_mods_ready(&mut self) -> bool {
+        self.fates_code_mods_ready_with(true)
+    }
+
+    /// modfix: fates_code_mods_ready; retry (the player's Apply and
+    /// Restart) compiles every code mod on again, also those that failed
+    /// before; without it (the restart after a compile), the ones that
+    /// failed are left out and the rest compiled, and a set that failed as a
+    /// whole goes ahead without its code mods, so the other mods are used.
+    pub(crate) fn fates_code_mods_ready_with(&mut self, retry: bool) -> bool {
         if self.fates.code.job.is_some() {
             return false;
         }
@@ -281,22 +360,38 @@ impl App {
         }
         let Ok(base) = codemods::base(&linked) else { return true };
         let Ok(game) = self.fates_code_game(&path) else { return true };
-        let plan = codemods::plan(&self.fates.mods, &game, base.digest());
-        if !plan.patches() || codemods::is_built(&plan) {
+        let plan = if retry { codemods::plan(&self.fates.mods, &game, base.digest()) } else { codemods::plan_past_failures(&self.fates.mods, &game, base.digest()).0 };
+        if !plan.patches() || codemods::is_built(&plan) || (!retry && codemods::last_failure(plan.key).is_some()) {
             return true;
         }
-        match codemods::compiler() {
+        let choice = self.settings.pc.code_mods_compiler;
+        match codemods::pick(choice) {
             Some(compiler) => {
                 log::info!("codemods: compiling {} with {} before the restart", plan.names().join(", "), compiler.describe());
-                self.fates.code.job = Some(Job::start(plan, game, Arc::new(base), Some(compiler)));
+                self.fates.code.job = Some(Job::start(plan, game, Arc::new(base), Some(compiler), None));
                 self.fates.code.restart_after = true;
             }
-            None => match codemods::download_mb() {
-                Some(mb) => {
-                    log::info!("codemods: no compiler; asking to download one ({mb} MB)");
-                    self.fates.code.asking = Some(mb);
+            // zigdl: Zig, or the compiler that came with Haiku (Setup's)
+            None => match (codemods::setup_compiler(), codemods::download_mb()) {
+                (Some(setup), Some(_)) if choice == CodeModsCompiler::Zig => {
+                    log::info!("codemods: no compiler; downloading Zig, as chosen before (the compiler that came with Haiku if that fails)");
+                    self.fates.code.job = Some(Job::start(plan, game, Arc::new(base), None, Some(setup)));
+                    self.fates.code.restart_after = true;
                 }
-                None => self.menus.message = Some("Code mods need a C compiler, and Haiku has none to download for this computer. Put one in the tools folder next to Haiku.exe.".to_owned()),
+                (Some(_), Some(mb)) => {
+                    log::info!("codemods: no compiler; asking whether to download Zig ({mb} MB) or use the compiler that came with Haiku");
+                    self.fates.code.asking = Some(Ask { mb, setup: true });
+                }
+                (Some(setup), None) => {
+                    log::info!("codemods: compiling {} with the compiler that came with Haiku, {}", plan.names().join(", "), setup.describe());
+                    self.fates.code.job = Some(Job::start(plan, game, Arc::new(base), Some(setup), None));
+                    self.fates.code.restart_after = true;
+                }
+                (None, Some(mb)) => {
+                    log::info!("codemods: no compiler; asking to download one ({mb} MB)");
+                    self.fates.code.asking = Some(Ask { mb, setup: false });
+                }
+                (None, None) => self.menus.message = Some("Code mods need a C compiler, and Haiku has none to download for this computer. Put one in the tools folder next to Haiku.exe.".to_owned()),
             },
         }
         self.fates_code_view();
@@ -305,7 +400,7 @@ impl App {
 
     /// the player answered the download question.
     pub(crate) fn fates_code_mods_download(&mut self, yes: bool) {
-        self.fates.code.asking = None;
+        let asked = self.fates.code.asking.take();
         if !yes {
             log::info!("codemods: the compiler download was declined; the code mods stay as they were");
             self.menus.toast = Some(("Code mods need the compiler: nothing was downloaded".to_owned(), std::time::Instant::now()));
@@ -317,8 +412,39 @@ impl App {
         let Ok(base) = codemods::base(&linked) else { return };
         let plan = codemods::plan(&self.fates.mods, &game, base.digest());
         log::info!("codemods: downloading the compiler, which the player said yes to");
-        self.fates.code.job = Some(Job::start(plan, game, Arc::new(base), None));
+        // zigdl: the choice is kept, and the compiler that came with Haiku
+        // is the backup when it is there
+        let backup = codemods::setup_compiler();
+        if asked.is_some_and(|ask| ask.setup) {
+            self.fates_code_mods_choose(CodeModsCompiler::Zig);
+        }
+        self.fates.code.job = Some(Job::start(plan, game, Arc::new(base), None, backup));
         self.fates.code.restart_after = true;
+        self.fates_code_view();
+    }
+
+    /// zigdl: the player chose the compiler that came with Haiku.
+    pub(crate) fn fates_code_mods_use_setup(&mut self) {
+        self.fates.code.asking = None;
+        self.fates_code_mods_choose(CodeModsCompiler::Haiku);
+        let Some(setup) = codemods::setup_compiler() else { return };
+        let Some(path) = self.game.as_ref().map(|game| game.path.clone()) else { return };
+        let (Some(linked), Ok(game)) = (self.linked, self.fates_code_game(&path)) else { return };
+        let Ok(base) = codemods::base(&linked) else { return };
+        let plan = codemods::plan(&self.fates.mods, &game, base.digest());
+        log::info!("codemods: compiling {} with the compiler that came with Haiku, {}, as the player chose", plan.names().join(", "), setup.describe());
+        self.fates.code.job = Some(Job::start(plan, game, Arc::new(base), Some(setup), None));
+        self.fates.code.restart_after = true;
+        self.fates_code_view();
+    }
+
+    /// zigdl: keeps the compiler choice in the settings.
+    pub(crate) fn fates_code_mods_choose(&mut self, choice: CodeModsCompiler) {
+        if self.settings.pc.code_mods_compiler != choice {
+            log::info!("codemods: the compiler for code mods is now {choice:?}");
+            self.settings.pc.code_mods_compiler = choice;
+            self.settings.save();
+        }
         self.fates_code_view();
     }
 
@@ -337,8 +463,11 @@ impl App {
             Stage::Done => {
                 self.fates.code.job = None;
                 self.fates_code_view();
-                if std::mem::take(&mut self.fates.code.restart_after) {
-                    self.fates_mods_restart();
+                // modfix: what is left to compile, if a failure before left
+                // some out, then the restart (never compiling the whole set
+                // again, which failed)
+                if std::mem::take(&mut self.fates.code.restart_after) && self.fates_code_mods_ready_with(false) {
+                    self.fates_mods_restart_now();
                 }
             }
             Stage::Failed(error) => {
@@ -347,7 +476,7 @@ impl App {
                 // about; the toast names them
                 let failure = job.failure.lock().ok().and_then(|failure| failure.clone()).unwrap_or(codemods::Failure { text: error, mods: Vec::new() });
                 self.fates.code.job = None;
-                self.fates.code.restart_after = false;
+                let restart = std::mem::take(&mut self.fates.code.restart_after) && failure.text != "cancelled";
                 let list = &mut self.fates.mods;
                 let mut about = Vec::new();
                 for index in 0..list.mods.len() {
@@ -358,6 +487,9 @@ impl App {
                         } else if failure.about(&list.mods[index].name) {
                             about.push(list.mods[index].name.clone());
                             codemods::failure_note(&failure)
+                        } else if restart && !failure.mods.is_empty() {
+                            // modfix: the others are compiled without it
+                            "Another code mod turned on with it can't be compiled: it runs without that one.".to_owned()
                         } else {
                             "It can't run this time: another code mod turned on with it can't be compiled.".to_owned()
                         };
@@ -368,6 +500,15 @@ impl App {
                 let toast = if about.is_empty() { "The code mods couldn't be compiled".to_owned() } else { format!("{} couldn't be compiled: see its note", about.join(", ")) };
                 self.menus.toast = Some((toast, std::time::Instant::now()));
                 self.fates_code_view();
+                // modfix: the restart the player asked for goes ahead without
+                // the code that failed: the other code mods (compiled now if
+                // they need it) and every other mod are used
+                if restart {
+                    log::info!("codemods: going on without {}", if about.is_empty() { names.join(", ") } else { about.join(", ") });
+                    if self.fates_code_mods_ready_with(false) {
+                        self.fates_mods_restart_now();
+                    }
+                }
             }
             _ => {
                 let view = Some(JobView::of(job));

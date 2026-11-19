@@ -16,6 +16,7 @@ use super::options::{Effect, Env, Item, PANEL_H, PANEL_W, PANEL_X, PANEL_Y, PILL
 use super::{Nav, Prompt};
 use crate::controls::GlyphSet;
 use crate::haiku_mods::{ModList, Note};
+use crate::settings::CodeModsCompiler;
 use crate::App;
 
 /// how many rows the Mods page shows, the details box below them.
@@ -49,7 +50,10 @@ pub struct ModsView {
     /// codemods: the code mods being compiled, while they are.
     pub job: Option<super::codemods::JobView>,
     /// codemods: the compiler download to ask about (its size in MB).
-    pub ask_download: Option<u64>,
+    pub ask_download: Option<super::codemods::Ask>,
+    /// zigdl: whether the compiler row shows: Haiku Setup's compiler is
+    /// there and a mod has code
+    pub compiler_row: bool,
 }
 
 impl ModsView {
@@ -73,6 +77,9 @@ impl ModsView {
             folder: list.folder.display().to_string(),
             job: None,
             ask_download: None,
+            // zigdl
+            compiler_row: list.mods.iter().any(|info| info.code_files.as_ref().is_some_and(|files| files.changes_code()))
+                && crate::haiku_codemods::setup_compiler().is_some(),
         }
     }
 }
@@ -120,6 +127,7 @@ pub fn sample() -> ModsView {
         folder: r"C:\Games\Haiku\mods".into(),
         job: None,
         ask_download: None,
+        compiler_row: false, // zigdl
     }
 }
 
@@ -135,8 +143,27 @@ pub enum ModsEffect {
     Restart,
     /// codemods: the answer to the compiler download question.
     Download(bool),
+    /// zigdl: the other answer: the compiler that came with Haiku.
+    UseSetupCompiler,
+    /// zigdl: the compiler row changed.
+    Compiler(CodeModsCompiler),
     /// codemods: stop compiling.
     CancelJob,
+}
+
+thread_local! {
+    /// zigdl: the compiler row's choice, when the page shows the row (set
+    /// each frame from the view and the settings).
+    static COMPILER_ROW: std::cell::Cell<Option<CodeModsCompiler>> = const { std::cell::Cell::new(None) };
+}
+
+/// zigdl: shows the compiler row with choice, or not (None).
+pub fn set_compiler_row(choice: Option<CodeModsCompiler>) {
+    COMPILER_ROW.with(|row| row.set(choice));
+}
+
+fn compiler_row() -> Option<CodeModsCompiler> {
+    COMPILER_ROW.with(|row| row.get())
 }
 
 /// the page's rows.
@@ -146,8 +173,20 @@ pub fn items(count: usize) -> Vec<Item> {
         items.push(Item::ModsNone);
     }
     items.push(Item::ModsFolder);
+    if compiler_row().is_some() {
+        items.push(Item::ModsCompiler); // zigdl
+    }
     items.push(Item::ModsApply);
     items
+}
+
+/// zigdl: the compiler row's value.
+fn compiler_name(choice: CodeModsCompiler) -> &'static str {
+    match choice {
+        CodeModsCompiler::Ask => "Ask",
+        CodeModsCompiler::Zig => "Zig",
+        CodeModsCompiler::Haiku => "Haiku's",
+    }
 }
 
 /// a row's label, value and help line.
@@ -161,6 +200,16 @@ pub fn row(item: Item, env: &Env) -> (String, Option<String>, String) {
         }
         Item::ModsNone => ("No mods installed".to_owned(), None, "Put mods in the mods folder next to Haiku.exe, then open this page again.".to_owned()),
         Item::ModsFolder => ("Open Mods Folder".to_owned(), None, format!("Shows the mods folder: {}", mods.folder)),
+        // zigdl: Zig, the compiler that came with Haiku, or ask
+        Item::ModsCompiler => {
+            let choice = compiler_row().unwrap_or_default();
+            let help = match choice {
+                CodeModsCompiler::Ask => "Code mods need a compiler: asks which the first time.",
+                CodeModsCompiler::Zig => "Zig: downloaded once, compiles code mods in under a minute.",
+                CodeModsCompiler::Haiku => "The compiler that came with Haiku: no download, but slower.",
+            };
+            ("Code Mod Compiler".to_owned(), Some(compiler_name(choice).to_owned()), help.to_owned())
+        }
         Item::ModsApply => {
             let help = if mods.pending {
                 "Restarts the game with the mods as set here. Progress since you last saved is lost."
@@ -184,6 +233,13 @@ pub fn adjust(item: Item, dir: i32, env: &Env) -> Option<Effect> {
             (row.can_enable || !on).then_some(Effect::Mods(ModsEffect::Toggle(index, on)))
         }
         Item::ModsFolder if dir == 0 => Some(Effect::Mods(ModsEffect::OpenFolder)),
+        // zigdl: left goes back, right and a press go on
+        Item::ModsCompiler => {
+            let order = [CodeModsCompiler::Ask, CodeModsCompiler::Zig, CodeModsCompiler::Haiku];
+            let at = order.iter().position(|choice| Some(*choice) == compiler_row()).unwrap_or(0);
+            let next = if dir < 0 { (at + order.len() - 1) % order.len() } else { (at + 1) % order.len() };
+            Some(Effect::Mods(ModsEffect::Compiler(order[next])))
+        }
         _ => None,
     }
 }
@@ -293,6 +349,14 @@ fn details_lines(canvas: &Canvas, item: Item, env: &Env, small: f32) -> Vec<(Str
                 lines.push((line, small, TEXT_SOFT));
             }
         }
+        Item::ModsCompiler => {
+            // zigdl: what the two compilers are
+            lines.push(("Code mod compiler".to_owned(), 0.8, TEXT_DARK));
+            let text = "Zig is a one-time download of about 100 MB and compiles code mods in under a minute. The compiler that came with Haiku needs no download, but a big code mod takes several minutes. When Zig can't be downloaded, Haiku's is used.";
+            for line in canvas.kit.wrap(text, width, small) {
+                lines.push((line, small, TEXT_SOFT));
+            }
+        }
         Item::ModsApply => {
             let on = env.mods.rows.iter().filter(|row| row.enabled).count();
             lines.push((format!("{on} {} on", if on == 1 { "mod" } else { "mods" }), 0.8, TEXT_DARK));
@@ -391,7 +455,7 @@ pub fn draw_unpacking(progress: &crate::haiku_import::Progress, canvas: &Canvas,
 pub struct Confirm {
     pub yes: bool,
     /// codemods: asking to download the compiler (its size in MB) instead.
-    pub download: Option<u64>,
+    pub download: Option<super::codemods::Ask>,
     /// qol: the same dialog asks before Exit to Desktop
     pub exit: bool,
     /// qol4: and before Return to Title
@@ -401,13 +465,26 @@ pub struct Confirm {
 pub enum Answer {
     Yes,
     No,
+    /// zigdl: closed without an answer (the compiler choice, where No is
+    /// the other compiler)
+    Cancel,
+}
+
+/// zigdl: the dialog's two answers.
+fn answers(confirm: &Confirm) -> [&'static str; 2] {
+    confirm.download.map_or(["Yes", "No"], super::codemods::answers)
+}
+
+/// zigdl: what closing the dialog answers.
+fn closed(confirm: &Confirm) -> Answer {
+    if confirm.download.is_some_and(|ask| ask.setup) { Answer::Cancel } else { Answer::No }
 }
 
 const CONFIRM_W: f32 = 290.0;
 
 fn confirm_text(confirm: &Confirm, pending: bool) -> String {
-    if let Some(mb) = confirm.download {
-        return super::codemods::download_text(mb);
+    if let Some(ask) = confirm.download {
+        return super::codemods::download_text(ask);
     }
     if confirm.exit {
         // qol: the same dialog asks before Exit to Desktop
@@ -444,7 +521,7 @@ pub fn confirm_nav(confirm: &mut Confirm, canvas: &Canvas, input: &egui::InputSt
         confirm.yes = !confirm.yes;
     }
     if nav.back || nav.close {
-        return Some(Answer::No);
+        return Some(closed(confirm)); // zigdl
     }
     if nav.confirm {
         return Some(if confirm.yes { Answer::Yes } else { Answer::No });
@@ -464,7 +541,7 @@ pub fn confirm_nav(confirm: &mut Confirm, canvas: &Canvas, input: &egui::InputSt
         }
     }
     if input.pointer.secondary_clicked() {
-        return Some(Answer::No);
+        return Some(closed(confirm)); // zigdl
     }
     None
 }
@@ -479,11 +556,13 @@ pub fn draw_confirm(confirm: &Confirm, canvas: &Canvas, now: f64, pending: bool)
         canvas.text_centered(x + CONFIRM_W / 2.0, y + 11.0 + index as f32 * 15.0, line, 0.9, TEXT_DARK);
     }
     let bob = ((now * 6.0).sin() * 1.5) as f32;
-    for (index, (top, label)) in rows.iter().zip(["Yes", "No"]).enumerate() {
+    // zigdl: the compiler choice's answers are longer: a wider bar
+    let inset = if confirm.download.is_some_and(|ask| ask.setup) { 45.0 } else { 70.0 };
+    for (index, (top, label)) in rows.iter().zip(answers(confirm)).enumerate() {
         let chosen = (index == 0) == confirm.yes;
         if chosen {
-            canvas.three(Art::Highlight, x + 70.0, *top - 1.0, CONFIRM_W - 140.0, ROW + 1.0, [10.0, 10.0], white);
-            canvas.sprite(Art::Hand, x + 50.0 + bob, top + 2.5, white);
+            canvas.three(Art::Highlight, x + inset, *top - 1.0, CONFIRM_W - 2.0 * inset, ROW + 1.0, [10.0, 10.0], white);
+            canvas.sprite(Art::Hand, x + inset - 20.0 + bob, top + 2.5, white);
         }
         canvas.text_centered(x + CONFIRM_W / 2.0, top + 2.0, label, 0.95, if chosen { TEXT_CREAM } else { TEXT_DARK });
     }
@@ -567,6 +646,8 @@ impl App {
             }
             ModsEffect::Restart => self.fates_mods_restart(),
             ModsEffect::Download(yes) => self.fates_code_mods_download(yes), // codemods
+            ModsEffect::UseSetupCompiler => self.fates_code_mods_use_setup(), // zigdl
+            ModsEffect::Compiler(choice) => self.fates_code_mods_choose(choice), // zigdl
             ModsEffect::CancelJob => self.fates_code_mods_cancel(),          // codemods
         }
         self.fates_code_view(); // codemods: the list and the compile
@@ -594,6 +675,12 @@ impl App {
         if self.options.headless.is_none() && !self.fates_code_mods_ready() {
             return;
         }
+        self.fates_mods_restart_now();
+    }
+
+    /// modfix: the restart itself, once the code mods are ready (or left
+    /// out after failing).
+    pub(crate) fn fates_mods_restart_now(&mut self) {
         self.fates.options.hide();
         self.fates.swallow = true;
         let relaunch = match std::env::var("HAIKU_RESTART").as_deref() {

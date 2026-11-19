@@ -288,13 +288,45 @@ pub fn base(linked: &recomp3ds::abi::Linked) -> Result<patch::Base, String> {
 /// load order, each applied over the ones before it. a mod whose changes
 /// can't be applied is left out (problems).
 pub fn plan(list: &ModList, game: &Game, base_digest: u64) -> Plan {
+    plan_without(list, game, base_digest, &std::collections::BTreeSet::new())
+}
+
+/// modfix: the plan of the code mods on without the ones whose code failed
+/// to compile with them before (each set's failure is kept under its key,
+/// record_failure): one code mod that can't be compiled leaves the others
+/// to run without it, and the next start goes on from there rather than
+/// leaving all of them out. returns the plan and the mods left out, each
+/// with its failure. a failure about every mod of a set, or about none in
+/// particular (the compiler failed), stays the plan's own, as before.
+pub fn plan_past_failures(list: &ModList, game: &Game, base_digest: u64) -> (Plan, Vec<(usize, Failure)>) {
+    let mut skip = std::collections::BTreeSet::new();
+    let mut failed = Vec::new();
+    loop {
+        let plan = plan_without(list, game, base_digest, &skip);
+        if !plan.patches() || is_built(&plan) {
+            return (plan, failed);
+        }
+        let Some(failure) = last_failure(plan.key).filter(|failure| !failure.mods.is_empty()) else { return (plan, failed) };
+        let about: Vec<usize> = plan.mods.iter().filter(|(_, name)| failure.about(name)).map(|(index, _)| *index).collect();
+        if about.is_empty() || about.len() == plan.mods.len() {
+            return (plan, failed);
+        }
+        for index in about {
+            skip.insert(index);
+            failed.push((index, failure.clone()));
+        }
+    }
+}
+
+/// plan, leaving out the mods at the indices in skip (modfix).
+pub fn plan_without(list: &ModList, game: &Game, base_digest: u64, skip: &std::collections::BTreeSet<usize>) -> Plan {
     let mut plan = Plan::default();
     let mut code: Vec<u8> = game.code.to_vec();
     let mut exheader: Option<Vec<u8>> = None;
     // each mod's own changes, for the overlaps
     let mut own: Vec<(usize, Vec<(u32, u32)>)> = Vec::new();
     for (index, info) in list.mods.iter().enumerate() {
-        if !list.enabled[index] || !list.can_enable(index) {
+        if !list.enabled[index] || !list.can_enable(index) || skip.contains(&index) {
             continue;
         }
         let Some(files) = &info.code_files else { continue };
@@ -375,6 +407,10 @@ pub struct Built {
     pub seconds: f32,
     /// no module is needed: the patches change data only.
     pub data_only: bool,
+    /// zigdl: which compiler it was, when that is worth saying (the backup
+    /// after Zig failed).
+    #[serde(default)]
+    pub compiler_note: String,
 }
 
 fn info_path(key: u64) -> PathBuf {
@@ -389,6 +425,8 @@ pub fn built(key: u64) -> Option<Built> {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Stage {
     Downloading(f32),
+    /// zigdl: the compiler arrived and is being unpacked
+    Unpacking,
     Analysing,
     Compiling { done: usize, total: usize },
     Done,
@@ -399,6 +437,7 @@ impl Stage {
     pub fn fraction(&self) -> f32 {
         match self {
             Stage::Downloading(f) => *f,
+            Stage::Unpacking => 1.0, // zigdl
             Stage::Analysing => 0.05,
             Stage::Compiling { done, total } => 0.15 + 0.85 * *done as f32 / (*total).max(1) as f32,
             Stage::Done | Stage::Failed(_) => 1.0,
@@ -467,6 +506,7 @@ pub fn build(plan: &Plan, game: &Game, base: &patch::Base, compiler: &Compiler, 
         missing: made.missing.len(),
         seconds: 0.0,
         data_only: made.stale.is_empty() && made.functions.is_empty(),
+        compiler_note: String::new(), // zigdl
     };
     if !info.data_only {
         let module = patch::source(&made, &program, base, base.digest(), plan.key).map_err(|error| {
@@ -556,16 +596,119 @@ pub fn compiler() -> Option<Compiler> {
     candidates.into_iter().find(|compiler| compiler.program.is_file() && compiler.runs()).or_else(|| Compiler::find().filter(Compiler::runs))
 }
 
+/// zigdl: the compiler that came with Haiku: Haiku Setup's w64devkit (gcc
+/// 16.2) in setup\w64devkit beside Haiku.exe. The one place that knows
+/// where it is, so it is easy to point elsewhere (oneexe moves Setup into
+/// Haiku.exe). None when it isn't there whole: Haiku 1.1's copy has no
+/// lib\dllcrt2.o, without which a code mod's DLL can't be linked. None too
+/// when its folder or the code mods' cache has letters outside ASCII: the
+/// MinGW tools open files through the ANSI code page (Haiku Setup works
+/// around that with junctions; this doesn't). Looked for once.
+pub fn setup_compiler() -> Option<Compiler> {
+    static FOUND: std::sync::OnceLock<Option<Compiler>> = std::sync::OnceLock::new();
+    FOUND
+        .get_or_init(|| {
+            let kit = crate::haiku_mods::root().join("setup").join("w64devkit");
+            let gcc = kit.join("bin").join("gcc.exe");
+            let ascii = |path: &Path| path.to_str().is_some_and(str::is_ascii);
+            let whole = cfg!(windows) && gcc.is_file() && kit.join("lib").join("dllcrt2.o").is_file();
+            if !whole || !ascii(&kit) || !ascii(&cache_root()) {
+                log::info!("zigdl: no compiler from Haiku Setup for code mods ({} {})", kit.display(), if whole { "or the cache isn't an ASCII path" } else { "isn't there whole" });
+                return None;
+            }
+            // -pipe: no temporary files, whose folder (the user's) may not
+            // be an ASCII path either
+            let compiler = Compiler::new(gcc, &["-pipe"]);
+            compiler.runs().then_some(compiler)
+        })
+        .clone()
+}
+
+/// zigdl: whether compiler is the one that came with Haiku.
+pub fn is_setup(compiler: &Compiler) -> bool {
+    setup_compiler().as_ref() == Some(compiler)
+}
+
+/// zigdl: the compiler for code mods as the player chose: the one that
+/// came with Haiku when that is the choice and it is there, else what
+/// compiler() finds.
+pub fn pick(choice: crate::settings::CodeModsCompiler) -> Option<Compiler> {
+    if choice == crate::settings::CodeModsCompiler::Haiku {
+        if let Some(setup) = setup_compiler() {
+            return Some(setup);
+        }
+    }
+    compiler()
+}
+
 /// how big the compiler download is, in MB, none when there is none for
 /// this system.
 pub fn download_mb() -> Option<u64> {
     crate::zig::download_size().map(|bytes| bytes.div_ceil(1 << 20))
 }
 
-/// downloads Zig, which the player said yes to.
-pub fn download(progress: &dyn Fn(f32), cancel: &AtomicBool) -> Result<Compiler, String> {
+/// downloads Zig, which the player said yes to; unpacking hears when it
+/// is being unpacked (zigdl).
+pub fn download(progress: &dyn Fn(f32), unpacking: &dyn Fn(), cancel: &AtomicBool) -> Result<Compiler, String> {
     let tools = crate::zig::tools_dir(None).ok_or("there is no folder to keep the compiler in")?;
-    crate::zig::download(&tools, progress, cancel)
+    crate::zig::download_then(&tools, progress, unpacking, cancel)
+}
+
+/// zigdl: the note for a failed download, with why in a few words, short
+/// enough for the details box (the whole of it, tar's words and all, is in
+/// haiku.log).
+fn download_failure(error: &str) -> String {
+    format!("The compiler couldn't be downloaded: {}. haiku.log says why.", short_reason(error))
+}
+
+/// zigdl: why a download failed, in a few words.
+fn short_reason(error: &str) -> String {
+    let why = error.split(" (").next().unwrap_or(error);
+    let why = why.split(", the last said").next().unwrap_or(why).trim().trim_end_matches('.');
+    let mut short: String = why.chars().take(90).collect();
+    if short.len() < why.len() {
+        short.push_str("...");
+    }
+    short
+}
+
+/// zigdl: the note when Zig failed and the compiler that came with Haiku
+/// was used instead.
+fn backup_note(error: &str) -> String {
+    format!("Zig couldn't be downloaded ({}), so the compiler that came with Haiku was used; it's slower.", short_reason(error))
+}
+
+/// zigdl: puts note into a build's record, so the mod's notes say it.
+fn keep_note(key: u64, note: &str) {
+    if let Some(mut info) = built(key) {
+        info.compiler_note = note.to_owned();
+        let _ = std::fs::write(info_path(key), toml::to_string(&info).unwrap_or_default());
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn a_failed_download_says_why_in_a_few_words() {
+    // zigdl: what zig::download returns, as the mod's note puts it
+    let note = download_failure("it couldn't be unpacked (exit code: 1; tar said: tar: Error opening archive: Unrecognized archive format)");
+    assert_eq!(note, "The compiler couldn't be downloaded: it couldn't be unpacked. haiku.log says why.");
+    let note = download_failure("could not download Zig, from ziglang.org or any of its mirrors, the last said curl: (6) Could not resolve host: ziglang.org");
+    assert_eq!(note, "The compiler couldn't be downloaded: could not download Zig, from ziglang.org or any of its mirrors. haiku.log says why.");
+    // and when the compiler that came with Haiku took over
+    let note = backup_note("Access is denied. (os error 5)");
+    assert_eq!(note, "Zig couldn't be downloaded (Access is denied), so the compiler that came with Haiku was used; it's slower.");
+}
+
+#[cfg(test)]
+#[test]
+fn a_build_record_without_a_compiler_note_still_reads() {
+    // zigdl: built.toml from before the note
+    let old = "functions = 1\nstale = 1\nnew_instructions = 0\nreplaced = []\nmissing = 0\nseconds = 2.0\ndata_only = false\n";
+    let built: Built = toml::from_str(old).unwrap();
+    assert!(built.compiler_note.is_empty());
+    let noted = Built { compiler_note: backup_note("it couldn't be unpacked (exit code: 1)"), ..built };
+    let again: Built = toml::from_str(&toml::to_string(&noted).unwrap()).unwrap();
+    assert_eq!(again.compiler_note, "Zig couldn't be downloaded (it couldn't be unpacked), so the compiler that came with Haiku was used; it's slower.");
 }
 
 /// a build on a thread of its own.
@@ -576,13 +719,20 @@ pub struct Job {
     pub names: Vec<String>,
     /// codemods2: why it failed, and which mods that is about.
     pub failure: Arc<Mutex<Option<Failure>>>,
+    /// zigdl: compiling with the compiler that came with Haiku (slow).
+    pub slow: Arc<AtomicBool>,
+    /// zigdl: when it started.
+    pub started: Instant,
 }
 
 impl Job {
     /// builds plan's module, downloading the compiler first when compiler
-    /// is none (the player said yes).
-    pub fn start(plan: Plan, game: Arc<Game>, base: Arc<patch::Base>, compiler: Option<Compiler>) -> Job {
+    /// is none (the player said yes). zigdl: backup (the compiler that came
+    /// with Haiku) is used when Zig can't be downloaded or doesn't run.
+    pub fn start(plan: Plan, game: Arc<Game>, base: Arc<patch::Base>, compiler: Option<Compiler>, backup: Option<Compiler>) -> Job {
         let download = compiler.is_none();
+        let slow = Arc::new(AtomicBool::new(compiler.as_ref().is_some_and(is_setup)));
+        let slow_kept = slow.clone();
         let stage = Arc::new(Mutex::new(if download { Stage::Downloading(0.0) } else { Stage::Analysing }));
         let cancel = Arc::new(AtomicBool::new(false));
         let (state, stop) = (stage.clone(), cancel.clone());
@@ -598,15 +748,36 @@ impl Job {
             };
             let compiler = match compiler {
                 Some(compiler) => Ok(compiler),
-                None => self::download(&|fraction| set(Stage::Downloading(fraction)), &stop),
+                // zigdl: a Zig that doesn't run counts as one that didn't download
+                None => self::download(&|fraction| set(Stage::Downloading(fraction)), &|| set(Stage::Unpacking), &stop)
+                    .and_then(|zig| if zig.runs() { Ok(zig) } else { Err(format!("the downloaded Zig doesn't run ({})", zig.describe())) }),
             };
+            // zigdl: the backup, when Zig failed (not when it was cancelled)
+            let mut note = None;
+            let compiler = match (compiler, backup) {
+                (Err(error), Some(backup)) if !stop.load(Ordering::Relaxed) => {
+                    log::warn!("codemods: the compiler download failed: {error}");
+                    log::warn!("zigdl: so the code mods are compiled with the compiler that came with Haiku, {}; it's slower", backup.describe());
+                    note = Some(backup_note(&error));
+                    set(Stage::Analysing);
+                    Ok(backup)
+                }
+                (compiler, _) => compiler,
+            };
+            if compiler.as_ref().is_ok_and(is_setup) {
+                slow.store(true, Ordering::Relaxed);
+            }
             let result = compiler.map_err(|error| {
                 log::warn!("codemods: the compiler download failed: {error}");
-                Failure::from("The compiler couldn't be downloaded.")
+                // zigdl: and why, on the mod's note
+                Failure::from(download_failure(&error))
             }).and_then(|compiler| {
                 let run = std::panic::AssertUnwindSafe(|| build(&plan, &game, &base, &compiler, &set, &stop));
                 std::panic::catch_unwind(run).unwrap_or_else(|_| Err(Failure::from("Haiku hit a bug compiling it; haiku.log says more.")))
             });
+            if let (Ok(_), Some(note)) = (&result, &note) {
+                keep_note(plan.key, note); // zigdl
+            }
             set(match result {
                 Ok(_) => Stage::Done,
                 Err(_) if stop.load(Ordering::Relaxed) => Stage::Failed("cancelled".to_owned()),
@@ -620,7 +791,7 @@ impl Job {
                 }
             });
         });
-        Job { stage, cancel, download, names: names_kept, failure }
+        Job { stage, cancel, download, names: names_kept, failure, slow: slow_kept, started: Instant::now() }
     }
 
     pub fn stage(&self) -> Stage {
