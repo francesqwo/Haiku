@@ -39,7 +39,8 @@ pub const ROMFS_TOP_FILES: [&str; 2] = ["params.bin.lz", "texturecoordinate.bin"
 
 /// folders that are never a loose RomFS root nor looked into for one: what
 /// haiku_mods reads itself, and the other releases' and tools' folders.
-const NOT_ROOTS: [&str; 12] = ["romfs", "romfs_ext", "exefs", "luma", "titles", "load", "textures", "dlc", "exe", "rom", "_downloads", "paragon imports"];
+/// modsweep: and a Mac zip's __MACOSX/ copies
+const NOT_ROOTS: [&str; 13] = ["romfs", "romfs_ext", "exefs", "luma", "titles", "load", "textures", "dlc", "exe", "rom", "_downloads", "paragon imports", "__macosx"];
 
 /// how deep below a mod's folder roots and title folders are looked for.
 const DEPTH: usize = 2;
@@ -309,6 +310,44 @@ pub fn prune(cache: &Path, live: &[PathBuf]) {
     }
 }
 
+/// modsweep: where a mod's code patch is: its content folder (or exefs/
+/// there) when that has one, else the one folder beside its romfs/ named
+/// for code that holds code.ips or code.bps (Fates+ 3.5 ships
+/// "Code Patch/code.ips", and its readme says to copy it beside romfs/).
+/// Several such folders (one per release, say) are a choice for the player
+/// to make, so none is taken.
+pub fn code_folder(content: &Path) -> PathBuf {
+    let patch_in = |dir: &Path| ["code.ips", "code.bps"].iter().any(|name| find_file_ci(dir, name));
+    let has_code = |dir: &Path| {
+        patch_in(dir) || patch_in(&dir.join("exefs")) || std::fs::read_dir(dir).is_ok_and(|entries| entries.flatten().any(|entry| {
+            let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+            entry.path().is_file() && (name.ends_with(".ips") || name.ends_with(".bps") || name == "code.bin" || name == "exheader.bin")
+        }))
+    };
+    if has_code(content) {
+        return content.to_path_buf();
+    }
+    let found: Vec<PathBuf> = subdirs(content)
+        .into_iter()
+        .filter(|(name, path)| {
+            let lower = name.to_ascii_lowercase();
+            lower.contains("code") && !NOT_ROOTS.contains(&lower.as_str()) && !optional(name) && patch_in(path)
+        })
+        .map(|(_, path)| path)
+        .collect();
+    match found.as_slice() {
+        [only] => {
+            log::info!("mods: the code patch in {} is used, as if it were beside romfs/", only.display());
+            only.clone()
+        }
+        _ => content.to_path_buf(),
+    }
+}
+
+fn find_file_ci(dir: &Path, name: &str) -> bool {
+    dir.join(name).is_file() || std::fs::read_dir(dir).is_ok_and(|entries| entries.flatten().any(|entry| entry.file_name().to_string_lossy().eq_ignore_ascii_case(name) && entry.path().is_file()))
+}
+
 /// the code patches a mod's code folder (its content folder or exefs/)
 /// offers, when it has one besides code.ips and code.bps: the default
 /// first, then the others in name order, and why the default is.
@@ -471,6 +510,31 @@ mod tests {
         put(&dir, "v/readme.txt", b"Use b-recommended.ips unless you want the other.");
         let names: Vec<String> = code_choices(&dir.join("v")).unwrap().patches.iter().map(|p| p.file_name().unwrap().to_string_lossy().into_owned()).collect();
         assert_eq!(names, ["b-recommended.ips", "a-first.ips"]);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_code_patch_in_a_folder_of_its_own_is_found() {
+        // modsweep: Fates+ 3.5: romfs/ and "Code Patch/code.ips" beside it
+        let dir = folder("codefolder");
+        put(&dir, "a/romfs/GameData/GameData.bin.lz", b"x");
+        put(&dir, "a/Code Patch/code.ips", b"PATCHEOF");
+        put(&dir, "a/Gamebanana Screenshots/x.png", b"x");
+        assert_eq!(code_folder(&dir.join("a")), dir.join("a").join("Code Patch"));
+        // a code patch beside romfs/ wins
+        put(&dir, "b/romfs/m/x.bin.lz", b"x");
+        put(&dir, "b/code.ips", b"PATCHEOF");
+        put(&dir, "b/Code Patch/code.ips", b"PATCHEOF");
+        assert_eq!(code_folder(&dir.join("b")), dir.join("b"));
+        // one per release: the player's choice, none taken
+        put(&dir, "c/romfs/m/x.bin.lz", b"x");
+        put(&dir, "c/Code US/code.ips", b"PATCHEOF");
+        put(&dir, "c/Code EU/code.ips", b"PATCHEOF");
+        assert_eq!(code_folder(&dir.join("c")), dir.join("c"));
+        // a folder not named for code is not looked into
+        put(&dir, "d/romfs/m/x.bin.lz", b"x");
+        put(&dir, "d/Extra/code.ips", b"PATCHEOF");
+        assert_eq!(code_folder(&dir.join("d")), dir.join("d"));
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

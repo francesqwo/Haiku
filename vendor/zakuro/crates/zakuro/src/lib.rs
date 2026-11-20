@@ -27,6 +27,8 @@ pub mod haiku_fanpatch; // fanpatch: mods for other releases (Team If), Haiku's 
 pub mod haiku_modlayout; // modfix: mods laid out as players get them (loose RomFS folders, title folders deeper down, a choice of code patches)
 pub mod jpn_english; // jpn2: Haiku's lines and menus in English under a translation on the Japanese game
 pub mod pregame; // updscreen: work before the game's code loads, shown in the game's window
+pub mod haiku_update; // updater: Haiku updating itself from its GitHub releases
+mod ed25519; // updater: the releases' signatures
 // hfr: high frame rates, display modes and pacing
 pub mod display;
 pub mod hfr;
@@ -45,6 +47,7 @@ mod offline_msg; // offline-msg: a click closes the not-available message
 mod online_ui; // online: the host's code, the code box, the session's news
 // cpu: native-only execution, headless checkpoints and frame times
 pub mod native_cpu;
+mod vowperf_sample; // vowperf: HAIKU_SAMPLE, a sampling profiler for headless runs
 mod present;
 mod recompile;
 mod report;
@@ -256,6 +259,7 @@ fn run_inner(linked: Option<Linked>, overlay: Option<Box<dyn GameOverlay>>, preg
         cheats::apply(&app.settings.pc); // cheats
         pulse::apply(&app.settings.pc); // pulse
         online_ui::configure(&app.settings.pc.online); // online2: the host's rule
+        haiku_update::start(app.settings.pc.check_updates, true); // updater: only with HAIKU_UPDATE_CHECK=1
         app.start();
         // mods: FATES_MODS_RESTART_AT=n runs n frames, then restarts the game
         // in place as the Mods page's Apply does, and runs the rest
@@ -560,6 +564,7 @@ fn run_headless(game: &mut Running, frames: u64, mut each_frame: impl FnMut(&mut
     let start = Instant::now();
     let mut outcome = FrameOutcome::Completed;
     let mut ran = first;
+    vowperf_sample::start(game.system.recompiled.as_ref().map(|library| library.code_points()).unwrap_or_default()); // vowperf
     // native-rt: the real-time schedule, started over after a stall
     let (mut rt_start, mut rt_from) = (start, first);
     // savehang: FATES_HEADLESS_SPEED=1 runs Skip Story's skips at Max in
@@ -628,6 +633,7 @@ fn run_headless(game: &mut Running, frames: u64, mut each_frame: impl FnMut(&mut
         outcome = game.system.run_frame();
         times.push(frame_start.elapsed());
         ran += 1;
+        vowperf_sample::FRAME.store(ran, std::sync::atomic::Ordering::Relaxed); // vowperf
         // pulse: the moments worth keeping; after a moment was loaded the
         // replay goes on from its frame, so the same inputs play again
         pulse::after_frame(&mut game.system, ran);
@@ -738,6 +744,8 @@ fn run_headless(game: &mut Running, frames: u64, mut each_frame: impl FnMut(&mut
         println!("  hot {thread:<8} 0x{pc:08X} {hits}");
     }
     // cpu: frame times, where the interpreter ran, the dispatch's cost
+    native_cpu::frame_log(first, &times); // vowperf: HAIKU_FRAME_LOG
+    vowperf_sample::report(); // vowperf: HAIKU_SAMPLE
     println!("{}", native_cpu::frame_times(&mut times));
     for line in system.cpu_summary() {
         println!("{line}");
@@ -1474,7 +1482,7 @@ impl App {
         // game, the cameras, the touch cursor and the PC actions see none of
         // it (the menu reads the pads itself, below); only the Options
         // action still goes through, to close it
-        if fates_ui::enabled() && self.fates.options.open {
+        if fates_ui::enabled() && self.fates.modal() { // updater: modal, the update's screen too
             let options = controls::PcAction::ALL.iter().position(|action| *action == controls::PcAction::Options).unwrap_or(0);
             let mut held = controls::PadOutput::default();
             held.actions[options] = pads.actions[options] || self.keyboard.actions()[options];
@@ -1567,7 +1575,7 @@ impl App {
     fn pointer_taken(&self, consumed: bool) -> bool {
         consumed || self.game.is_none() || self.menus.menu_open || self.gui.as_ref().is_some_and(Gui::wants_pointer)
             // ui
-            || self.fates.wants_pointer || self.fates.options.open
+            || self.fates.wants_pointer || self.fates.modal() // updater: modal
     }
 
     /// touches the bottom screen while the button is down over it.
@@ -2211,7 +2219,7 @@ impl App {
         // (with the frame rate loop the game runs behind it): its moves
         // were scrolling the Main Menu behind it.
         // FATES_OPTIONS_PASS_INPUT=1 lets it through, as before
-        if fates_ui::enabled() && self.fates.options.open && !std::env::var("FATES_OPTIONS_PASS_INPUT").is_ok_and(|v| v == "1") {
+        if fates_ui::enabled() && self.fates.modal() && !std::env::var("FATES_OPTIONS_PASS_INPUT").is_ok_and(|v| v == "1") {
             input = zakuro_core::services::hid::InputState { tilt: input.tilt, ..Default::default() };
         }
         // ui: nothing from the button that closed a menu
@@ -2255,6 +2263,7 @@ impl App {
         if self.active.pc.bottom_screen == settings::BottomScreen::Auto && game.system.title.as_ref().is_some_and(|title| zakuro_core::region::Region::of(title.program_id()).is_some()) { // eur: and the EUR build; jpprep: and the Japanese
             self.bottom.read_game(&mut game.system.memory, game.frame);
         }
+        haiku_update::game_frame(&mut game.system.memory, game.frame); // updater: the Main Menu, only while an update's notice waits
         // the overlay reads the game the program was built on, not another
         // one its library opened
         let ours = self.linked.as_ref().is_none_or(|linked| game.system.title.as_ref().is_some_and(|title| title.program_id() == linked.program_id()));

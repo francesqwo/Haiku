@@ -16,7 +16,7 @@
 #   setup/derived-eur.pack, derived-jpn.pack   the same for the EUR and
 #                          Japanese games
 #   setup/assets/          Haiku's own assets that hold no game data
-#   setup/payload.txt      the release's commit and date
+#   setup/payload.txt      the release's commit, date and version
 # and no game code or data; then <out dir>/Haiku.zip. (Up to 1.1 the release
 # shipped Haiku Setup.exe, the engine as objects and the overrides' C, and
 # linked Haiku.exe on the player's PC.) The region maps the overrides are
@@ -33,6 +33,14 @@
 #                    (default $HAIKU_MAIN/data/romfs). Without it, the
 #                    committed dev/builder/derived.pack is what ships.
 #   ONLY=<step>      runs one step: exe, toolchain, setup, derived, rest, zip.
+#   HAIKU_RELEASE_VERSION=<version>  updater: the version this release is,
+#                    instead of source/VERSION's (the one place it lives:
+#                    bump that file for a release). Haiku.exe reports it,
+#                    and its updater compares it with GitHub's latest release;
+#                    payload.txt names it too, which the updater checks a
+#                    downloaded release against.
+# After packaging: dev/release/sign.sh <out dir>/Haiku.zip (Haiku.zip.sig,
+# which the release must carry for Haiku's in-game updater to install it).
 set -euo pipefail
 OUT=${1:?usage: dev/builder/package.sh <out dir>}
 HERE=$(cd "$(dirname "$0")/../.." && pwd)
@@ -45,6 +53,12 @@ REL="$OUT/Haiku"
 SETUP="$REL/setup"
 mkdir -p "$SETUP"
 step() { [ -z "${ONLY:-}" ] || [ "$ONLY" = "$1" ]; }
+# updater: the release's version, built into Haiku.exe (source/build.rs)
+VERSION=${HAIKU_RELEASE_VERSION:-$(tr -d '
+ ' < "$HERE/source/VERSION")}
+case "$VERSION" in ''|*[!A-Za-z0-9.+-]*) echo "bad version: '$VERSION' (source/VERSION or HAIKU_RELEASE_VERSION)"; exit 1;; esac
+export HAIKU_RELEASE_VERSION=$VERSION
+echo "version: $VERSION"
 # the builds the release ships hold no path of this machine: the source,
 # cargo's registry and the toolchain are renamed in panic messages
 REMAP="--remap-path-prefix=$(wpath "$HERE")=haiku --remap-path-prefix=$(wpath "$T/cargo")=cargo --remap-path-prefix=$(wpath "$T/rustup")=rustup --remap-path-prefix=$(wpath "$WORK")=work"
@@ -96,7 +110,8 @@ if step setup; then
   # oneexe: beside Haiku.exe, where it loads it from
   cp "$SDL3_DLL" "$REL/SDL3.dll"
   rm -f "$SETUP/SDL3.dll"
-  echo "$(git -C "$HERE" rev-parse --short HEAD) $(date -u +%Y-%m-%d)" > "$SETUP/payload.txt"
+  # updater: the version third (the in-game updater checks it)
+  echo "$(git -C "$HERE" rev-parse --short HEAD) $(date -u +%Y-%m-%d) $VERSION" > "$SETUP/payload.txt"
 fi
 
 if step derived; then

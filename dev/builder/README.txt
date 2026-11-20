@@ -77,7 +77,15 @@ other versions are kept. The only version installed can't be removed.
 Updating
 --------
 
-Extract a new release over this folder, replacing files, and start
+From Haiku 1.4 on, Haiku updates itself. Once a day it asks GitHub for
+the latest release (sending nothing about you); when there is a new one,
+a notice on the game's Main Menu (U, the controller's Y, or a click) opens
+its notes, with Install, Later and Skip This Version. Install downloads
+it, checks its SHA-256 and its signature by Haiku's release key, replaces
+Haiku's own files only (putting them back if anything fails) and starts
+the new Haiku. Options > Interface > Check for Updates turns it off.
+
+By hand: extract a new release over this folder, replacing files, and start
 Haiku.exe. Usually it plays at once: the game's code stays as it is.
 When a release needs it built again, Haiku.exe does that by itself first,
 in the game's window (only what changed is compiled), then starts the

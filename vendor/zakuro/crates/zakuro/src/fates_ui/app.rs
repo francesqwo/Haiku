@@ -22,6 +22,11 @@ impl App {
         if crate::haiku_mods::take_open_request() {
             self.fates.open_mods = true;
         }
+        // updater: the daily check, on a thread of its own, once the game runs
+        if !self.fates.update_started && self.game.is_some() {
+            self.fates.update_started = true;
+            crate::haiku_update::start(self.settings.pc.check_updates, false);
+        }
         self.fates_code_mods_poll(); // codemods: the compile, and the restart after it
         self.fates_mods_poll(); // hdpacks: downloads unpacked meanwhile
         if self.fates.refresh_env {
@@ -114,7 +119,31 @@ impl App {
         for effect in output.effects {
             self.fates_effect(effect);
         }
+        // updater: installed: the new Haiku.exe starts, this one closes
+        if let Some(exe) = self.fates.update.take_ready() {
+            self.fates_update_restart(&exe);
+        }
         overlay
+    }
+
+    /// updater: the update is in place: the settings and mods list saved,
+    /// the new Haiku.exe started (it waits for this process to close), and
+    /// this one gone.
+    fn fates_update_restart(&mut self, exe: &std::path::Path) {
+        self.settings.save();
+        self.fates.mods.save();
+        match crate::haiku_update::relaunch(exe) {
+            Ok(id) => {
+                log::info!("updater: started the new {} (process {id}); closing this one (process {})", exe.display(), std::process::id());
+                self.stop = true;
+                log::logger().flush();
+                std::process::exit(0);
+            }
+            Err(error) => {
+                log::warn!("updater: the new Haiku.exe couldn't be started: {error}");
+                self.menus.message = Some(format!("Haiku was updated, but couldn't start again ({error}). Close it and start it again."));
+            }
+        }
     }
 
     /// what a changed option does. The menu saves every change (through

@@ -243,6 +243,12 @@ fn main() {
     // --build, --check-game, --check-dlc, --voices, --voices-dlc,
     // --apply-derived, --rebuild, --setup...
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // updater: Haiku's version (source/VERSION), and its update commands
+    // (--verify-update, --update-check)
+    zakuro::haiku_update::set_version(env!("HAIKU_RELEASE_VERSION"));
+    if let Some(code) = zakuro::haiku_update::cli(&args) {
+        std::process::exit(code);
+    }
     if let Some(code) = haiku_setup::cli(&args) {
         std::process::exit(code);
     }

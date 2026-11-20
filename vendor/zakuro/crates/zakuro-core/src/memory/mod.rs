@@ -94,6 +94,8 @@ pub struct Memory {
     /// accesses to unmapped addresses, deduplicated so one bad loop does not
     /// produce a gigabyte of log.
     faults: BTreeMap<VAddr, u32>,
+    /// predict: how the warnings about them are rate-limited, see note_fault.
+    fault_log: FaultLog,
 
     /// while a loop is watched for changing nothing, what each byte the CPU
     /// wrote held before its first write, see crate::idle.
@@ -221,6 +223,7 @@ impl Memory {
             gpu_sync: None,
             mappings: BTreeMap::new(),
             faults: BTreeMap::new(),
+            fault_log: FaultLog::default(),
             write_log: None,
             watched: HashMap::new(),
             watches: 0,
@@ -788,7 +791,7 @@ impl Memory {
         let count = self.faults.entry(page).or_insert(0);
         *count += 1;
         if *count == 1 {
-            log::warn!("access to unmapped guest address 0x{addr:08X}");
+            self.fault_log.note(addr);
         }
     }
 
@@ -801,6 +804,49 @@ impl Memory {
 // ---------------------------------------------------------------------------
 // The CPU-facing bus
 // ---------------------------------------------------------------------------
+
+/// predict: the warnings about accesses to unmapped guest addresses. Each
+/// page is warned about once, but code that follows garbage pointers touches
+/// a new page with nearly every access (issue #12: thousands of lines within
+/// milliseconds, while the game stood still writing them). The first
+/// FAULT_LINES pages are named one line each; after that at most one line a
+/// minute says how many more there were and the last of them.
+#[derive(Default)]
+struct FaultLog {
+    named: u32,
+    /// pages not named since the last line, and the last of them
+    more: u32,
+    last: VAddr,
+    since: Option<std::time::Instant>,
+}
+
+const FAULT_LINES: u32 = 8;
+
+impl FaultLog {
+    fn note(&mut self, addr: VAddr) {
+        if self.named < FAULT_LINES {
+            self.named += 1;
+            log::warn!("access to unmapped guest address 0x{addr:08X}");
+            if self.named == FAULT_LINES {
+                log::warn!("more accesses to unmapped guest addresses are counted, one line a minute at most");
+                self.since = Some(std::time::Instant::now());
+            }
+            return;
+        }
+        self.more += 1;
+        self.last = addr;
+        let now = std::time::Instant::now();
+        if self.since.is_none_or(|since| now.duration_since(since).as_secs() >= 60) {
+            log::warn!(
+                "{} more pages of unmapped guest addresses accessed (the last 0x{:08X})",
+                self.more,
+                self.last
+            );
+            self.more = 0;
+            self.since = Some(now);
+        }
+    }
+}
 
 /// adds a range to those guarded, one range of the ones it overlaps, and
 /// takes the pages it covers out of the table the CPU goes through. buffers
@@ -962,6 +1008,19 @@ impl Bus for Memory {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// predict: a burst of accesses to unmapped pages names the first
+    /// FAULT_LINES and only counts the rest (issue #12's log spam).
+    #[test]
+    fn unmapped_warnings_are_rate_limited() {
+        let mut log = FaultLog::default();
+        for page in 0..10_000u32 {
+            log.note(0x4000_0000 + page * 0x1000);
+        }
+        assert_eq!(log.named, FAULT_LINES);
+        assert_eq!(log.more, 10_000 - FAULT_LINES);
+        assert_eq!(log.last, 0x4000_0000 + 9_999 * 0x1000);
+    }
 
     /// a GPU that writes back 0xAB over what it is asked for, counting.
     struct Drawn {

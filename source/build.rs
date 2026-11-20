@@ -16,6 +16,16 @@ fn main() {
     // here, into Haiku.exe, with every game address a variable the binding
     // fills for the module's region (hosted_build.rs).
     hosted(&dir);
+    // updater: Haiku's version (source/VERSION, which dev/builder/package.sh
+    // can set with HAIKU_RELEASE_VERSION), for the updater and the log
+    println!("cargo:rerun-if-changed={dir}/VERSION");
+    println!("cargo:rerun-if-env-changed=HAIKU_RELEASE_VERSION");
+    let version = var("HAIKU_RELEASE_VERSION").ok().filter(|v| !v.trim().is_empty())
+        .or_else(|| std::fs::read_to_string(format!("{dir}/VERSION")).ok())
+        .map(|v| v.trim().to_owned())
+        .unwrap_or_default();
+    assert!(!version.is_empty() && version.chars().all(|c| c.is_ascii_alphanumeric() || ".-+".contains(c)), "source/VERSION must hold Haiku's version, like 1.4 ({version:?})");
+    println!("cargo:rustc-env=HAIKU_RELEASE_VERSION={version}");
     // native-final: FATES_LINK_MAP=<file> writes the linker's map, which
     // lists every function linked into Haiku.exe (dev/native-final/linked.py)
     println!("cargo:rerun-if-env-changed=FATES_LINK_MAP");

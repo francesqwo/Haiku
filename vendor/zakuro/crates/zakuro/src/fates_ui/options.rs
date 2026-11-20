@@ -196,6 +196,8 @@ pub enum Item {
     /// tones: Corrin's speaking style (only with a Japanese-script
     /// translation on)
     SpeakingStyle,
+    /// updater: Check for Updates
+    CheckUpdates,
 }
 
 /// what the app has to do after a change.
@@ -265,12 +267,14 @@ fn items(tab: Tab, page: Page, mode: BottomScreen, mods: usize) -> Vec<Item> {
                 let mut list = vec![UiScale, Language];
                 crate::haiku_versions::interface_rows(&mut list, GameVersion, GameVersionRestart); // versions
                 list.extend(crate::haiku_setup_entry::available().then_some(HaikuSetup)); // oneexe
+                list.push(CheckUpdates); // updater
                 list
             }
             Tab::Interface => {
                 let mut list = vec![UiScale];
                 crate::haiku_versions::interface_rows(&mut list, GameVersion, GameVersionRestart); // versions
                 list.extend(crate::haiku_setup_entry::available().then_some(HaikuSetup)); // oneexe
+                list.push(CheckUpdates); // updater
                 list
             }
             // qol3: no SpotPass row (its questions are always answered No)
@@ -686,6 +690,16 @@ pub fn row(item: Item, settings: &Settings, env: &Env, armed: Option<Item>, rebi
             (s("Game Version"), Some(s(crate::haiku_versions::label(&tag))), crate::haiku_versions::help(&tag))
         }
         Item::GameVersionRestart => (s("Restart with This Version"), None, s("Restart the game with the version as set. Anything you haven't saved will be lost.")),
+        // updater
+        Item::CheckUpdates => (
+            s("Check for Updates"),
+            Some(s(if pc.check_updates { "On" } else { "Off" })),
+            s(if pc.check_updates {
+                "Once a day, ask GitHub (api.github.com) for a newer Haiku and say so on the Main Menu. Only Haiku's version is sent."
+            } else {
+                "Haiku never checks for updates or connects to GitHub. New versions are at github.com/tyle-beep/Haiku."
+            }),
+        ),
         // qol4
         Item::ReturnTitle => (s("Return to Title"), None, s("Restart the game from its opening, as the game's own soft reset does. Anything you haven't saved will be lost.")),
         Item::BoonBane => (
@@ -958,6 +972,12 @@ pub fn adjust(item: Item, dir: i32, settings: &mut Settings, env: &Env) -> Optio
         }
         Item::BoonBane => {
             pc.boon_bane_stats = !pc.boon_bane_stats;
+            Effect::Apply
+        }
+        // updater: on starts a check (none ran yet), off hides the notice
+        Item::CheckUpdates => {
+            pc.check_updates = !pc.check_updates;
+            crate::haiku_update::setting_changed(pc.check_updates);
             Effect::Apply
         }
         // info-ui

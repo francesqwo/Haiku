@@ -627,7 +627,19 @@ pub fn source(plan: &Plan, program: &Program, base: &Base, base_digest: u64, cod
             source.push_str("#define RECOMP_IMPORTED 1\n#include \"recomp.h\"\n#include \"patch.h\"\n\n");
         }
         let left = codegen::write_patch_function(&mut source, program, &names, &originals, PREFIX, entry, function);
-        if maybe_data(program, function) {
+        // modsweep: an ARM function whose very first instruction is one
+        // the generator can't recompile and is conditional is data a patch
+        // wrote over its start: the game's own code has no instruction it
+        // can't recompile (its module interprets none), and a compiler
+        // never starts a function with a conditional one, while pointers
+        // and text read as ARM mostly are (condition 0, EQ). Playable
+        // Lilith writes a table of PID names over debug::Menu::AddItem
+        // (0x00421404, first word 0x006A3ED5), which only the debug menu
+        // calls; the console would fault there too, so the host stops
+        // there if the game ever goes. Real new code with an instruction
+        // Haiku can't run (an unconditional msr that sets E) still refuses
+        let data_at_entry = function.mode == Mode::Arm && left.contains(&entry) && program.text.read32(entry).is_some_and(|word| word >> 28 != 0xE);
+        if maybe_data(program, function) || data_at_entry {
             left_to_host.extend(left);
         } else {
             interpreted.extend(left);
@@ -1058,6 +1070,30 @@ mod tests {
         let program = Program { text: segment(&patched), seeds: vec![(BASE, Source::Entry)], slots: None };
         let (made, program) = plan(&base, program, &changed);
         assert!(source(&made, &program, &base, 0, 0).is_err());
+    }
+
+    /// modsweep: a table a patch writes over a function's start (Playable
+    /// Lilith's PID names over debug::Menu::AddItem) is data: the module is
+    /// made, and those words are left to the host.
+    #[test]
+    fn a_table_written_over_a_functions_start_is_data() {
+        let own = [
+            0xEB00_0001, // bl BASE + 0xC
+            0xE12F_FF1E, // bx lr
+            0xE320_F000, // nop
+            0xE3A0_0001, // mov r0, #1
+            0xE3A0_0002, // mov r0, #2
+            0xE12F_FF1E, // bx lr
+        ];
+        let mut patched = own;
+        patched[3] = 0x006A_3ED5; // a pointer: ldrdeq r3, [r10], #-0xE5 (odd Rt)
+        patched[4] = 0x006A_3EE4; // a pointer
+        let base = base_of(&own);
+        let changed = changed_ranges(BASE, &bytes(&own), &bytes(&patched));
+        let program = Program { text: segment(&patched), seeds: vec![(BASE, Source::Entry)], slots: None };
+        let (made, program) = plan(&base, program, &changed);
+        let module = source(&made, &program, &base, 0, 0).expect("data over a function's start makes no refusal");
+        assert!(module.left_to_host.contains(&(BASE + 0xC)), "{:?}", module.left_to_host);
     }
 
     /// modfix: Thumb code a patch adds in free space, reached with an ARM

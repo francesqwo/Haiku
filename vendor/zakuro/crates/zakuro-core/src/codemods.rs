@@ -66,6 +66,9 @@ pub struct PatchModule {
     _library: libloading::Library,
     /// every address it has code for, bit 0 set for Thumb, sorted.
     entries: Vec<(u32, Code)>,
+    /// dispatch: the same entries in a hash table, which lookup answers
+    /// from in a look or two (every call into a changed function asks it).
+    index: crate::dispatch::AddressMap<Code>,
     pub path: PathBuf,
     /// codemods2: the changed functions' entries the patch left no code
     /// at, sorted.
@@ -124,7 +127,8 @@ impl PatchModule {
                 }
                 _ => Vec::new(),
             };
-            Ok(PatchModule { _library: library, entries, path: path.to_owned(), gone })
+            let index = crate::dispatch::AddressMap::new(entries.iter().copied());
+            Ok(PatchModule { _library: library, entries, index, path: path.to_owned(), gone })
         }
     }
 
@@ -135,8 +139,16 @@ impl PatchModule {
     }
 
     /// the code for address, bit 0 set for Thumb.
+    #[inline]
     pub fn lookup(&self, address: u32) -> Option<Code> {
-        self.entries.binary_search_by_key(&address, |(at, _)| *at).ok().map(|i| self.entries[i].1)
+        // dispatch: a hash table, not a search of the entries
+        self.index.get(address)
+    }
+
+    /// vowperf: every entry, by address, for a sampling profiler naming the
+    /// code a sample fell in.
+    pub fn entries(&self) -> &[(u32, Code)] {
+        &self.entries
     }
 
     pub fn len(&self) -> usize {

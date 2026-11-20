@@ -26,6 +26,7 @@ pub mod pregame; // updscreen: the game's code being built, before the game star
 pub mod pulse; // pulse: Divine Pulse's rewind screen
 pub mod states; // pulse: the Cheats tab's Save States
 pub mod tones; // tones: Options > Gameplay > Speaking Style
+pub mod update; // updater: the update's notice on the Main Menu and its screen
 pub mod script;
 pub mod snapshot;
 
@@ -273,6 +274,9 @@ pub struct FatesUi {
     pub code: codemods::CodeModsState,
     /// pulse: the rewind screen was up last frame
     pulse_open: bool,
+    /// updater: the update's screen, and whether the check was started
+    pub update: update::UpdateUi,
+    pub update_started: bool,
 }
 
 impl Default for FatesUi {
@@ -305,6 +309,8 @@ impl Default for FatesUi {
             options_key: false,
             code: codemods::CodeModsState::default(),
             pulse_open: false, // pulse
+            update: update::UpdateUi::default(), // updater
+            update_started: false,
         }
     }
 }
@@ -319,12 +325,18 @@ pub fn unit_for(size: egui::Vec2, ui_scale: f32) -> f32 {
 impl FatesUi {
     /// whether the game should stop for the interface.
     pub fn pauses(&self, message: bool) -> bool {
-        self.options.open || message
+        self.modal() || message
     }
 
     /// whether the keyboard's keys are for the interface, not the game.
     pub fn takes_keys(&self) -> bool {
-        self.options.open
+        self.modal()
+    }
+
+    /// updater: whether a screen of the interface's is up over the game
+    /// (the options menu, the update's screen): it takes every input.
+    pub fn modal(&self) -> bool {
+        self.options.open || self.update.open
     }
 
     /// the art, loaded on first use; none when assets/ is missing.
@@ -590,6 +602,32 @@ impl FatesUi {
             pulse::frame(&canvas, &input, &nav, &prompts, screen, view.top_screen);
             self.wants_pointer = true;
             return out;
+        }
+
+        // updater: the update's screen takes the input while it is up; its
+        // notice shows on the game's Main Menu, under the options
+        if self.update.open {
+            let (width, height) = (update::WIDTH * unit, update::HEIGHT * unit);
+            let snap = |v: f32| (v * ppp).round() / ppp;
+            let origin = egui::pos2(snap(screen.center().x - width / 2.0), snap(screen.center().y - height / 2.0));
+            let canvas = Canvas { painter: painter.clone(), origin, ..base.clone() };
+            self.update.frame(&canvas, &input, &nav, &prompts, screen);
+            self.wants_pointer = true;
+            if !self.update.open {
+                self.swallow = true;
+            }
+            return out;
+        }
+        if !self.options.open && view.game {
+            if let Some(release) = crate::haiku_update::notice().filter(|_| crate::haiku_update::on_main_menu()) {
+                let (asked, over) = update::notice(&base, &input, &nav, &prompts, screen, &release);
+                self.wants_pointer |= over;
+                if asked {
+                    self.update.show(release, now);
+                    self.swallow = true;
+                    return out;
+                }
+            }
         }
 
         // the options, opened with Esc, Home, Start and Select, or the corner

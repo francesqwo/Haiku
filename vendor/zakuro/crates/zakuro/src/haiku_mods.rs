@@ -913,7 +913,9 @@ fn read_mod(source: &Path, cache: Option<&Path>) -> ModInfo {
     // Veil Fix's bu/ and bx/, Expanded Fates' GameData/ and m/, Re-Fates'
     // "Mod files/" beside its luma/), laid out with its romfs/ as one
     // content folder in the cache. the code stays where it is
-    let code_dir = content.clone();
+    // modsweep: or in a folder of its own beside romfs/ (Fates+'s "Code
+    // Patch/code.ips", which its readme says to put beside romfs/)
+    let code_dir = crate::haiku_modlayout::code_folder(&content);
     let converted = info.fanpatch.as_ref().is_some_and(|fan| fan.converted);
     let mut roots = if converted { Vec::new() } else { crate::haiku_modlayout::loose_roots(&folder) };
     if !converted && content != folder && !roots.contains(&content) && crate::haiku_modlayout::romfs_root(&content) {
@@ -1087,7 +1089,17 @@ fn wrapped(folder: &Path) -> PathBuf {
             break;
         }
         let Ok(entries) = std::fs::read_dir(&current) else { break };
-        let dirs: Vec<PathBuf> = entries.flatten().map(|entry| entry.path()).filter(|path| path.is_dir()).collect();
+        // modsweep: a Mac zip's __MACOSX/ (Abyssal Bloodline) or a hidden
+        // folder beside the one folder doesn't count
+        let dirs: Vec<PathBuf> = entries
+            .flatten()
+            .filter(|entry| {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                !zakuro_fs::layered::is_junk(&name) && !name.starts_with('.')
+            })
+            .map(|entry| entry.path())
+            .filter(|path| path.is_dir())
+            .collect();
         match dirs.as_slice() {
             [only] => current = only.clone(),
             _ => break,
@@ -1166,6 +1178,9 @@ fn list_files(dir: &Path, prefix: &str, out: &mut Vec<String>) {
     let Ok(entries) = std::fs::read_dir(dir) else { return };
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().to_lowercase();
+        if zakuro_fs::layered::is_junk(&name) {
+            continue; // modsweep: never a game file, never laid
+        }
         let path = format!("{prefix}{name}");
         match entry.file_type() {
             Ok(kind) if kind.is_dir() => list_files(&entry.path(), &format!("{path}/"), out),
@@ -1347,6 +1362,22 @@ mod tests {
         let path = dir.join(path);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, data).unwrap();
+    }
+
+    #[test]
+    fn mac_and_windows_junk_is_left_out() {
+        // modsweep: Abyssal Bloodline's zip: "Release 1.2.1/romfs" beside
+        // __MACOSX/, .DS_Store files; Fates+'s "Terrain - Shortcut.lnk"
+        let dir = folder("junk");
+        put(&dir, "abyssal/Release 1.2.1/romfs/GameData/GameData.bin.lz", b"x");
+        put(&dir, "abyssal/Release 1.2.1/romfs/GameData/.DS_Store", b"x");
+        put(&dir, "abyssal/Release 1.2.1/README.rtf", b"x");
+        put(&dir, "abyssal/__MACOSX/Release 1.2.1/romfs/GameData/._GameData.bin.lz", b"x");
+        put(&dir, "abyssal/Release 1.2.1/romfs/GameData/Terrain/Terrain - Shortcut.lnk", b"x");
+        let info = read_mod(&dir.join("abyssal"), None);
+        assert_eq!(info.files, ["gamedata/gamedata.bin.lz"]);
+        assert!(info.content.unwrap().ends_with("Release 1.2.1"));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     /// a zip of stored files, as `zip -0` makes.

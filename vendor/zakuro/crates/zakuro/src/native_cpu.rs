@@ -78,6 +78,19 @@ pub fn headless_save(system: &mut System, frame: u64, points: &[(u64, String)]) 
     }
 }
 
+/// vowperf: HAIKU_FRAME_LOG=<file> writes how long each frame of a headless
+/// run took, one line a frame (the frame, its microseconds), for finding the
+/// long frames of a scene. A test tool, off unless named.
+pub fn frame_log(first: u64, times: &[Duration]) {
+    let Some(path) = std::env::var_os("HAIKU_FRAME_LOG") else { return };
+    let mut text = String::with_capacity(times.len() * 12);
+    for (i, time) in times.iter().enumerate() {
+        text += &format!("{}	{}
+", first + i as u64 + 1, time.as_micros());
+    }
+    let _ = std::fs::write(&path, text);
+}
+
 /// what a headless run prints about how long its frames took.
 pub fn frame_times(times: &mut [Duration]) -> String {
     if times.is_empty() {

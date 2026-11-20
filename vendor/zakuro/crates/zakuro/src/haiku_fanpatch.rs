@@ -152,10 +152,15 @@ fn walk(dir: &Path, prefix: &str, out: &mut Vec<(String, PathBuf)>) {
 /// whether dir is the root of a RomFS whose text is in the Japanese layout:
 /// m/ holds .bin.lz files itself (the USA and EUR games have only language
 /// folders, @E, @U..., and route folders there).
+/// modsweep: and none of those language folders: Fates+ 3.5, made for the
+/// USA game, has m/@E/ and four stray Japanese-named archives in m/; the
+/// Japanese game has no @ folder at all.
 fn japanese_romfs(dir: &Path) -> bool {
     let Some(m) = find_ci(dir, "m") else { return false };
     let Ok(entries) = std::fs::read_dir(&m) else { return false };
-    entries.flatten().any(|entry| entry.path().is_file() && entry.file_name().to_string_lossy().to_ascii_lowercase().ends_with(".bin.lz"))
+    let entries: Vec<_> = entries.flatten().collect();
+    let western = entries.iter().any(|entry| entry.path().is_dir() && entry.file_name().to_string_lossy().starts_with('@'));
+    !western && entries.iter().any(|entry| entry.path().is_file() && entry.file_name().to_string_lossy().to_ascii_lowercase().ends_with(".bin.lz"))
 }
 
 /// whether haiku_mods stops looking into a folder that holds one folder:
@@ -1384,6 +1389,20 @@ mod tests {
     fn archive(name: &str, messages: &[(&str, &str)]) -> Vec<u8> {
         let messages: Vec<Message> = messages.iter().map(|(label, text)| Message::new(label.as_bytes(), text)).collect();
         zakuro_fs::lz11::compress(&msgarc::new(name.as_bytes(), &messages))
+    }
+
+    #[test]
+    fn a_usa_romfs_with_stray_files_in_m_is_not_the_japanese_layout() {
+        // modsweep: Fates+ 3.5 has m/@E/ and four Japanese-named archives
+        // in m/ itself; Team If's rom/ has m/ files and no @ folder
+        let dir = folder("strays");
+        put(&dir, "plus/m/@E/GMap.bin.lz", b"x");
+        put(&dir, "plus/m/EP_x.bin.lz", b"x");
+        assert!(!japanese_romfs(&dir.join("plus")));
+        put(&dir, "jp/m/GMap.bin.lz", b"x");
+        put(&dir, "jp/m/A/A001.bin.lz", b"x");
+        assert!(japanese_romfs(&dir.join("jp")));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

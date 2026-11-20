@@ -35,6 +35,16 @@ pub mod word {
     pub const STATUS_HELP: usize = 14;
     pub const GROWTH_RATES: usize = 16;
     pub const DECISIONS: usize = 24;
+    // vowperf: the most instructions an AI call of a prediction ran, whether
+    // predictions are off (1 this map, 2 the session), the longest run (us)
+    pub const STEP_MAX: usize = 29;
+    pub const OFF: usize = 30;
+    pub const RUN_MAX: usize = 31;
+    // predict: guest calls that returned through other frames, predictions
+    // given up at an access to nothing, and the last such address
+    pub const NESTED: usize = 420;
+    pub const BAD: usize = 421;
+    pub const BAD_ADDR: usize = 422;
     pub const COUNT: usize = 512;
 }
 
@@ -99,9 +109,15 @@ pub fn apply(pc: &PcSettings) {
     write(word::GROWTH, growth_on(pc) as u32);
     // tests: FATES_INFO_DEBUG=1 logs every prediction, 2 the real enemy
     // phase's decisions, 3 both; FATES_INFO_SIMULATE=0 does not move each
-    // enemy before the next one thinks
+    // enemy before the next one thinks. predict: bit 8 also predicts as each
+    // enemy phase begins, 16 finds where a run's first bad access is, 64
+    // logs each step's instructions, 128 finds where a step that decided
+    // nothing came back from (overrides/info_ui.c)
     write(word::DEBUG, env_u32("FATES_INFO_DEBUG").unwrap_or(0));
     write(word::SIMULATE, env_u32("FATES_INFO_SIMULATE").unwrap_or(1));
+    // vowperf: FATES_INFO_BUDGET=<instructions> gives each AI call of a
+    // prediction that budget instead of info_ui.c's (tests)
+    write(500, env_u32("FATES_INFO_BUDGET").unwrap_or(0));
 }
 
 /// the counts for the end of a headless run.
@@ -109,7 +125,7 @@ pub fn summary() -> Option<String> {
     HOOKS.get()?;
     let r = |i| read(i).unwrap_or(0);
     Some(format!(
-        "info-ui: lines mode {}, predictions {} ({} abandoned, last {} us, {} pages copied, {} svcs), decisions {}, lines drawn {}; growth {} (unit status draws {})",
+        "info-ui: lines mode {}, predictions {} ({} abandoned, last {} us, {} pages copied, {} svcs), decisions {}, lines drawn {}; growth {} (unit status draws {}); vowperf: longest run {} us, most instructions in an AI call {}, off {}; predict: nested returns {}, given up at a bad access {} (last {:08X})",
         r(word::MODE),
         r(word::RUNS),
         r(word::ABORTS),
@@ -119,7 +135,13 @@ pub fn summary() -> Option<String> {
         r(word::DECISIONS),
         r(word::LINES),
         r(word::GROWTH),
-        r(word::STATUS_DRAWS)
+        r(word::STATUS_DRAWS),
+        r(word::RUN_MAX),
+        r(word::STEP_MAX),
+        r(word::OFF),
+        r(word::NESTED),
+        r(word::BAD),
+        r(word::BAD_ADDR)
     ))
 }
 

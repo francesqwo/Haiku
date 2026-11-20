@@ -11,6 +11,7 @@ pub mod coverage;
 pub mod codemods; // codemods: mods that change the game's code, run natively
 pub mod enhancements;
 pub mod cro;
+pub mod dispatch; // dispatch: a code mod's entries found in a look or two
 pub mod download_play;
 pub mod hints;
 pub mod idle;

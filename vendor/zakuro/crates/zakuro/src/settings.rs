@@ -1037,6 +1037,10 @@ pub struct PcSettings {
     // entry, the shared lines kept as they were (the default for a version
     // without an entry). Only in a Haiku folder with games\<version>\.
     pub per_version: std::collections::BTreeMap<String, VersionSettings>,
+    // updater: Options > Interface > Check for Updates: once a day, ask
+    // GitHub's API whether a newer Haiku is out (haiku_update.rs). Off: no
+    // network at all.
+    pub check_updates: bool,
 }
 
 /// versions2: one version's own settings (PcSettings::per_version); each
@@ -1311,6 +1315,7 @@ impl Default for PcSettings {
             code_mods_compiler: CodeModsCompiler::Ask, // zigdl
             game_version: String::new(), // versions
             per_version: std::collections::BTreeMap::new(), // versions2
+            check_updates: true, // updater
         }
     }
 }

@@ -478,6 +478,33 @@ const SCENES: &[Scene] = &[
     // online: the host's code over the game's wait (the run's own code when
     // it hosted), without a router mapping, the code box, a mistyped code,
     // connecting, and a refusal
+    // updater: the Main Menu's notice (keyboard and Xbox prompts), the
+    // notes, scrolled, Skip chosen, a release without a signature, the
+    // download, the check, a failure with the download page, one without
+    Scene { name: "update-notice", setup: |_, _, _| crate::haiku_update::snapshot_notice(Some(crate::haiku_update::snapshot_release())) },
+    Scene { name: "update-notice-pad", setup: |_, _, s| {
+        crate::haiku_update::snapshot_notice(Some(crate::haiku_update::snapshot_release()));
+        s.pc.glyphs = crate::settings::Glyphs::Xbox;
+    } },
+    Scene { name: "update-notes", setup: |f, _, _| f.update.snapshot(crate::haiku_update::snapshot_release(), "notes") },
+    Scene { name: "update-notes-scrolled", setup: |f, _, _| f.update.snapshot(crate::haiku_update::snapshot_release(), "scrolled") },
+    Scene { name: "update-notes-skip", setup: |f, _, _| f.update.snapshot(crate::haiku_update::snapshot_release(), "skip") },
+    Scene { name: "update-unsigned", setup: |f, _, _| {
+        let release = crate::haiku_update::Release { sig_url: String::new(), ..crate::haiku_update::snapshot_release() };
+        f.update.snapshot(release, "notes");
+    } },
+    Scene { name: "update-downloading", setup: |f, _, s| {
+        f.update.snapshot(crate::haiku_update::snapshot_release(), "downloading");
+        s.pc.glyphs = crate::settings::Glyphs::Xbox;
+    } },
+    Scene { name: "update-checking", setup: |f, _, _| f.update.snapshot(crate::haiku_update::snapshot_release(), "checking") },
+    Scene { name: "update-failed", setup: |f, _, _| f.update.snapshot(crate::haiku_update::snapshot_release(), "failed") },
+    Scene { name: "update-option", setup: |f, _, _| options_at(f, 5, Page::Main, 1) },
+    Scene { name: "update-option-off", setup: |f, _, s| {
+        s.pc.check_updates = false;
+        options_at(f, 5, Page::Main, 1);
+    } },
+    Scene { name: "update-offline", setup: |f, _, _| f.update.snapshot(crate::haiku_update::snapshot_release(), "offline") },
     Scene { name: "online-host", setup: |_, v, s| {
         v.online = Some(crate::online_ui::host_panel().unwrap_or(crate::online_ui::HostPanel { code: "4HGJ-MZR0-000M-7JW6-ZBFG-YY1S".into(), mapped: true, copied: false, allow_cheats: false }));
         s.pc.glyphs = crate::settings::Glyphs::Keyboard;
@@ -559,6 +586,7 @@ fn picture(size: [usize; 2], top: &Shot, bottom: &Shot, scene: &Scene, chara: &O
         mods: super::mods::sample(), // mods
     };
     crate::haiku_import::snapshot_progress(scene.name == "mods-unpacking"); // hdpacks
+    crate::haiku_update::snapshot_notice(None); // updater: a scene of its own sets one
     (scene.setup)(&mut fates, &mut view, &mut settings);
     // qol: the top screen where backdrop puts it, and the panel
     // (pulse: the rewind screen sits on it too)

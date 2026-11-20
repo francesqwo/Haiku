@@ -32,6 +32,10 @@
  *      (AI::Completion does that), the stack. The registers, the VFP
  *      registers and the budget are put back afterwards. An svc or an exit
  *      from the code during the prediction abandons it (counted).
+ *      predict: so does the first access to nothing (a read of an unmapped
+ *      page, a write the copy refuses), at once and without a host warning
+ *      (cow_bad); and a guest call carries on from r15, as the host does,
+ *      until the guest has really returned (gcall).
  *
  *    - The lines are drawn on the map, in its 3D space, with the game's own
  *      prim calls, not depth tested against the map (so walls and roofs
@@ -85,6 +89,12 @@ extern uint32_t pulse_words[];
  * 14 the unit status' help box is up    15 the frame of the last move-choosing tick
  * 25, 26 the unit being moved and where it stands, for the lines shown
  * 27 the unit whose destination is being chosen
+ * 28 a prediction is running now (vowperf: for the sampling profiler)
+ * 29 the most instructions one AI call of a prediction ran (vowperf)
+ * 30 predictions off (vowperf): 0 on, 1 for this map, 2 for the session
+ * 31 the longest prediction run so far, microseconds (vowperf)
+ * 420 guest calls that returned through other frames (predict)
+ * 421 predictions given up at an access to nothing, 422 its address (predict)
  * 16.. growth rates [8] (HP, Str, Mag, Skl, Spd, Lck, Def, Res), signed
  * 24.. decisions predicted: count at 24, then 4 words each from 32:
  *      attacker index | target index << 8 | action << 16 | item << 24,
@@ -111,6 +121,14 @@ uint32_t info_ui_words[IU_WORDS];
 #define W_PLACED_UNIT 25   /* the lines shown have this unit (pool index) ... */
 #define W_PLACED_XY 26     /* ... standing here (x | y << 8) */
 #define W_PICK_UNIT 27     /* the unit whose destination is being chosen */
+#define W_PREDICTING 28    /* vowperf: a prediction is running now */
+#define W_STEP_MAX 29      /* vowperf: the most instructions one AI call of a prediction ran */
+#define W_OFF 30           /* vowperf: predictions off, 1 for this map, 2 for the session */
+#define W_RUN_MAX 31       /* vowperf: the longest prediction run, microseconds */
+#define W_TEST_BUDGET 500  /* vowperf: tests (FATES_INFO_BUDGET): another budget for a prediction's calls */
+#define W_NESTED 420       /* predict: guest calls that returned through other frames (gcall) */
+#define W_BAD 421          /* predict: predictions given up at an access to nothing (unmapped, refused) */
+#define W_BAD_ADDR 422     /* predict: the last such access's address */
 #define W_GROWTH_RATES 16
 #define W_DECISIONS 24
 #define W_DECISION0 32
@@ -184,19 +202,87 @@ static void restore(Context *ctx, const Saved *s) {
 }
 
 /* calls the guest function at fn with r0-r3, on the stack below the
-   current sp, with all the budget it needs; 1 when it returned. */
+   current sp, with all the budget it needs (gcall_budget); 1 when it
+   returned.
+
+   predict: when the function has returned is for the guest to say, not
+   for the C call. The generated code hands control back to the host
+   before the guest function returns whenever it can't go on in the C frames
+   it is in: it entered another function midway (a jump from one function
+   into another and back, as code mods' hooks do: V.O.W Edition's
+   AI::Processing goes out to its own code after AIThink::Think and jumps
+   back in; its BattleInfo::Calculate ends in its own code), a return came
+   to an address its caller did not expect, the C calls nested too deep. The
+   frames then unwind, r15 is where the guest is, and the host carries on
+   from there; its stack and registers are all in the context. So does this
+   call now: it carries on from r15 until the guest comes back to
+   GCALL_RETURN (an address with no code, the function's return address)
+   with the stack as it was. It used to take any return of the C call for
+   the function's, and to give fn itself as the return address: a call that
+   unwound came back early (V.O.W: AI::Processing "decided" nothing, the
+   same unit again and again), or ran fn again from its start with the
+   registers it had (V.O.W: a null this; the game's own AI on the copy,
+   rarely: garbage pointers followed until the budget ran out, issue #12). */
+#define GCALL_RETURN 0x00000FF0u
+#define GCALL_RESUMES (1 << 20) /* each runs code: the budget ends them first */
+static int32_t gcall_budget = 0x40000000;
+static int cow_failed;
+static Host cow_host;
 static int gcall(Context *ctx, uint32_t fn, uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3) {
+    uint32_t sp = ctx->r[13];
     ctx->r[0] = a0;
     ctx->r[1] = a1;
     ctx->r[2] = a2;
     ctx->r[3] = a3;
-    ctx->r[14] = fn; /* any address: the callee returns to the C below */
+    ctx->r[14] = GCALL_RETURN;
     ctx->r[15] = fn;
     ctx->thumb = 0;
-    ctx->budget = 0x40000000;
-    ctx->depth++;
-    recomp_call(ctx);
-    ctx->depth--;
+    ctx->budget = gcall_budget;
+    /* tests (FATES_INFO_DEBUG bit 256): a prediction's calls start 8 C
+       calls short of RECOMP_DEPTH_LIMIT, so the code unwinds whenever it
+       nests deeper and this call carries on from r15 each time, as the host
+       does: the decisions must be the same */
+    uint32_t deep = ctx->host == &cow_host && iu_debug(256) && ctx->depth + 8 < RECOMP_DEPTH_LIMIT ? RECOMP_DEPTH_LIMIT - 8 - ctx->depth : 0;
+    ctx->depth += 1 + deep;
+    if (ctx->host == &cow_host && iu_debug(512)) {
+        /* tests (bit 512): the call as it was before (1.3, vowperf), to show
+           what it does with the code unwinding: fn its own return address,
+           any return of the C call taken for the guest's */
+        ctx->r[14] = fn;
+        recomp_call(ctx);
+        ctx->depth -= 1 + deep;
+        return ctx->exit == 0;
+    }
+    for (int resumes = 0;; resumes++) {
+        int32_t before = ctx->budget;
+        recomp_call(ctx);
+        if ((ctx->exit == 0 || ctx->exit == EXIT_UNWIND) && ctx->r[15] == GCALL_RETURN && !ctx->thumb && ctx->r[13] == sp) {
+            ctx->exit = 0; /* returned (through the host when EXIT_UNWIND) */
+            break;
+        }
+        /* the budget, an svc left for the host, an access the copy refused:
+           the call ends there, not returned */
+        if (ctx->exit != 0 && ctx->exit != EXIT_UNWIND)
+            break;
+        if (ctx->host == &cow_host && cow_failed)
+            break;
+        /* outside a prediction an svc may unwind for the host to switch
+           threads, which this call can't do: only a plain unwind (exit 0)
+           goes on there. On the copy an svc ends the prediction (cow_svc). */
+        if (ctx->host != &cow_host && ctx->exit != 0)
+            break;
+        if (ctx->exit == EXIT_UNWIND && ctx->budget == before)
+            break; /* no code at r15: nothing ran */
+        if (resumes == GCALL_RESUMES || ctx->r[15] == GCALL_RETURN) {
+            if (!ctx->exit)
+                ctx->exit = EXIT_UNWIND;
+            break;
+        }
+        /* the frames unwound with the guest elsewhere: on from r15 */
+        ctx->exit = 0;
+        info_ui_words[W_NESTED]++;
+    }
+    ctx->depth -= 1 + deep;
     return ctx->exit == 0;
 }
 
@@ -213,11 +299,9 @@ static uint8_t **cow_write;
 static uint8_t *cow_pool;
 static uint32_t cow_dirty[COW_PAGES];
 static uint32_t cow_used;
-static int cow_failed;
 static uint8_t *const *orig_read;
 static uint8_t *const *orig_write;
 static const Host *orig_host;
-static Host cow_host;
 static uint32_t cow_svcs;
 
 static uint8_t *cow_page(uint32_t page) {
@@ -238,11 +322,45 @@ static uint8_t *cow_page(uint32_t page) {
     return copy;
 }
 
+/* predict: the first access a prediction made where the game's memory has
+   nothing (an unmapped page, the read of a garbage pointer, a write the copy
+   refuses): the address, 1 for a write, and the prediction stops there. */
+static uint32_t cow_bad_addr;
+static int cow_bad_write;
+static uint32_t cow_bad_pc;
+static int cow_bad_seen;
+
+static void cow_bad(Context *ctx, uint32_t a, int write) {
+    if (!cow_failed) {
+        cow_bad_seen = 1;
+        cow_bad_addr = a;
+        cow_bad_write = write;
+        cow_bad_pc = ctx->r[15];
+    }
+    cow_failed = 1;
+    /* leave at the next call or return: the code goes no further on what it
+       read (a value of 0) than to the end of the block it is in */
+    if (!ctx->exit)
+        ctx->exit = EXIT_UNWIND;
+}
+
+/* predict: a page whose read side is empty is the host's to read only where
+   the GPU keeps what it drew (the linear heap and VRAM, guarded until the
+   GPU writes it back); anywhere else it is unmapped, and the host would log
+   the access (once per page: a run that follows garbage pointers logged a
+   line for each of thousands of pages, issue #12). */
+static int cow_host_page(uint32_t a) {
+    return (a >= 0x14000000u && a < 0x1C000000u) || (a >= 0x1F000000u && a < 0x1F600000u) || (a >= 0x30000000u && a < 0x38000000u);
+}
+
 static uint8_t cow_r8(Context *ctx, uint32_t a) {
     uint8_t *page = cow_read[a >> 12];
     if (page)
         return page[a & 0xFFF];
-    return orig_host->read8(ctx, a);
+    if (cow_host_page(a))
+        return orig_host->read8(ctx, a);
+    cow_bad(ctx, a, 0);
+    return 0;
 }
 static uint16_t cow_r16(Context *ctx, uint32_t a) {
     return (uint16_t)(cow_r8(ctx, a) | cow_r8(ctx, a + 1) << 8);
@@ -251,12 +369,15 @@ static uint32_t cow_r32(Context *ctx, uint32_t a) {
     return (uint32_t)cow_r8(ctx, a) | (uint32_t)cow_r8(ctx, a + 1) << 8 | (uint32_t)cow_r8(ctx, a + 2) << 16 | (uint32_t)cow_r8(ctx, a + 3) << 24;
 }
 static void cow_w8(Context *ctx, uint32_t a, uint8_t v) {
-    (void)ctx;
     uint8_t *page = cow_page(a >> 12);
     if (page)
         page[a & 0xFFF] = v;
-    else
-        cow_failed = 1; /* a device or read-only page: never let it through */
+    else {
+        if (iu_debug(1) && !cow_failed)
+            fprintf(stderr, "info-ui: predicting: a write to %08X at %08X, %s, abandoned\n", a, ctx->r[15],
+                    cow_used >= COW_PAGES ? "the copy is full" : "a page with no write side");
+        cow_bad(ctx, a, 1); /* a device or read-only page: never let it through */
+    }
 }
 static void cow_w16(Context *ctx, uint32_t a, uint16_t v) {
     cow_w8(ctx, a, (uint8_t)v);
@@ -297,6 +418,10 @@ static int cow_begin(Context *ctx) {
     cow_host.svc = cow_svc;
     cow_used = 0;
     cow_failed = 0;
+    cow_bad_addr = 0;
+    cow_bad_write = 0;
+    cow_bad_pc = 0;
+    cow_bad_seen = 0;
     ctx->read_pages = (uint8_t *const *)cow_read;
     ctx->write_pages = (uint8_t *const *)cow_write;
     ctx->host = &cow_host;
@@ -372,6 +497,28 @@ static void copy_move(Context *ctx, uint32_t unit, int x, int y) {
     mem_write8(ctx, unit + 0xF5, (uint8_t)y);
 }
 
+/* vowperf: a run that failed in a way that comes back every time: the
+   copy refused a write (a code mod's AI writing through a pointer the copy
+   has no page for) or an AI call ran out of its budget */
+static int fork_hard_failure;
+static int fork_bad_access; /* predict: the run stopped at an access to nothing */
+
+/* predict: where a run failed (the step, the instructions it ran), and for
+   tests (FATES_INFO_DEBUG bit 16) a probe that runs one step on a budget of
+   probe_budget and keeps the registers and the stack it left with */
+static int fork_fail_step;
+static int32_t fork_fail_used;
+static int probe_step = -1;
+static int32_t probe_budget;
+static int probe_failed;
+static int probe_returned;
+static int fork_zero_step;   /* tests: the first step that decided nothing (action 0) */
+static int32_t fork_zero_used;
+static uint32_t probe_exit;
+static uint32_t probe_r[16];
+static uint32_t probe_stack[48];
+static uint32_t probe_sp; /* the sp the run's calls start with */
+
 static int run_fork(Context *ctx, uint32_t sp, uint32_t seed, const Place *place, uint32_t *out, uint32_t *count_out) {
     uint32_t sit = mem_read32(ctx, SITUATION_PTR);
     uint32_t count = 0;
@@ -388,7 +535,10 @@ static int run_fork(Context *ctx, uint32_t sp, uint32_t seed, const Place *place
     }
     ctx->r[13] = (sp - 0x40) & ~7u;
     ok = gcall(ctx, F_OPERATOR_NEW, 0x24, 0, 0, 0) && !cow_failed;
+    if (!ok && iu_debug(1))
+        fprintf(stderr, "info-ui: predicting: operator new left with exit %u at %08X\n", ctx->exit, ctx->r[15]);
     uint32_t ai = ok ? ctx->r[0] : 0;
+    probe_sp = (sp - 0x40) & ~7u;
     if (ai) {
         ctx->r[13] = (sp - 0x40) & ~7u;
         ok = gcall(ctx, F_AI_CTOR, ai, 0, 0, 0) && !cow_failed;
@@ -399,9 +549,41 @@ static int run_fork(Context *ctx, uint32_t sp, uint32_t seed, const Place *place
     } else {
         ok = 0;
     }
+    fork_fail_step = -1;
+    fork_zero_step = -1;
     for (int step = 0; ok && step < 200 && count < MAX_DECISIONS; step++) {
         ctx->r[13] = (sp - 0x40) & ~7u;
-        if (!gcall(ctx, F_AI_PROCESSING, ai, 0, 0, 0) || cow_failed) {
+        int32_t step_budget = gcall_budget;
+        if (step == probe_step)
+            gcall_budget = probe_budget;
+        int returned = gcall(ctx, F_AI_PROCESSING, ai, 0, 0, 0);
+        uint32_t used = (uint32_t)(gcall_budget - ctx->budget);
+        if (step == probe_step) {
+            probe_failed = cow_failed;
+            probe_returned = returned;
+            probe_exit = ctx->exit;
+            memcpy(probe_r, ctx->r, sizeof probe_r);
+            for (int i = 0; i < 48; i++)
+                probe_stack[i] = mem_read32(ctx, ctx->r[13] + 4u * (uint32_t)i);
+            gcall_budget = step_budget;
+            ok = 0;
+            break;
+        }
+        if (returned && used > info_ui_words[W_STEP_MAX])
+            info_ui_words[W_STEP_MAX] = used;
+        if (!returned || cow_failed) {
+            fork_fail_step = step;
+            fork_fail_used = (int32_t)used;
+            /* predict: an access to nothing (a read of an unmapped page, a
+               write the copy refuses) stops the run where it is made; it
+               is counted per map (predict_runs). The budget running out
+               stays a hard failure (vowperf). */
+            if (cow_bad_seen)
+                fork_bad_access = 1;
+            else if (ctx->exit == EXIT_BUDGET)
+                fork_hard_failure = 1;
+            if (iu_debug(1))
+                fprintf(stderr, "info-ui: predicting: step %d left with exit %u at %08X (copy %s)\n", step, ctx->exit, ctx->r[15], cow_failed ? "failed" : "ok");
             ok = 0;
             break;
         }
@@ -413,6 +595,22 @@ static int run_fork(Context *ctx, uint32_t sp, uint32_t seed, const Place *place
         uint32_t action = mem_read8(ctx, mind + 6);
         if (action == MIND_END)
             break;
+        if (action == 0) {
+            /* predict: the real phase never gets a decision of nothing; a
+               call that comes back with one did not finish (as V.O.W's did
+               before gcall carried on from r15), and the AI would decide the
+               same unit again for every step left: the run is given up, as
+               one that ran out of its budget (it would every time) */
+            if (fork_zero_step < 0) {
+                fork_zero_step = step;
+                fork_zero_used = (int32_t)used;
+            }
+            if (iu_debug(1))
+                fprintf(stderr, "info-ui: predicting: step %d decided nothing (unit %u), given up\n", step, mem_read8(ctx, mind + 0));
+            fork_hard_failure = 1;
+            ok = 0;
+            break;
+        }
         uint32_t index = mem_read8(ctx, mind + 0);
         uint32_t unit = unit_at_index(ctx, index);
         int8_t mx = (int8_t)mem_read8(ctx, mind + 4), my = (int8_t)mem_read8(ctx, mind + 5);
@@ -423,6 +621,9 @@ static int run_fork(Context *ctx, uint32_t sp, uint32_t seed, const Place *place
         d[2] = fx | fy << 8;
         d[3] = mem_read8(ctx, mind + 0xE) | (uint32_t)mem_read8(ctx, mind + 0xF) << 8;
         count++;
+        if (iu_debug(64) && !seed)
+            fprintf(stderr, "info-ui: step %d: %u instructions, nested returns so far %u, AI state %u\n", step, used,
+                    info_ui_words[W_NESTED], mem_read8(ctx, ai + 0x20));
         if (iu_debug(1) && !seed)
             fprintf(stderr, "info-ui: predicted unit %u at %u,%u: action 0x%02X move %d,%d target %u item %d trade %u\n",
                     index, fx, fy, action, mx, my, mem_read8(ctx, mind + 9), (int8_t)mem_read8(ctx, mind + 8), mem_read8(ctx, mind + 0xE));
@@ -560,6 +761,132 @@ static void publish(const Prediction *p, int log) {
     info_ui_words[W_PLACED_XY] = (uint32_t)(p->place.x & 0xFF) | (uint32_t)(p->place.y & 0xFF) << 8;
 }
 
+/* vowperf: what a prediction may cost, on the game's thread, in the
+   frame it runs in.
+
+   - Each guest call of a prediction gets PREDICT_BUDGET instructions, not
+     the 2^30 the drawing's calls get. An AI call of the game's own AI runs
+     at most a few million (W_STEP_MAX keeps the most seen; the bench's
+     maps up to Chapter 7 and Ghostly Gold); a code mod's AI that goes wrong
+     on the copy (V.O.W Edition's AI::Processing writes through a null
+     pointer there, the write is refused, and its code then loops) used to
+     run the whole 2^30, about 600 ms, once for every new situation: every
+     tile a moved unit was held over froze the game for most of a second.
+     (predict: that was gcall running AI::Processing again from its start
+     after a return through the host; see gcall. V.O.W's AI now runs on
+     the copy, up to about 13M instructions in a call.)
+   - A run that fails that way fails the same way for every situation, so
+     the predictions stop for the rest of the map (W_OFF 1); after two such
+     failures with no prediction ever made in this session, for the session
+     (W_OFF 2). An svc stays what it was: that situation's prediction alone
+     is given up.
+   - A run that took longer than SLOW_RUN_US (a map, or a code mod's AI,
+     heavy enough) makes that map's predictions lighter: one run instead of
+     FORK_SEEDS, and none per tile while a unit's destination is chosen
+     (the lines of the map as it is stay shown). The game's own AI runs 1
+     to 9 ms on the bench's maps, under it. */
+#define PREDICT_BUDGET (24 << 20)
+#define SLOW_RUN_US 10000u
+static uint32_t off_sit;      /* the map (map::Situation) predictions are off for */
+static uint32_t slow_sit;     /* the map whose predictions are lightened */
+static int hard_failures;     /* runs that failed hard, this session */
+static int ever_predicted;    /* a prediction run succeeded this session */
+/* predict: predictions given up at an access to nothing, on the map
+   bad_sit; at BAD_PER_MAP of them the map's predictions are off */
+#define BAD_PER_MAP 3
+#define BAD_LINES 50
+static uint32_t bad_sit;
+static int bad_on_map;
+static int bad_lines;
+
+/* predict, tests (FATES_INFO_DEBUG bit 16): where a failed run's first bad
+   access is. The run is made again with the failing step on smaller
+   budgets: the smallest that still fails ends in the block holding the
+   access, so one instruction less stops at that block's start, and r15, the
+   registers and the stack (return addresses) say where it is. */
+static void locate(Context *ctx, const Saved *saved, uint32_t sp, uint32_t seed, const Place *place) {
+    static uint32_t scratch[4 * MAX_DECISIONS];
+    uint32_t count;
+    int step = fork_fail_step;
+    uint32_t bad = cow_bad_addr;
+    int write = cow_bad_write;
+    int32_t lo = 0, hi = fork_fail_used + 64;
+    probe_step = step;
+    probe_budget = hi;
+    run_fork(ctx, sp, seed, place, scratch, &count);
+    restore(ctx, saved);
+    if (!probe_failed) {
+        fprintf(stderr, "info-ui: locate: step %d does not fail again on %d instructions\n", step, hi);
+        probe_step = -1;
+        return;
+    }
+    while (hi - lo > 1) {
+        int32_t mid = lo + (hi - lo) / 2;
+        probe_budget = mid;
+        run_fork(ctx, sp, seed, place, scratch, &count);
+        restore(ctx, saved);
+        if (probe_failed)
+            hi = mid;
+        else
+            lo = mid;
+    }
+    probe_budget = lo;
+    run_fork(ctx, sp, seed, place, scratch, &count);
+    restore(ctx, saved);
+    probe_step = -1;
+    fprintf(stderr, "info-ui: locate: step %d, the %s %08X is in the block at %08X (after %d instructions, exit %u)\n", step,
+            write ? "write to" : "read of", bad, probe_r[15], lo, probe_exit);
+    fprintf(stderr, "info-ui: locate: r0-r7 %08X %08X %08X %08X %08X %08X %08X %08X\n", probe_r[0], probe_r[1], probe_r[2],
+            probe_r[3], probe_r[4], probe_r[5], probe_r[6], probe_r[7]);
+    fprintf(stderr, "info-ui: locate: r8-r14 %08X %08X %08X %08X %08X %08X %08X\n", probe_r[8], probe_r[9], probe_r[10],
+            probe_r[11], probe_r[12], probe_r[13], probe_r[14]);
+    fprintf(stderr, "info-ui: locate: code addresses on the stack:");
+    for (int i = 0; i < 48; i++)
+        if (probe_stack[i] >= 0x00100000u && probe_stack[i] < 0x00830000u)
+            fprintf(stderr, " +%02X:%08X", i * 4, probe_stack[i]);
+    fprintf(stderr, "\n");
+}
+
+/* tests (FATES_INFO_DEBUG bit 128): where a step that decided nothing
+   (action 0) returned from: the smallest budget it returns on, and the
+   block one instruction less stops at */
+static void locate_return(Context *ctx, const Saved *saved, uint32_t sp, uint32_t seed, const Place *place) {
+    static uint32_t scratch[4 * MAX_DECISIONS];
+    uint32_t count;
+    int step = fork_zero_step;
+    int32_t lo = 0, hi = fork_zero_used + 64;
+    probe_step = step;
+    while (hi - lo > 1) {
+        int32_t mid = lo + (hi - lo) / 2;
+        probe_budget = mid;
+        run_fork(ctx, sp, seed, place, scratch, &count);
+        restore(ctx, saved);
+        if (probe_returned)
+            hi = mid;
+        else
+            lo = mid;
+    }
+    probe_budget = hi;
+    run_fork(ctx, sp, seed, place, scratch, &count);
+    restore(ctx, saved);
+    fprintf(stderr, "info-ui: return: at %d: returned %d, r15 %08X r13 %08X r14 %08X r0 %08X (the call's sp %08X), nested %u\n", hi,
+            probe_returned, probe_r[15], probe_r[13], probe_r[14], probe_r[0], probe_sp, info_ui_words[W_NESTED]);
+    probe_budget = lo;
+    run_fork(ctx, sp, seed, place, scratch, &count);
+    restore(ctx, saved);
+    probe_step = -1;
+    fprintf(stderr, "info-ui: return: step %d returns after %d instructions, from the block at %08X\n", step, hi, probe_r[15]);
+    fprintf(stderr, "info-ui: return: r0-r7 %08X %08X %08X %08X %08X %08X %08X %08X\n", probe_r[0], probe_r[1], probe_r[2],
+            probe_r[3], probe_r[4], probe_r[5], probe_r[6], probe_r[7]);
+    fprintf(stderr, "info-ui: return: r8-r14 %08X %08X %08X %08X %08X %08X %08X\n", probe_r[8], probe_r[9], probe_r[10],
+            probe_r[11], probe_r[12], probe_r[13], probe_r[14]);
+    fprintf(stderr, "info-ui: return: code addresses on the stack:");
+    for (int i = 0; i < 48; i++)
+        if (probe_stack[i] >= 0x00100000u && probe_stack[i] < 0x00830000u)
+            fprintf(stderr, " +%02X:%08X", i * 4, probe_stack[i]);
+    fprintf(stderr, "\n");
+}
+
 /* runs runs [first, last) of a prediction */
 static void predict_runs(Context *ctx, Prediction *p, int last) {
     uint32_t sit = mem_read32(ctx, SITUATION_PTR);
@@ -576,13 +903,73 @@ static void predict_runs(Context *ctx, Prediction *p, int last) {
     uint32_t sp = ctx->r[13];
     if (p->runs == 0)
         cow_svcs = 0;
+    info_ui_words[W_PREDICTING] = 1;
+    int32_t budget_before = gcall_budget;
+    gcall_budget = info_ui_words[W_TEST_BUDGET] ? (int32_t)info_ui_words[W_TEST_BUDGET] : PREDICT_BUDGET;
+    fork_hard_failure = 0;
+    fork_bad_access = 0;
+    uint32_t bad_addr = 0, bad_pc = 0;
+    int bad_write = 0, bad_step = -1;
     while (p->runs < last && !p->failed) {
+        struct timeval r0, r1;
+        gettimeofday(&r0, 0);
         p->failed = !run_fork(ctx, sp, seeds[p->runs], &p->place, p->out[p->runs], &p->count[p->runs]);
         restore(ctx, &saved);
-        if (!p->failed)
+        if (p->failed && cow_bad_seen) {
+            bad_addr = cow_bad_addr;
+            bad_write = cow_bad_write;
+            bad_pc = cow_bad_pc;
+            bad_step = fork_fail_step;
+        }
+        if (p->failed && iu_debug(16) && fork_fail_step >= 0 && cow_bad_seen)
+            locate(ctx, &saved, sp, seeds[p->runs], &p->place);
+        if (iu_debug(128) && fork_zero_step >= 0 && !seeds[p->runs])
+            locate_return(ctx, &saved, sp, seeds[p->runs], &p->place);
+        gettimeofday(&r1, 0);
+        uint32_t run_us = (uint32_t)((r1.tv_sec - r0.tv_sec) * 1000000ll + (r1.tv_usec - r0.tv_usec));
+        if (run_us > info_ui_words[W_RUN_MAX])
+            info_ui_words[W_RUN_MAX] = run_us;
+        if (!p->failed) {
             p->runs++;
+            ever_predicted = 1;
+            if (run_us > SLOW_RUN_US && slow_sit != sit) {
+                slow_sit = sit;
+                if (iu_debug(1))
+                    fprintf(stderr, "info-ui: a run took %u us: this map's predictions are lighter\n", run_us);
+            }
+        }
     }
+    gcall_budget = budget_before;
     restore(ctx, &saved);
+    info_ui_words[W_PREDICTING] = 0;
+    if (p->failed && fork_bad_access) {
+        /* predict: one line for each prediction given up this way (at most
+           BAD_LINES a session), nothing for each access */
+        info_ui_words[W_BAD]++;
+        info_ui_words[W_BAD_ADDR] = bad_addr;
+        if (bad_sit != sit) {
+            bad_sit = sit;
+            bad_on_map = 0;
+        }
+        bad_on_map++;
+        if (bad_lines < BAD_LINES) {
+            bad_lines++;
+            fprintf(stderr, "info-ui: a prediction stopped at a %s %08X (step %d, near %08X); its lines are left out%s\n",
+                    bad_write ? "write to" : "read of unmapped", bad_addr, bad_step, bad_pc,
+                    bad_on_map >= BAD_PER_MAP ? ", and this map's predictions are off" : "");
+        }
+        if (bad_on_map >= BAD_PER_MAP) {
+            off_sit = sit;
+            info_ui_words[W_OFF] = 1;
+        }
+    }
+    if (p->failed && fork_hard_failure) {
+        hard_failures++;
+        off_sit = sit;
+        info_ui_words[W_OFF] = !ever_predicted && hard_failures >= 2 ? 2 : 1;
+        if (iu_debug(1))
+            fprintf(stderr, "info-ui: the AI fails on the copy: predictions off %s\n", info_ui_words[W_OFF] == 2 ? "for the session" : "for this map");
+    }
     struct timeval t1;
     gettimeofday(&t1, 0);
     p->micros += (uint32_t)((t1.tv_sec - t0.tv_sec) * 1000000ll + (t1.tv_usec - t0.tv_usec));
@@ -616,10 +1003,25 @@ static void predict_tick(Context *ctx, const Place *place) {
     if (sit != predicted_sit) {
         predicted_sit = sit;
         cache_clear();
+        if (info_ui_words[W_OFF] == 1 && sit != off_sit)
+            info_ui_words[W_OFF] = 0;
     }
+    /* vowperf: off for this map or the session, or lighter on this map */
+    if (info_ui_words[W_OFF]) {
+        info_ui_words[W_DECISIONS] = 0;
+        return;
+    }
+    Place none = { 0, 0, 0 };
+    int slow = sit == slow_sit;
+    if (slow)
+        place = &none;
     Prediction *p = cache_get(h, place);
-    if (!p->failed && p->runs < FORK_SEEDS)
+    if (!p->failed && p->runs < (slow ? 1 : FORK_SEEDS))
         predict_runs(ctx, p, p->runs + 1);
+    if (info_ui_words[W_OFF]) {
+        info_ui_words[W_DECISIONS] = 0;
+        return;
+    }
     if (p->failed) {
         if (shown == p || !shown)
             info_ui_words[W_DECISIONS] = 0;

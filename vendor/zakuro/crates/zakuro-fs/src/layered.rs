@@ -595,6 +595,16 @@ fn join(path: &str, name: &str) -> String {
 
 /// a host directory's entries and their names, in order of name, so a
 /// mod lays out the same way every time.
+/// modsweep: what a mod's download carries that is never a file of the
+/// game: a Windows shortcut (Fates+ 3.5 has "Terrain - Shortcut.lnk" in
+/// GameData/Terrain), Explorer's and the Mac's folder notes (.DS_Store,
+/// Thumbs.db, desktop.ini) and the Mac's zip copies (__MACOSX/, ._ files;
+/// Abyssal Bloodline 1.2.1). Such a file is left out of the mod's RomFS.
+pub fn is_junk(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.ends_with(".lnk") || lower.starts_with("._") || lower == "__macosx" || lower == ".ds_store" || lower == "thumbs.db" || lower == "desktop.ini"
+}
+
 /// os: entries() with whether each is a directory and its size, from the
 /// directory listing itself, without opening each file.
 fn entries_with_kind(host: &Path) -> Result<Vec<(PathBuf, String, bool, u64)>, FsError> {
@@ -604,6 +614,7 @@ fn entries_with_kind(host: &Path) -> Result<Vec<(PathBuf, String, bool, u64)>, F
         let path = entry.path();
         let metadata = entry.metadata()?;
         match path.file_name().and_then(|name| name.to_str()) {
+            Some(name) if is_junk(name) => {} // modsweep
             Some(name) => entries.push((path.clone(), name.to_owned(), metadata.is_dir(), metadata.len())),
             None => log::warn!("mods: {} has a name a RomFS can't hold", path.display()),
         }

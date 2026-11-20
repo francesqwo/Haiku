@@ -78,20 +78,20 @@ pub fn installed(tools: &Path) -> Option<Compiler> {
 /// 10 and later mostly have, or else wget, which some Linux systems have
 /// instead.
 #[derive(Debug, Clone, Copy, PartialEq)]
-enum Fetcher {
+pub(crate) enum Fetcher { // updater: pub(crate), Haiku's updates download the same way
     Curl,
     Wget,
 }
 
 impl Fetcher {
-    fn find() -> Option<Fetcher> {
+    pub(crate) fn find() -> Option<Fetcher> {
         let runs = |program: &str| {
             no_window(&mut Command::new(program)).arg("--version").stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|status| status.success())
         };
         [Fetcher::Curl, Fetcher::Wget].into_iter().find(|fetcher| runs(fetcher.program()))
     }
 
-    fn program(self) -> &'static str {
+    pub(crate) fn program(self) -> &'static str {
         match self {
             Fetcher::Curl => "curl",
             Fetcher::Wget => "wget",
@@ -120,6 +120,27 @@ impl Fetcher {
             }
         }
         command.arg(url);
+        command
+    }
+
+    /// updater: a command as `command` makes, sending user_agent as its
+    /// User-Agent and each of headers ("Name: value") with the request.
+    pub(crate) fn command_as(self, url: &str, path: Option<&Path>, seconds: u32, user_agent: &str, headers: &[&str]) -> Command {
+        let mut command = self.command(url, path, seconds);
+        match self {
+            Fetcher::Curl => {
+                command.arg("-A").arg(user_agent);
+                for header in headers {
+                    command.arg("-H").arg(header);
+                }
+            }
+            Fetcher::Wget => {
+                command.arg(format!("--user-agent={user_agent}"));
+                for header in headers {
+                    command.arg(format!("--header={header}"));
+                }
+            }
+        }
         command
     }
 }
@@ -236,9 +257,18 @@ fn mirrors(fetcher: Fetcher) -> Vec<String> {
 
 /// downloads url to path, following how much of size has arrived.
 fn fetch(fetcher: Fetcher, url: &str, path: &Path, size: u64, progress: &dyn Fn(f32), cancel: &AtomicBool) -> Result<(), String> {
+    fetch_as(fetcher, url, path, size, progress, cancel, None)
+}
+
+/// updater: fetch, sending user_agent instead of the program's own when
+/// one is given.
+pub(crate) fn fetch_as(fetcher: Fetcher, url: &str, path: &Path, size: u64, progress: &dyn Fn(f32), cancel: &AtomicBool, user_agent: Option<&str>) -> Result<(), String> {
     let _ = std::fs::remove_file(path);
-    let mut child = fetcher
-        .command(url, Some(path), 1800)
+    let mut command = match user_agent {
+        Some(agent) => fetcher.command_as(url, Some(path), 1800, agent, &[]),
+        None => fetcher.command(url, Some(path), 1800),
+    };
+    let mut child = command
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()

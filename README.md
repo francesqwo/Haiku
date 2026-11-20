@@ -147,7 +147,9 @@ Haiku can use the fan translations made for the Japanese release, *Fire Emblem i
 4. **Build.** Haiku Setup checks your dump against its own hashes, installs the game's files, makes Haiku's own files from them, recompiles the game's code and compiles it with the bundled compiler. It takes **about 10 to 30 minutes**, once, and runs at low priority. If it stops, start Haiku.exe again and it carries on.
 5. **Play.** From then on `Haiku.exe` goes straight to the game. Press **Esc** for the options; Haiku Setup (Rebuild, Change dump or DLC, Add a version, Remove a version, Japanese voices) is in Options > Interface.
 
-**Updating**: extract a new release over the folder and start `Haiku.exe`. It plays at once unless the release needs the game's code built again, which it then does by itself first (only what changed), with a progress screen in the game's own window and look. Saves, settings and mods are never touched. An install of 1.0, 1.1 or 1.2 is updated the same way: Haiku.exe finds the game installed, builds the game's code once, and removes the old `Haiku Setup.exe`.
+**Updating**: from 1.4 on, Haiku updates itself. Once a day it checks for a new release; when there is one, a notice on the game's Main Menu opens its notes with **Install**, **Later** and **Skip This Version**. Install downloads it, checks its SHA-256 and its signature by Haiku's release key, replaces only Haiku's own files (putting them back if anything fails) and restarts. **Options > Interface > Check for Updates** turns the check off.
+
+To update by hand (and from 1.3 or earlier, which can't update themselves): extract a new release over the folder and start `Haiku.exe`. It plays at once unless the release needs the game's code built again, which it then does by itself first (only what changed), with a progress screen in the game's own window and look. Saves, settings and mods are never touched. An install of 1.0, 1.1 or 1.2 is updated the same way: Haiku.exe finds the game installed, builds the game's code once, and removes the old `Haiku Setup.exe`.
 
 Your dump is only ever read. Everything Haiku makes stays in its folder.
 
@@ -184,7 +186,7 @@ No. The game's code is recompiled into a native program ahead of time, and the 3
 No. Without it, the DLC maps aren't available. You can add it later from Haiku Setup without rebuilding the game.
 
 **Does Haiku go online?**
-Only when you play online (online battles talk directly to the other player, with a public STUN server to find a way through routers), or when you choose to download Zig, a compiler for code mods. The compiler that comes with Haiku needs no download, and Haiku Setup never uses the network.
+Only when you play online (online battles talk directly to the other player, with a public STUN server to find a way through routers), for the update check (once a day it asks GitHub for the latest release, sending nothing about you; Options > Interface > Check for Updates turns it off), or when you choose to download Zig, a compiler for code mods. The compiler that comes with Haiku needs no download, and Haiku Setup never uses the network.
 
 **Where are my settings and saves?**
 In `userdata\haiku`, next to Haiku.exe. Haiku Setup writes a log, `setup-work\setup.log`.

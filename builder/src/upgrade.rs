@@ -78,6 +78,25 @@ pub fn tidy(root: &Path) -> Vec<String> {
             done.push("moved Haiku Setup.log to setup-work/setup-1.x.log".to_owned());
         }
     }
+    // updater: what an update made in the game left (zakuro's
+    // haiku_update.rs): the Haiku.exe it replaced, running then, and the
+    // update's folder (the download, the files it replaced). The new
+    // Haiku.exe waited for the old one to close (HAIKU_RESTART_WAIT); one
+    // still held is tried again at the next start
+    let old_exe = root.join("Haiku.exe.old");
+    if old_exe.is_file() {
+        match std::fs::remove_file(&old_exe) {
+            Ok(()) => done.push("removed Haiku.exe.old, the Haiku.exe an update replaced".to_owned()),
+            Err(e) => done.push(format!("Haiku.exe.old can't be removed yet ({e})")),
+        }
+    }
+    let update = work.join("update");
+    if update.is_dir() {
+        match std::fs::remove_dir_all(&update) {
+            Ok(()) => done.push("removed setup-work/update, an update's download and the files it replaced".to_owned()),
+            Err(e) => done.push(format!("setup-work/update can't be removed yet ({e})")),
+        }
+    }
     // versions: the game, Haiku's files, the mods and caches of a folder
     // laid out flat (1.x, or this release before versions) into
     // games\<version>\ (layout.rs)

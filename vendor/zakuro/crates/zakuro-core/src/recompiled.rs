@@ -566,6 +566,20 @@ impl Library {
         }
     }
 
+    /// vowperf: where each entry's code is on the host, with its guest
+    /// address and whether it is a patch module's, sorted by host address,
+    /// for a sampling profiler (HAIKU_SAMPLE) naming the code a sample fell in.
+    pub fn code_points(&self) -> Vec<(usize, u32, bool)> {
+        let mut points: Vec<(usize, u32, bool)> = self.code.entries().iter().map(|entry| (entry.code as usize, entry.address, false)).collect();
+        if let Some(patch) = &self.patch {
+            points.extend(patch.entries().iter().map(|&(address, code)| (code as usize, address, true)));
+        }
+        // the lowest guest address of the code at each host address
+        points.sort_unstable_by_key(|&(host, guest, _)| (host, guest));
+        points.dedup_by_key(|point| point.0);
+        points
+    }
+
     pub fn has_code(&self, address: u32) -> bool {
         self.lookup(address).is_some()
     }
