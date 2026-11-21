@@ -41,9 +41,13 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
+
+/// hitches: the lists saved so far (ModList::saves), and one save at a time.
+static SAVES: AtomicU64 = AtomicU64::new(0);
+static SAVE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// the game's title id, the name of its folder in a Luma3DS mod.
 pub const PROGRAM_ID: &str = "0004000000179800";
@@ -336,6 +340,42 @@ impl ModList {
 
     /// reads the mods folder and the list again.
     pub fn scan(&mut self) {
+        self.scan_unsaved();
+        self.save();
+    }
+
+    /// hitches: a list to read the folder into on another thread
+    /// (crate::hitches): the same folder, list file and cache, and the
+    /// notes the frontend worked out. booted is the caller's to keep.
+    pub fn for_rescan(&self) -> ModList {
+        ModList {
+            folder: self.folder.clone(),
+            config: self.config.clone(),
+            cache: self.cache.clone(),
+            code_notes: self.code_notes.clone(),
+            left_out: self.left_out.clone(),
+            ..ModList::default()
+        }
+    }
+
+    /// hitches: how many times a list was saved so far, so a scan made on
+    /// another thread knows whether the list changed while it ran.
+    pub fn saves() -> u64 {
+        SAVES.load(Ordering::Acquire)
+    }
+
+    /// hitches: saves the list as scan does, unless a list was saved since
+    /// `since` (the player changed it meanwhile: theirs stands).
+    pub fn save_unless_changed(&self, since: u64) {
+        let _one = SAVE_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if Self::saves() == since {
+            self.write();
+        }
+    }
+
+    /// reads the mods folder and the list again, without saving the list
+    /// (hitches: scan, the save apart).
+    pub fn scan_unsaved(&mut self) {
         let started = std::time::Instant::now();
         let config = self.read_config();
         let mut found = Vec::new();
@@ -448,7 +488,6 @@ impl ModList {
             self.enabled.iter().filter(|on| **on).count(),
             started.elapsed().as_millis()
         );
-        self.save();
     }
 
     fn read_config(&self) -> Config {
@@ -464,6 +503,14 @@ impl ModList {
 
     /// writes the list, in load order.
     pub fn save(&self) {
+        // hitches: one save at a time, each counted (see saves)
+        let _one = SAVE_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        SAVES.fetch_add(1, Ordering::AcqRel);
+        self.write();
+    }
+
+    /// the list written, if it differs from the file.
+    fn write(&self) {
         let Some(path) = &self.config else { return };
         // the mods here in order, each missing one back after the mod it
         // followed

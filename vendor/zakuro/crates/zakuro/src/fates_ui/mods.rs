@@ -79,7 +79,7 @@ impl ModsView {
             ask_download: None,
             // zigdl
             compiler_row: list.mods.iter().any(|info| info.code_files.as_ref().is_some_and(|files| files.changes_code()))
-                && crate::haiku_codemods::setup_compiler().is_some(),
+                && crate::haiku_codemods::setup_compiler_known().is_some_and(|found| found.is_some()), // hitches: never waits for it
         }
     }
 }
@@ -617,7 +617,15 @@ impl App {
 
     /// reads the mods folder again while the game runs (the menu opened),
     /// keeping what the game started with.
+    /// hitches: on a thread of its own; the page shows the list read last
+    /// until it is done (crate::hitches::rescan_mods, App::hitches_poll).
     pub(crate) fn fates_mods_rescan(&mut self) {
+        crate::hitches::rescan_mods(&self.fates.mods);
+    }
+
+    /// the folder read again here and now, as fates_mods_rescan did before
+    /// hitches (the headless restart test changes the list right after).
+    pub(crate) fn fates_mods_rescan_now(&mut self) {
         let booted = self.fates.mods.booted.take();
         self.fates.mods.scan();
         self.fates.mods.booted = booted;
@@ -627,7 +635,7 @@ impl App {
     /// for the headless restart test: turns on the mods with the ids
     /// listed (comma separated) and the others off, as the Mods page would.
     pub(crate) fn fates_mods_test_enable(&mut self, ids: &str) {
-        self.fates_mods_rescan();
+        self.fates_mods_rescan_now(); // hitches: here and now, the changes follow
         let wanted: Vec<&str> = ids.split(',').map(str::trim).filter(|id| !id.is_empty()).collect();
         for index in 0..self.fates.mods.mods.len() {
             let on = wanted.iter().any(|id| id.eq_ignore_ascii_case(&self.fates.mods.mods[index].id));

@@ -215,6 +215,9 @@ const TEXTS: &[(&str, &str)] = &[
     ("The most frames a second shown, whatever else is set.", "ほかの設定にかかわらず、1秒間に表示するフレーム数の上限です。"),
     ("Filtering", "フィルター"),
     ("How the picture is scaled to the window: smooth, sharp, or pixels.", "映像をウィンドウに合わせて拡大する方法です。なめらか、くっきり、ドットから選びます。"),
+    // hfr60
+    ("Smooth 30 FPS Scenes", "30FPSシーンの補間"),
+    ("At 60 FPS, a frame is drawn between each two of the battles', 3D cutscenes' and title screen's, which the game runs at 30. Above 60 FPS every scene is smoothed.", "60FPSのとき、30FPSで動く戦闘・3Dイベントシーン・タイトル画面に補間フレームを加えます。60FPSを超えるときは常に補間します。"),
     ("Anti-Aliasing", "アンチエイリアス"),
     ("Full Draw Distance", "遠景も描画"),
     ("Grass and scenery are drawn however far away they are, at full detail, so nothing pops in as the camera nears it. Off, the 3DS's own distances.", "草や景色を遠くまで細かく描画し、カメラが近づいても急に現れないようにします。OFFでは3DSと同じ距離です。"),

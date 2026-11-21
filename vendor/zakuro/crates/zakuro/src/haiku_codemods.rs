@@ -613,9 +613,9 @@ pub fn compiler() -> Option<Compiler> {
 /// MinGW tools open files through the ANSI code page (Haiku Setup works
 /// around that with junctions; this doesn't). Looked for once.
 pub fn setup_compiler() -> Option<Compiler> {
-    static FOUND: std::sync::OnceLock<Option<Compiler>> = std::sync::OnceLock::new();
-    FOUND
+    SETUP_COMPILER
         .get_or_init(|| {
+            let started = std::time::Instant::now();
             let kit = crate::haiku_mods::home().join("setup").join("w64devkit"); // versions: beside Haiku.exe, not in a version's folder
             let gcc = kit.join("bin").join("gcc.exe");
             let ascii = |path: &Path| path.to_str().is_some_and(str::is_ascii);
@@ -627,9 +627,42 @@ pub fn setup_compiler() -> Option<Compiler> {
             // -pipe: no temporary files, whose folder (the user's) may not
             // be an ASCII path either
             let compiler = Compiler::new(gcc, &["-pipe"]);
-            compiler.runs().then_some(compiler)
+            let runs = compiler.runs();
+            log::info!("zigdl: the compiler that came with Haiku {} ({} ms to find out)", if runs { "runs" } else { "doesn't run" }, started.elapsed().as_millis()); // hitches
+            runs.then_some(compiler)
         })
         .clone()
+}
+
+/// hitches: setup_compiler, looked for once.
+static SETUP_COMPILER: std::sync::OnceLock<Option<Compiler>> = std::sync::OnceLock::new();
+static SETUP_COMPILER_LOOKING: std::sync::Once = std::sync::Once::new();
+static SETUP_COMPILER_FOUND: AtomicBool = AtomicBool::new(false);
+
+/// hitches: setup_compiler without waiting for it, for the Mods page: none
+/// until it is known. The first call looks for it on a thread of its own
+/// (it runs gcc, which a virus scanner may look at for seconds the first
+/// time); take_setup_compiler_found says when it is known.
+pub fn setup_compiler_known() -> Option<Option<Compiler>> {
+    if let Some(found) = SETUP_COMPILER.get() {
+        return Some(found.clone());
+    }
+    SETUP_COMPILER_LOOKING.call_once(|| {
+        let spawned = std::thread::Builder::new().name("codemods: the compiler that came with Haiku".to_owned()).spawn(|| {
+            setup_compiler();
+            SETUP_COMPILER_FOUND.store(true, Ordering::Release);
+        });
+        if spawned.is_err() {
+            setup_compiler();
+            SETUP_COMPILER_FOUND.store(true, Ordering::Release);
+        }
+    });
+    SETUP_COMPILER.get().cloned()
+}
+
+/// hitches: whether setup_compiler became known since the last call.
+pub fn take_setup_compiler_found() -> bool {
+    SETUP_COMPILER_FOUND.load(Ordering::Relaxed) && SETUP_COMPILER_FOUND.swap(false, Ordering::AcqRel)
 }
 
 /// zigdl: whether compiler is the one that came with Haiku.

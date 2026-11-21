@@ -141,6 +141,8 @@ pub struct VulkanPresenter {
     stereo: Stereo,
     /// set when the swapchain no longer matches the window.
     stale: bool,
+    /// hitches: suboptimal presents, and the swapchain made again, logged
+    watch: super::vulkan_hitches::SwapchainWatch,
     /// hfr: waits for the display (FIFO) or not (mailbox, else immediate),
     /// none for the old choice, mailbox where there is one.
     vsync: Option<bool>,
@@ -495,6 +497,7 @@ impl VulkanPresenter {
             integer: false,
             stereo: Stereo::default(),
             stale: false,
+            watch: Default::default(), // hitches
             vsync: None,
             composition: None,
             translucent_layout,
@@ -1117,7 +1120,17 @@ impl Presenter for VulkanPresenter {
         if self.pacer.as_ref().is_some_and(|pacer| pacer.take_stale()) {
             self.stale = true;
         }
+        // hitches: a suboptimal present makes the swapchain again at once
+        // only when the window's size changed (vulkan_hitches.rs)
+        if self.pacer.as_ref().is_some_and(|pacer| pacer.take_suboptimal()) {
+            self.watch.suboptimal = true;
+        }
+        if std::mem::take(&mut self.watch.suboptimal) && !self.stale {
+            let fits = super::vulkan_hitches::surface_fits(&self.surface_instance, self.physical_device, self.surface, self.window, self.extent);
+            self.stale = self.watch.remake_for_suboptimal(fits);
+        }
         if self.stale {
+            let remaking = std::time::Instant::now(); // hitches
             if let Some(pacer) = &self.pacer {
                 pacer.flush();
             }
@@ -1129,6 +1142,7 @@ impl Presenter for VulkanPresenter {
             self.defer(overlay);
             crate::wait_idle(&self.device).map_err(vk_fail("waiting for idle"))?; // smooth: keeps off the present thread
             self.build_swapchain()?;
+            self.watch.remade(remaking, self.extent); // hitches
             if self.extent.width == 0 || self.extent.height == 0 {
                 // still minimized, keep waiting for a size.
                 return Ok(());
@@ -1347,8 +1361,9 @@ impl Presenter for VulkanPresenter {
 
         match result {
             Ok(false) if !suboptimal => Ok(()),
+            // hitches: suboptimal: looked at next frame (vulkan_hitches.rs)
             Ok(_) => {
-                self.stale = true;
+                self.watch.suboptimal = true;
                 Ok(())
             }
             Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {

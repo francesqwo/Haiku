@@ -6,7 +6,7 @@ use winit::event_loop::ActiveEventLoop;
 use zakuro_core::services::hid::{InputState, PadState};
 use zakuro_gpu::Overlay;
 
-use super::options::{Effect, Env};
+use super::options::Effect;
 use super::View;
 use crate::App;
 
@@ -26,14 +26,20 @@ impl App {
         if !self.fates.update_started && self.game.is_some() {
             self.fates.update_started = true;
             crate::haiku_update::start(self.settings.pc.check_updates, false);
+            // hitches: the displays and sound devices read ahead, so the
+            // options have their lists from the first time they open
+            self.fates_refresh_env();
         }
         self.fates_code_mods_poll(); // codemods: the compile, and the restart after it
         self.fates_mods_poll(); // hdpacks: downloads unpacked meanwhile
         if self.fates.refresh_env {
             self.fates.refresh_env = false;
+            // hitches: both on threads of their own, the menu opening at
+            // once with the lists read last time
             self.fates_refresh_env();
             self.fates_mods_rescan(); // mods: mods added while the game runs
         }
+        self.hitches_poll(); // hitches: what those threads read, put in
         // cheats: what a cheat did, as a notice; the menu's view of the army
         if let Some(text) = crate::cheats::take_notice() {
             self.menus.toast = Some((text, std::time::Instant::now()));
@@ -201,31 +207,21 @@ impl App {
 
     /// the monitors, the chosen one's display modes, and the sound devices,
     /// for the lists the options offer.
-    fn fates_refresh_env(&mut self) {
-        let mut env = Env::default();
-        if let Some(window) = &self.window {
-            let monitors = monitors(window);
-            env.monitors = monitors
-                .iter()
-                .enumerate()
-                .map(|(index, monitor)| {
-                    let size = monitor.size();
-                    format!("Display {} ({}\u{d7}{})", index + 1, size.width, size.height)
-                })
-                .collect();
-            let chosen = monitors.get(self.settings.pc.monitor as usize).cloned().or_else(|| window.current_monitor());
-            if let Some(monitor) = chosen {
-                let mut modes: Vec<(u32, u32, u32)> =
-                    monitor.video_modes().map(|mode| (mode.size().width, mode.size().height, (mode.refresh_rate_millihertz() + 500) / 1000)).collect();
-                modes.sort();
-                modes.dedup();
-                env.modes = modes;
+    /// hitches: read on a thread of their own (every display mode and the
+    /// sound devices took 75 ms here, on the game's thread, at each opening
+    /// of the menu); App::hitches_poll puts them in self.fates.env.
+    pub(crate) fn fates_refresh_env(&mut self) {
+        let started = std::time::Instant::now();
+        let (monitors, chosen) = match &self.window {
+            Some(window) => {
+                let monitors = monitors(window);
+                let chosen = monitors.get(self.settings.pc.monitor as usize).cloned().or_else(|| window.current_monitor());
+                (monitors, chosen)
             }
-        }
-        env.audio_devices = crate::audio::output_devices();
-        env.mods = std::mem::take(&mut self.fates.env.mods); // mods
-        log::info!("ui: monitors {:?}, {} display modes, sound devices {:?}", env.monitors, env.modes.len(), env.audio_devices);
-        self.fates.env = env;
+            None => (Vec::new(), None),
+        };
+        crate::hitches::refresh_env(monitors, chosen);
+        crate::hitches::took("finding the displays", started);
     }
 
     /// hfr: the window mode, size and monitor from settings.pc. The hfr

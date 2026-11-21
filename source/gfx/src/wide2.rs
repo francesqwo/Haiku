@@ -800,26 +800,11 @@ fn blurred(d: &crate::render::Decoded) -> crate::render::Decoded {
     // radii in texels: a 256-tall texture spans about the screen's height
     let rv = (h / 24).max(1);
     let rh = (w / 256).max(1);
-    let pass = |src: &[u8], dst: &mut [u8], along_t: bool, r: usize| {
-        for y in 0..h {
-            for x in 0..w {
-                let mut sum = [0u32; 4];
-                let mut n = 0u32;
-                let (a, b) = if along_t { (y.saturating_sub(r), (y + r).min(h - 1)) } else { (x.saturating_sub(r), (x + r).min(w - 1)) };
-                for i in a..=b {
-                    let o = if along_t { (i * w + x) * 4 } else { (y * w + i) * 4 };
-                    for c in 0..4 {
-                        sum[c] += src[o + c] as u32;
-                    }
-                    n += 1;
-                }
-                let o = (y * w + x) * 4;
-                for c in 0..4 {
-                    dst[o + c] = (sum[c] / n) as u8;
-                }
-            }
-        }
-    };
+    // moflexhd: running sums, each texel's the same sum over the same
+    // window as adding the window up for it (a movie's picture, softened
+    // anew 30 or 60 times a second, took 8 ms at 512x256 and 200 ms at
+    // 1024x1024 that way)
+    let pass = |src: &[u8], dst: &mut [u8], along_t: bool, r: usize| box_pass(src, dst, w, h, along_t, r);
     let mut tmp = rgba[..w * h * 4].to_vec();
     // two box passes down, one across: close to a gaussian
     pass(&rgba[..w * h * 4].to_vec(), &mut tmp, true, rv);
@@ -1159,6 +1144,98 @@ pub fn soft_key(
     Some(soft)
 }
 
+/// moflexhd: one box pass of the softened copies: each texel the mean
+/// (rounded down) of the texels within r of it along t (down the texture)
+/// or along s, the window cut at the texture's ends, channel by channel.
+/// A running sum per column (along t) or per row (along s) gives each
+/// texel's window sum with an add and a take, not 2r + 1 adds. A large
+/// texture (an HD movie's picture) is cut into bands of rows that threads
+/// of their own soften side by side, each band's sums started from its own
+/// first window: the same texels either way.
+pub(crate) fn box_pass(src: &[u8], dst: &mut [u8], w: usize, h: usize, along_t: bool, r: usize) {
+    if w == 0 || h == 0 {
+        return;
+    }
+    let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
+    let parts = if w * h >= 256 * 1024 { (cores / 2).clamp(1, 4).min(h) } else { 1 };
+    if parts <= 1 {
+        box_rows(src, &mut dst[..w * h * 4], w, h, along_t, r, 0);
+        return;
+    }
+    let per = h.div_ceil(parts);
+    std::thread::scope(|scope| {
+        let mut rest = &mut dst[..w * h * 4];
+        let mut y0 = 0;
+        while y0 < h {
+            let y1 = (y0 + per).min(h);
+            let (band, after) = rest.split_at_mut((y1 - y0) * w * 4);
+            rest = after;
+            let first = y0;
+            scope.spawn(move || box_rows(src, band, w, h, along_t, r, first));
+            y0 = y1;
+        }
+    });
+}
+
+/// box_pass for the rows from y0 on that `out` holds.
+fn box_rows(src: &[u8], out: &mut [u8], w: usize, h: usize, along_t: bool, r: usize, y0: usize) {
+    let rows = out.len() / (w * 4);
+    if along_t {
+        // the window of row y0: rows y0 - r to y0 + r, cut at the ends
+        let mut sums = vec![0u32; w * 4];
+        let (a, b) = (y0.saturating_sub(r), (y0 + r).min(h - 1));
+        for row in src[a * w * 4..(b + 1) * w * 4].chunks_exact(w * 4) {
+            for (sum, &v) in sums.iter_mut().zip(row) {
+                *sum += v as u32;
+            }
+        }
+        for y in y0..y0 + rows {
+            let n = ((y + r).min(h - 1) - y.saturating_sub(r) + 1) as u32;
+            for (o, &sum) in out[(y - y0) * w * 4..(y - y0 + 1) * w * 4].iter_mut().zip(&sums) {
+                *o = (sum / n) as u8;
+            }
+            // the window moves down a row: the next row in, the first out
+            if y + r + 1 < h {
+                for (sum, &v) in sums.iter_mut().zip(&src[(y + r + 1) * w * 4..(y + r + 2) * w * 4]) {
+                    *sum += v as u32;
+                }
+            }
+            if y >= r {
+                for (sum, &v) in sums.iter_mut().zip(&src[(y - r) * w * 4..(y - r + 1) * w * 4]) {
+                    *sum -= v as u32;
+                }
+            }
+        }
+    } else {
+        for y in y0..y0 + rows {
+            let row = &src[y * w * 4..(y + 1) * w * 4];
+            let o = &mut out[(y - y0) * w * 4..(y - y0 + 1) * w * 4];
+            let mut sum = [0u32; 4];
+            for texel in row[..(r.min(w - 1) + 1) * 4].chunks_exact(4) {
+                for c in 0..4 {
+                    sum[c] += texel[c] as u32;
+                }
+            }
+            for x in 0..w {
+                let n = ((x + r).min(w - 1) - x.saturating_sub(r) + 1) as u32;
+                for c in 0..4 {
+                    o[x * 4 + c] = (sum[c] / n) as u8;
+                }
+                if x + r + 1 < w {
+                    for c in 0..4 {
+                        sum[c] += row[(x + r + 1) * 4 + c] as u32;
+                    }
+                }
+                if x >= r {
+                    for c in 0..4 {
+                        sum[c] -= row[(x - r) * 4 + c] as u32;
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// a texture's largest size blurred along s (across the screen): a band's
 /// rows each carry on in their own average colour.
 fn blurred_across(d: &crate::render::Decoded) -> crate::render::Decoded {
@@ -1175,23 +1252,7 @@ fn blurred_across(d: &crate::render::Decoded) -> crate::render::Decoded {
     let r = (w / div).max(1);
     for _ in 0..2 {
         let src = rgba[..w * h * 4].to_vec();
-        for y in 0..h {
-            for x in 0..w {
-                let (a, b) = (x.saturating_sub(r), (x + r).min(w - 1));
-                let mut sum = [0u32; 4];
-                for i in a..=b {
-                    let o = (y * w + i) * 4;
-                    for c in 0..4 {
-                        sum[c] += src[o + c] as u32;
-                    }
-                }
-                let n = (b - a + 1) as u32;
-                let o = (y * w + x) * 4;
-                for c in 0..4 {
-                    rgba[o + c] = (sum[c] / n) as u8;
-                }
-            }
-        }
+        box_pass(&src, &mut rgba[..w * h * 4], w, h, false, r); // moflexhd: running sums
     }
     crate::render::Decoded { width: d.width, height: d.height, rgba, levels: d.levels }
 }

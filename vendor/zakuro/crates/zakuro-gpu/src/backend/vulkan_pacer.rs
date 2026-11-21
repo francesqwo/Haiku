@@ -85,6 +85,8 @@ struct Shared {
     changed: Condvar,
     /// a present came back out of date or suboptimal.
     stale: AtomicBool,
+    /// hitches: a present came back suboptimal (the presenter decides).
+    suboptimal: AtomicBool,
 }
 
 /// the refresh grid: a vertical blank and the period.
@@ -188,6 +190,7 @@ impl PresentThread {
             }),
             changed: Condvar::new(),
             stale: AtomicBool::new(false),
+            suboptimal: AtomicBool::new(false), // hitches
         });
         let swapchain_lock = Arc::new(Mutex::new(()));
         // SAFETY: plain semaphores of the device, destroyed in drop
@@ -342,6 +345,11 @@ impl PresentThread {
     pub(super) fn take_stale(&self) -> bool {
         self.shared.stale.swap(false, Ordering::AcqRel)
     }
+
+    /// hitches: whether a present came back suboptimal, once.
+    pub(super) fn take_suboptimal(&self) -> bool {
+        self.shared.suboptimal.swap(false, Ordering::AcqRel)
+    }
 }
 
 impl Drop for PresentThread {
@@ -482,7 +490,7 @@ fn presenter(
                 }
             }
             Ok(true) => {
-                shared.stale.store(true, Ordering::Release);
+                shared.suboptimal.store(true, Ordering::Release); // hitches: was stale
                 if let Some(timing) = &timing {
                     timing(next.swapchain, next.id);
                 }

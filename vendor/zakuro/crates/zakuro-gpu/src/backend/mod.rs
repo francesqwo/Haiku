@@ -16,6 +16,8 @@ mod vulkan_timing;
 // smooth: presents on a thread of their own, at slots on the refresh grid
 #[cfg(feature = "vulkan")]
 mod vulkan_pacer;
+// hitches: suboptimal presents and the swapchain made again, logged
+mod vulkan_hitches;
 // rtpace: the present thread off the game's core
 #[cfg(feature = "vulkan")]
 pub use vulkan_pacer::keep_off as keep_present_thread_off;

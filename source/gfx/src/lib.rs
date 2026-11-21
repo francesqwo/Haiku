@@ -25,6 +25,7 @@ pub mod eft;
 pub mod emulated;
 pub mod h3d;
 pub mod lines; // gfx-lines: prim line states
+mod moflexhd; // moflexhd: a movie's pictures, few kept
 // gfx-hfr: pictures in between the native frames
 pub mod hfr;
 pub mod hd; // hdpacks: texture-pack pictures, read in the background
@@ -1848,7 +1849,9 @@ impl Gfx {
         if let Some((base, along_t)) = wide2::softened(tex) {
             let key = self.texture(system, base)?;
             let key = wide2::soft_key(&mut self.decoded, tex, base, key, along_t);
-            return self.note_decoded(tex, key); // gfx-2d
+            let key = self.note_decoded(tex, key); // gfx-2d
+            self.moflexhd_keep_few(tex); // moflexhd: a movie picture's softened copies too
+            return key;
         }
         let flip = self.flip_t;
         let key = self.texture_oriented(system, tex, flip);
@@ -1861,6 +1864,31 @@ impl Gfx {
             self.decoded_used.insert((tex, k), self.stats.frames);
         }
         key
+    }
+
+    /// moflexhd: a movie's picture (a texture the YUV-to-RGB converter
+    /// writes, a new picture 30 or 60 times a second) keeps its last few
+    /// pictures decoded, not every one it ever had: each used to stay until
+    /// 4096 textures were held (2 GB for the game's own movies, 16 GB for a
+    /// 1024x1024 HD one). The current picture, and any drawn in the last
+    /// frames, always stay.
+    fn moflexhd_keep_few(&mut self, tex: TexRef) {
+        if !moflexhd::few_kept(tex) {
+            return;
+        }
+        let now = self.stats.frames;
+        let mut versions: Vec<((TexRef, u64), u64)> =
+            self.decoded.keys().filter(|k| k.0 == tex).map(|k| (*k, self.decoded_used.get(k).copied().unwrap_or(now))).collect();
+        if versions.len() <= moflexhd::KEPT_VERSIONS {
+            return;
+        }
+        versions.sort_by_key(|&(_, used)| std::cmp::Reverse(used));
+        for (k, used) in versions.into_iter().skip(moflexhd::KEPT_VERSIONS) {
+            if used + 3 <= now {
+                self.decoded.remove(&k);
+                self.decoded_used.remove(&k);
+            }
+        }
     }
 
     /// gfx-2d: the decoded textures, past their limit, cut down to those
@@ -1921,6 +1949,14 @@ impl Gfx {
             return None;
         }
         let size = tex.width * tex.height * format.bits_per_pixel() / 8;
+        // moflexhd: FATES_MOVIE_STATS times a large texture's steps
+        let mut timed = (tex.width * tex.height >= 256 * 1024 && zakuro_core::moflexhd::on()).then(std::time::Instant::now);
+        let mut step = |kind: usize| {
+            if let Some(started) = timed {
+                zakuro_core::moflexhd::note(kind, started.elapsed().as_nanos() as u64, 0);
+                timed = Some(std::time::Instant::now());
+            }
+        };
         // gfx-bottom: the emulated GPU keeps its buffers by the guest's
         // virtual address (as DMA syncs them), so a texture it drew into
         // (UnitIconObject::CaptureTexture's unit icons) only comes down
@@ -1929,16 +1965,20 @@ impl Gfx {
         if writes > 0 {
             self.emu.dependency(self.stats.frames, tex.addr, size, &format!("texture {}x{} format {} flip {flip}", tex.width, tex.height, tex.format), writes);
         }
+        step(zakuro_core::moflexhd::kind::TEX_SYNC);
         let mut raw = vec![0u8; size as usize];
         system.memory.read_bytes(tex.addr, &mut raw);
         let content = fnv(&raw);
         let hash = content ^ if flip { 0 } else { 0x00F1_1F00_F11F_0000 };
         // mods: recorded for making texture packs, when asked to
         zakuro_gpu::pack::record_native(&raw, format, tex.width, tex.height);
+        step(zakuro_core::moflexhd::kind::TEX_READ);
         // a texture pack's picture in its place (the same pack the emulated
         // GPU draws with, e.g. the controller glyph swaps), once it is read
         // hdpacks: read in the background and kept within a budget (hd.rs)
-        match self.hd.get(&raw, content, format, tex.width, tex.height, flip) {
+        let found = self.hd.get(&raw, content, format, tex.width, tex.height, flip);
+        step(zakuro_core::moflexhd::kind::TEX_PACK);
+        match found {
             hd::Got::Ready(picture) => {
                 let key = (tex, hash ^ 0x9E37_79B9_7F4A_7C15);
                 self.decoded.entry(key).or_insert(picture);
@@ -1951,13 +1991,12 @@ impl Gfx {
         if !self.decoded.contains_key(&key) {
             let (w, h) = (tex.width, tex.height);
             let mut rgba = vec![0u8; (w * h * 4) as usize];
-            for y in 0..h {
-                for x in 0..w {
-                    let texel = zakuro_gpu::texture::sample_texel(&raw, format, w, x, y);
-                    let row = if flip { h - 1 - y } else { y };
-                    let o = ((row * w + x) * 4) as usize;
-                    rgba[o..o + 4].copy_from_slice(&texel);
-                }
+            // moflexhd: a tile at a time (a movie's picture changes every
+            // frame; an HD one is 1024x1024), texel for texel the same
+            let timed = (w * h >= 256 * 1024 && zakuro_core::moflexhd::on()).then(std::time::Instant::now);
+            zakuro_gpu::texture::decode_texture(&raw, format, w, h, flip, &mut rgba);
+            if let Some(started) = timed {
+                zakuro_core::moflexhd::note(zakuro_core::moflexhd::kind::TEXELS, started.elapsed().as_nanos() as u64, (w * h) as u64);
             }
             if self.decoded.len() > 4096 {
                 self.trim_decoded(); // gfx-2d
@@ -1977,6 +2016,7 @@ impl Gfx {
                 let _ = write_png(&path, &shown, w, h);
             }
             self.decoded.insert(key, Arc::new(Decoded { width: w, height: h, rgba, levels: 1 }));
+            self.moflexhd_keep_few(tex); // moflexhd
         }
         Some(hash)
     }
@@ -2868,5 +2908,128 @@ fn gfx2d3_trace_shaded(frame: u64, disp: usize, draws: &[Draw]) {
         let Some(sh) = d.shaded.as_deref() else { continue };
         let t: Vec<String> = (0..3).filter_map(|u| sh.textures[u].map(|(t, s)| format!("u{u} {:08X} {}x{} fmt {} wrap {}/{} lin {}/{} mip {:?}", t.addr, t.width, t.height, t.format, s.wrap, s.wrap_t, s.linear_mag, s.linear_min, sh.mips[u]))).collect();
         eprintln!("gfx2d3 f{frame} d{disp} {i}: shaded n{} v{} vp {:?} {:?} {}", sh.indices.len(), sh.vertices.len(), sh.viewport, sh.key, t.join(" | "));
+    }
+}
+
+/// moflexhd: the movie picture's texels, read a tile at a time
+/// (`zakuro_gpu::texture::decode_texture`), are texel for texel what
+/// reading each texel with `sample_texel` gave, every format, both ways up.
+#[cfg(test)]
+mod moflexhd_tests {
+    use zakuro_gpu::texture::{decode_texture, sample_texel, TextureFormat};
+
+    #[test]
+    fn whole_textures_decode_as_their_texels_do() {
+        let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+        let data: Vec<u8> = (0..64 * 32 * 4)
+            .map(|_| {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                seed as u8
+            })
+            .collect();
+        for raw in 0..16 {
+            let format = TextureFormat::from_raw(raw);
+            for (w, h) in [(64u32, 32u32), (8, 8), (16, 40), (12, 8)] {
+                for flip in [false, true] {
+                    let mut fast = vec![0u8; (w * h * 4) as usize];
+                    decode_texture(&data, format, w, h, flip, &mut fast);
+                    for y in 0..h {
+                        for x in 0..w {
+                            let row = if flip { h - 1 - y } else { y };
+                            let o = ((row * w + x) * 4) as usize;
+                            assert_eq!(fast[o..o + 4], sample_texel(&data, format, w, x, y), "{format:?} {w}x{h} flip {flip} at {x},{y}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// how long a 1024x1024 movie texture takes either way (--nocapture)
+    #[test]
+    fn a_movie_texture_decodes_faster() {
+        let data: Vec<u8> = (0..1024 * 1024 * 3).map(|i| (i * 7 % 251) as u8).collect();
+        let mut out = vec![0u8; 1024 * 1024 * 4];
+        let started = std::time::Instant::now();
+        for y in 0..1024 {
+            for x in 0..1024 {
+                let o = ((y * 1024 + x) * 4) as usize;
+                out[o..o + 4].copy_from_slice(&sample_texel(&data, TextureFormat::Rgb8, 1024, x, y));
+            }
+        }
+        let each = started.elapsed();
+        let mut fast = vec![0u8; 1024 * 1024 * 4];
+        let started = std::time::Instant::now();
+        decode_texture(&data, TextureFormat::Rgb8, 1024, 1024, false, &mut fast);
+        let whole = started.elapsed();
+        assert!(fast == out);
+        eprintln!("moflexhd: a 1024x1024 RGB8 texture: texel by texel {each:.2?}, a tile at a time {whole:.2?}");
+    }
+}
+
+/// moflexhd: the softened copies' box passes, with running sums, give
+/// every texel what adding its window up gave (wide2.rs before).
+#[cfg(test)]
+mod moflexhd_blur_tests {
+    fn reference(src: &[u8], dst: &mut [u8], w: usize, h: usize, along_t: bool, r: usize) {
+        for y in 0..h {
+            for x in 0..w {
+                let mut sum = [0u32; 4];
+                let mut n = 0u32;
+                let (a, b) = if along_t { (y.saturating_sub(r), (y + r).min(h - 1)) } else { (x.saturating_sub(r), (x + r).min(w - 1)) };
+                for i in a..=b {
+                    let o = if along_t { (i * w + x) * 4 } else { (y * w + i) * 4 };
+                    for c in 0..4 {
+                        sum[c] += src[o + c] as u32;
+                    }
+                    n += 1;
+                }
+                let o = (y * w + x) * 4;
+                for c in 0..4 {
+                    dst[o + c] = (sum[c] / n) as u8;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn running_sums_blur_as_adding_up_did() {
+        let mut seed = 0x1234_5678_9ABC_DEF1u64;
+        for (w, h) in [(1usize, 1usize), (8, 8), (64, 32), (33, 17), (512, 256), (3, 200), (1024, 512), (520, 1009)] {
+            let src: Vec<u8> = (0..w * h * 4)
+                .map(|_| {
+                    seed ^= seed << 13;
+                    seed ^= seed >> 7;
+                    seed ^= seed << 17;
+                    seed as u8
+                })
+                .collect();
+            for along_t in [true, false] {
+                for r in [1usize, 2, 4, 10, 42, 300] {
+                    let (mut a, mut b) = (vec![0u8; w * h * 4], vec![0u8; w * h * 4]);
+                    reference(&src, &mut a, w, h, along_t, r);
+                    crate::wide2::box_pass(&src, &mut b, w, h, along_t, r);
+                    assert!(a == b, "{w}x{h} along_t {along_t} r {r}");
+                }
+            }
+        }
+    }
+
+    /// how long softening a 1024x1024 movie picture takes (--nocapture)
+    #[test]
+    fn a_large_picture_softens_quickly() {
+        let (w, h) = (1024usize, 1024usize);
+        let src: Vec<u8> = (0..w * h * 4).map(|i| (i * 13 % 253) as u8).collect();
+        let (mut a, mut b) = (vec![0u8; w * h * 4], vec![0u8; w * h * 4]);
+        let started = std::time::Instant::now();
+        reference(&src, &mut a, w, h, true, h / 24);
+        let old = started.elapsed();
+        let started = std::time::Instant::now();
+        crate::wide2::box_pass(&src, &mut b, w, h, true, h / 24);
+        let new = started.elapsed();
+        assert!(a == b);
+        eprintln!("moflexhd: one pass down a 1024x1024 picture, radius {}: adding up {old:.2?}, running sums {new:.2?}", h / 24);
     }
 }

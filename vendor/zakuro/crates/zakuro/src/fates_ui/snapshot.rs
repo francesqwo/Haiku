@@ -149,8 +149,11 @@ const SCENES: &[Scene] = &[
     Scene { name: "options-display", setup: |f, _, _| options_at(f, 0, Page::Main, 1) },
     // wide-ui: the Ultrawide Sides row (after Aspect Ratio; one row later with the Renderer row)
     Scene { name: "options-sides", setup: |f, _, _| options_at(f, 0, Page::Main, if cfg!(feature = "emulation") { 6 } else { 5 }) },
-    // transblur: the Battle Transition Blur row (after Anti-Aliasing)
-    Scene { name: "options-transition-blur", setup: |f, _, _| options_at(f, 0, Page::Main, if cfg!(feature = "emulation") { 12 } else { 11 }) },
+    // transblur: the Battle Transition Blur row (after Full Draw Distance;
+    // hfr60: one row later with Smooth 30 FPS Scenes)
+    Scene { name: "options-transition-blur", setup: |f, _, _| options_at(f, 0, Page::Main, if cfg!(feature = "emulation") { 14 } else { 13 }) },
+    // hfr60: the Smooth 30 FPS Scenes row (after FPS Cap)
+    Scene { name: "options-smooth30", setup: |f, _, _| options_at(f, 0, Page::Main, if cfg!(feature = "emulation") { 10 } else { 9 }) },
     // gfx-hfr: the Renderer row, set to the emulated GPU (native-final:
     // development builds only; the pure build has no such row)
     #[cfg(feature = "emulation")]

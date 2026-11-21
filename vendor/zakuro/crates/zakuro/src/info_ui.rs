@@ -45,6 +45,16 @@ pub mod word {
     pub const NESTED: usize = 420;
     pub const BAD: usize = 421;
     pub const BAD_ADDR: usize = 422;
+    // lines4: the scheduling's counts (overrides/info_ui.c, W_REST_WAITS..)
+    pub const REST_WAITS: usize = 423;
+    pub const VOTE_WAITS: usize = 424;
+    pub const EST: usize = 425;
+    pub const PICK_TICKS: usize = 426;
+    pub const PICK_BEHIND: usize = 427;
+    pub const OFF_MAPS: usize = 428;
+    pub const TICK_MAX: usize = 429;
+    pub const MAPS: usize = 430;
+    pub const BEGIN_MAX: usize = 431;
     pub const COUNT: usize = 512;
 }
 
@@ -112,12 +122,16 @@ pub fn apply(pc: &PcSettings) {
     // enemy before the next one thinks. predict: bit 8 also predicts as each
     // enemy phase begins, 16 finds where a run's first bad access is, 64
     // logs each step's instructions, 128 finds where a step that decided
-    // nothing came back from (overrides/info_ui.c)
+    // nothing came back from (overrides/info_ui.c). lines4: 32 times making
+    // the copy (made twice)
     write(word::DEBUG, env_u32("FATES_INFO_DEBUG").unwrap_or(0));
     write(word::SIMULATE, env_u32("FATES_INFO_SIMULATE").unwrap_or(1));
     // vowperf: FATES_INFO_BUDGET=<instructions> gives each AI call of a
     // prediction that budget instead of info_ui.c's (tests)
     write(500, env_u32("FATES_INFO_BUDGET").unwrap_or(0));
+    // lines4: FATES_INFO_RUN_DELAY=<us> makes each prediction run that much
+    // longer (tests: a slower PC)
+    write(501, env_u32("FATES_INFO_RUN_DELAY").unwrap_or(0));
 }
 
 /// the counts for the end of a headless run.
@@ -125,7 +139,7 @@ pub fn summary() -> Option<String> {
     HOOKS.get()?;
     let r = |i| read(i).unwrap_or(0);
     Some(format!(
-        "info-ui: lines mode {}, predictions {} ({} abandoned, last {} us, {} pages copied, {} svcs), decisions {}, lines drawn {}; growth {} (unit status draws {}); vowperf: longest run {} us, most instructions in an AI call {}, off {}; predict: nested returns {}, given up at a bad access {} (last {:08X})",
+        "info-ui: lines mode {}, predictions {} ({} abandoned, last {} us, {} pages copied, {} svcs), decisions {}, lines drawn {}; growth {} (unit status draws {}); vowperf: longest run {} us, most instructions in an AI call {}, off {}; predict: nested returns {}, given up at a bad access {} (last {:08X}); lines4: maps {}, off for a map {}, run lately {} us, longest tick {} us, first runs waiting for the cursor {}, vote runs put off {}, picking ticks {} ({} not yet showing the tile's lines), copy made in {} us",
         r(word::MODE),
         r(word::RUNS),
         r(word::ABORTS),
@@ -141,7 +155,16 @@ pub fn summary() -> Option<String> {
         r(word::OFF),
         r(word::NESTED),
         r(word::BAD),
-        r(word::BAD_ADDR)
+        r(word::BAD_ADDR),
+        r(word::MAPS),
+        r(word::OFF_MAPS),
+        r(word::EST),
+        r(word::TICK_MAX),
+        r(word::REST_WAITS),
+        r(word::VOTE_WAITS),
+        r(word::PICK_TICKS),
+        r(word::PICK_BEHIND),
+        r(word::BEGIN_MAX)
     ))
 }
 

@@ -1466,7 +1466,30 @@ impl Renderer {
         let view = image.view;
         // hdpacks: sizes kept for the samplers and the GPU budget
         self.textures.insert(key, Texture { image, used: self.frame, width: d.width, levels: d.levels.max(1), bytes: d.rgba.len() as u64 });
+        self.moflexhd_keep_few(key); // moflexhd
         Ok(view)
+    }
+
+    /// moflexhd: a movie's picture (a texture the YUV-to-RGB converter
+    /// writes) keeps its last few pictures on the GPU; the older ones go
+    /// (destroyed once no submission uses them), not 600 frames later, an
+    /// image of up to 4 MB each.
+    fn moflexhd_keep_few(&mut self, key: (TexRef, u64)) {
+        let tex = key.0;
+        if !crate::moflexhd::few_kept(tex) {
+            return;
+        }
+        let mut versions: Vec<((TexRef, u64), u64)> = self.textures.iter().filter(|(k, _)| k.0 == tex).map(|(k, t)| (*k, t.used)).collect();
+        if versions.len() <= crate::moflexhd::KEPT_VERSIONS {
+            return;
+        }
+        versions.sort_by_key(|&(_, used)| std::cmp::Reverse(used));
+        let frame = self.frame;
+        for (k, used) in versions.into_iter().skip(crate::moflexhd::KEPT_VERSIONS) {
+            if k != key && used + 4 <= frame {
+                self.forget_texture(k);
+            }
+        }
     }
 
     /// gfx-shadow: drops one texture now (a shadow map no frame draws with

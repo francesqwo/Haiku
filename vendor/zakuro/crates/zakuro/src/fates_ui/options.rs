@@ -109,6 +109,8 @@ pub enum Item {
     Vsync,
     FrameRate,
     FpsCap,
+    /// hfr60: pc.smooth_30fps
+    Smooth30,
     Filter,
     Msaa,
     /// transblur: pc.transition_blur
@@ -241,9 +243,9 @@ fn items(tab: Tab, page: Page, mode: BottomScreen, mods: usize) -> Vec<Item> {
             // native-final: the pure build has one renderer, the native one,
             // so there is no Renderer row to choose with
             #[cfg(feature = "emulation")]
-            Tab::Display => vec![WindowMode, Resolution, Monitor, RenderScale, Renderer, Aspect, WideSides, Vsync, FrameRate, FpsCap, Filter, Msaa, FullDrawDistance, TransitionBlur, ShowFps],
+            Tab::Display => vec![WindowMode, Resolution, Monitor, RenderScale, Renderer, Aspect, WideSides, Vsync, FrameRate, FpsCap, Smooth30, Filter, Msaa, FullDrawDistance, TransitionBlur, ShowFps],
             #[cfg(not(feature = "emulation"))]
-            Tab::Display => vec![WindowMode, Resolution, Monitor, RenderScale, Aspect, WideSides, Vsync, FrameRate, FpsCap, Filter, Msaa, FullDrawDistance, TransitionBlur, ShowFps],
+            Tab::Display => vec![WindowMode, Resolution, Monitor, RenderScale, Aspect, WideSides, Vsync, FrameRate, FpsCap, Smooth30, Filter, Msaa, FullDrawDistance, TransitionBlur, ShowFps],
             // bottom2: the rows that mean something for the mode chosen
             Tab::Screen => match mode {
                 BottomScreen::Auto => vec![
@@ -474,6 +476,12 @@ pub fn row(item: Item, settings: &Settings, env: &Env, armed: Option<Item>, rebi
             let value = if pc.fps_cap == 0 { s("Off") } else { format!("{} FPS", pc.fps_cap) };
             (s("FPS Cap"), Some(value), s("The most frames a second shown, whatever else is set."))
         }
+        // hfr60
+        Item::Smooth30 => (
+            s("Smooth 30 FPS Scenes"),
+            Some(on_off(pc.smooth_30fps)),
+            s("At 60 FPS, a frame is drawn between each two of the battles', 3D cutscenes' and title screen's, which the game runs at 30. Above 60 FPS every scene is smoothed."),
+        ),
         Item::Filter => (s("Filtering"), Some(s(settings.filter.name())), s("How the picture is scaled to the window: smooth, sharp, or pixels.")),
         Item::Msaa => {
             let value = if pc.msaa <= 1 { s("Off") } else { format!("{}\u{d7}", pc.msaa) };
@@ -770,6 +778,11 @@ pub fn adjust(item: Item, dir: i32, settings: &mut Settings, env: &Env) -> Optio
         }
         Item::FpsCap => {
             pc.fps_cap = step(&FPS_CAPS, pc.fps_cap, d);
+            Effect::Apply
+        }
+        // hfr60: from the next refresh
+        Item::Smooth30 => {
+            pc.smooth_30fps = !pc.smooth_30fps;
             Effect::Apply
         }
         Item::Filter => {

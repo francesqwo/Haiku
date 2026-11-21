@@ -48,6 +48,7 @@ mod online_ui; // online: the host's code, the code box, the session's news
 // cpu: native-only execution, headless checkpoints and frame times
 pub mod native_cpu;
 mod vowperf_sample; // vowperf: HAIKU_SAMPLE, a sampling profiler for headless runs
+mod hitches; // hitches (issue #14): the menus' lists read on threads of their own, slow pictures logged
 mod present;
 mod recompile;
 mod report;
@@ -565,6 +566,7 @@ fn run_headless(game: &mut Running, frames: u64, mut each_frame: impl FnMut(&mut
     let mut outcome = FrameOutcome::Completed;
     let mut ran = first;
     vowperf_sample::start(game.system.recompiled.as_ref().map(|library| library.code_points()).unwrap_or_default()); // vowperf
+    zakuro_core::moflexhd::on(); // moflexhd: FATES_MOVIE_STATS read before any movie
     // native-rt: the real-time schedule, started over after a stall
     let (mut rt_start, mut rt_from) = (start, first);
     // savehang: FATES_HEADLESS_SPEED=1 runs Skip Story's skips at Max in
@@ -716,6 +718,9 @@ fn run_headless(game: &mut Running, frames: u64, mut each_frame: impl FnMut(&mut
     }
     if let Some(line) = pulse::summary() {
         println!("{line}"); // pulse
+    }
+    if let Some(line) = zakuro_core::moflexhd::summary() {
+        println!("{line}"); // moflexhd
     }
     println!(
         "{:.1} MIPS, {}",
@@ -2656,6 +2661,7 @@ impl App {
             let t4 = Instant::now();
             log::warn!("present-time: ui {:?} screens {:?} layout {:?} backend {:?}", t1 - t0, t2 - t1, t3 - t2, t4 - t3);
         }
+        hitches::frame_shown(t0, t1, t3); // hitches: a picture that took long to show says why
         let presented = result.is_ok(); // qol4
         match result {
             Ok(()) | Err(PresentError::OutOfDate) => {}

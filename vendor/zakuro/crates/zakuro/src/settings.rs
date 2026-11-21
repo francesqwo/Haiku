@@ -1041,6 +1041,12 @@ pub struct PcSettings {
     // GitHub's API whether a newer Haiku is out (haiku_update.rs). Off: no
     // network at all.
     pub check_updates: bool,
+    // hfr60: Options > Display > Smooth 30 FPS Scenes: at a frame rate of
+    // 60 (Frame Rate 60, a 60 Hz display, a cap of 60), the scenes the game
+    // itself runs at 30 (battles, 3D cutscenes, the title screen) get a
+    // picture in between each two of theirs; 60 FPS scenes are untouched.
+    // Above 60 every scene is smoothed whatever this says (zakuro hfr.rs).
+    pub smooth_30fps: bool,
 }
 
 /// versions2: one version's own settings (PcSettings::per_version); each
@@ -1316,6 +1322,7 @@ impl Default for PcSettings {
             game_version: String::new(), // versions
             per_version: std::collections::BTreeMap::new(), // versions2
             check_updates: true, // updater
+            smooth_30fps: true, // hfr60
         }
     }
 }

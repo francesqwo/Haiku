@@ -23,6 +23,7 @@
 //!   --apply-derived <pack> <romfs> <out>
 
 mod aes; // jpvoice
+mod cc; // compile32: running the compiler on the game's C (issue #13)
 mod derive;
 mod dlc;
 mod dump;

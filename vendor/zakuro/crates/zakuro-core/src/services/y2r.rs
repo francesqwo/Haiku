@@ -475,6 +475,9 @@ fn place<const BYTES: usize>(pixels: &[u32], width: usize, rows: usize, tiled: b
 
 /// converts what was gathered into the output, eight lines at a time, BYTES
 /// a pixel, a line's pixels first and then their places.
+/// moflexhd: a large image (a modder's HD movie) is cut into runs of whole
+/// strips that threads of their own convert side by side; each strip comes
+/// out the same either way, so the output is byte for byte the same.
 fn convert_strips<const BYTES: usize>(
     scratch: &mut Scratch,
     layout: Layout,
@@ -482,18 +485,81 @@ fn convert_strips<const BYTES: usize>(
     width: usize,
     lines: usize,
     tiled: bool,
-    pack: impl Fn(u32, u32, u32) -> u32 + Copy,
+    pack: impl Fn(u32, u32, u32) -> u32 + Copy + Send + Sync,
 ) {
-    let Scratch { planes: [luma, chroma_u, chroma_v], line, chroma, pixels, out, .. } = scratch;
-    let half = width / 2;
+    let Scratch { planes, line, chroma, pixels, out, .. } = scratch;
     out.resize(width * lines * BYTES, 0);
+    let strips = lines.div_ceil(8);
+    let parts = moflexhd_parts(width * lines, strips);
+    if parts <= 1 {
+        convert_lines::<BYTES>(planes, line, chroma, pixels, layout, terms, width, 0, lines, tiled, pack, out);
+        return;
+    }
+    let per = strips.div_ceil(parts);
+    let planes = &*planes;
+    std::thread::scope(|scope| {
+        let mut rest = &mut out[..];
+        let mut first = 0;
+        let mut own = None;
+        while first < lines {
+            let last = (first + per * 8).min(lines);
+            let (part, after) = rest.split_at_mut((last - first) * width * BYTES);
+            rest = after;
+            let at = first;
+            if own.is_none() {
+                // the first part on this thread, with its own scratch
+                own = Some((part, at, last));
+            } else {
+                scope.spawn(move || {
+                    let (mut line, mut chroma, mut pixels) = Default::default();
+                    convert_lines::<BYTES>(planes, &mut line, &mut chroma, &mut pixels, layout, terms, width, at, last, tiled, pack, part);
+                });
+            }
+            first = last;
+        }
+        if let Some((part, at, last)) = own {
+            convert_lines::<BYTES>(planes, line, chroma, pixels, layout, terms, width, at, last, tiled, pack, part);
+        }
+    });
+}
+
+/// moflexhd: how many threads convert an image of this many pixels: one up
+/// to twice the console's screen (every movie of the game's own, and
+/// anything smaller), then one for each 128K pixels, at most four.
+fn moflexhd_parts(pixels: usize, strips: usize) -> usize {
+    if pixels <= 2 * 400 * 240 {
+        return 1;
+    }
+    let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
+    (pixels / (128 * 1024)).clamp(1, 4).min(cores.saturating_sub(1).max(1)).min(strips)
+}
+
+/// converts lines first..last (a multiple of eight from the top) into out,
+/// which holds those lines' part of the output.
+#[allow(clippy::too_many_arguments)]
+fn convert_lines<const BYTES: usize>(
+    planes: &[Vec<u8>; 3],
+    line: &mut [Vec<u8>; 3],
+    chroma: &mut [Vec<i32>; 3],
+    pixels: &mut Vec<u32>,
+    layout: Layout,
+    terms: &Terms,
+    width: usize,
+    first: usize,
+    last: usize,
+    tiled: bool,
+    pack: impl Fn(u32, u32, u32) -> u32 + Copy,
+    out: &mut [u8],
+) {
+    let [luma, chroma_u, chroma_v] = planes;
+    let half = width / 2;
     pixels.resize(width * 8, 0);
     for part in chroma.iter_mut() {
         part.resize(width, 0);
     }
     let mut shared = None;
-    for strip in (0..lines).step_by(8) {
-        let rows = (lines - strip).min(8);
+    for strip in (first..last).step_by(8) {
+        let rows = (last - strip).min(8);
         for y in 0..rows {
             let at = strip + y;
             let luma_line = match layout {
@@ -509,7 +575,7 @@ fn convert_strips<const BYTES: usize>(
                     &luma[at * width..][..width]
                 }
                 Layout::Yuyv => {
-                    let [y_line, u_line, v_line] = line;
+                    let [y_line, u_line, v_line] = &mut *line;
                     y_line.resize(width, 0);
                     u_line.resize(half, 0);
                     v_line.resize(half, 0);
@@ -520,12 +586,12 @@ fn convert_strips<const BYTES: usize>(
                         v_line[k] = v;
                     }
                     chroma_terms(terms, u_line, v_line, chroma);
-                    &y_line[..]
+                    &line[0][..]
                 }
             };
             line_pixels(terms, luma_line, chroma, &mut pixels[y * width..][..width], pack);
         }
-        place::<BYTES>(pixels, width, rows, tiled, &mut out[strip * width * BYTES..]);
+        place::<BYTES>(pixels, width, rows, tiled, &mut out[(strip - first) * width * BYTES..]);
     }
 }
 
@@ -544,6 +610,7 @@ pub(crate) fn convert(system: &mut System) {
     let terms = Terms::new(&state.coefficients);
     let (y_buffer, u_buffer, v_buffer, yuyv_buffer, output) = (state.y, state.u, state.v, state.yuyv, state.output);
     let pixels = width * lines;
+    let timed = crate::moflexhd::on().then(std::time::Instant::now); // moflexhd
     let mut scratch = std::mem::take(&mut system.services.y2r.scratch);
     let Scratch { planes: [luma, chroma_u, chroma_v], piece, .. } = &mut scratch;
     // 16 bit samples keep their low byte
@@ -590,9 +657,26 @@ pub(crate) fn convert(system: &mut System) {
             2
         }
     };
+    // moflexhd (tests): FATES_Y2R_VARY=1 marks each picture with its number
+    // in its first pixels, so a test movie of a few pictures stands in for
+    // one whose every picture differs, as far as the renderer goes
+    if crate::moflexhd::vary() {
+        let n = crate::moflexhd::next_picture().to_le_bytes();
+        for (b, v) in scratch.out.iter_mut().zip(n) {
+            *b ^= v;
+        }
+    }
+    let converted = timed.map(|started| {
+        crate::moflexhd::note(crate::moflexhd::kind::CONVERT, started.elapsed().as_nanos() as u64, pixels as u64); // moflexhd
+        std::time::Instant::now()
+    });
     let end = output.address.wrapping_add((pixels * bytes) as u32 / output.transfer.max(1) as u32 * (output.transfer as u32 + output.gap as u32));
     system.sync_gpu(output.address, end.wrapping_sub(output.address));
     scatter(system, output, &scratch.out);
+    crate::moflexhd::picture_written(output.address, end.wrapping_sub(output.address)); // moflexhd
+    if let Some(started) = converted {
+        crate::moflexhd::note(crate::moflexhd::kind::PLACED, started.elapsed().as_nanos() as u64, pixels as u64); // moflexhd
+    }
     // os: FATES_Y2R_HASH=<file> appends a hash of every converted image,
     // to compare the native y2r with the emulated service
     if let Some(path) = std::env::var_os("FATES_Y2R_HASH") {
@@ -1055,5 +1139,44 @@ mod tests {
             }
         }
         assert_eq!(stopped, 7);
+    }
+
+    /// moflexhd: an HD movie's picture, converted by several threads, comes
+    /// out byte for byte as one thread converts it, tiled or not, 4:2:0 and
+    /// YUYV, and in rows with a last strip cut short (tiled, a short last
+    /// strip stops the conversion either way: stops_where_it_stopped).
+    #[test]
+    fn threads_convert_as_one_does() {
+        let mut seed = 0x2545_F491_4F6C_DD1Du64;
+        let mut byte = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed as u8
+        };
+        let terms = Terms::new(&STANDARD[0]);
+        for (width, lines) in [(1024usize, 576usize), (800, 484), (1920, 1072)] {
+            assert!(moflexhd_parts(width * lines, lines.div_ceil(8)) > 1 || std::thread::available_parallelism().map_or(1, |n| n.get()) < 3);
+            for layout in [Layout::Planar { lines_per_chroma: 2 }, Layout::Yuyv] {
+                for tiled in [false, true] {
+                    if tiled && lines % 8 != 0 {
+                        continue;
+                    }
+                    let mut scratch = Scratch::default();
+                    let (luma, chroma) = match layout {
+                        Layout::Yuyv => (width * lines * 2, 0),
+                        Layout::Planar { .. } => (width * lines, width * lines / 4),
+                    };
+                    scratch.planes = [(0..luma).map(|_| byte()).collect(), (0..chroma).map(|_| byte()).collect(), (0..chroma).map(|_| byte()).collect()];
+                    let pack = |r: u32, g: u32, b: u32| b | g << 8 | r << 16;
+                    convert_strips::<3>(&mut scratch, layout, &terms, width, lines, tiled, pack);
+                    let threads = scratch.out.clone();
+                    let mut one = vec![0u8; width * lines * 3];
+                    let (mut line, mut chroma, mut pixels) = Default::default();
+                    convert_lines::<3>(&scratch.planes, &mut line, &mut chroma, &mut pixels, layout, &terms, width, 0, lines, tiled, pack, &mut one);
+                    assert!(threads == one, "{width}x{lines} {layout:?} tiled {tiled}");
+                }
+            }
+        }
     }
 }

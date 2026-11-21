@@ -95,6 +95,7 @@ extern uint32_t pulse_words[];
  * 31 the longest prediction run so far, microseconds (vowperf)
  * 420 guest calls that returned through other frames (predict)
  * 421 predictions given up at an access to nothing, 422 its address (predict)
+ * 423..431 lines4: the scheduling's counts (see the W_ names)
  * 16.. growth rates [8] (HP, Str, Mag, Skl, Spd, Lck, Def, Res), signed
  * 24.. decisions predicted: count at 24, then 4 words each from 32:
  *      attacker index | target index << 8 | action << 16 | item << 24,
@@ -126,9 +127,19 @@ uint32_t info_ui_words[IU_WORDS];
 #define W_OFF 30           /* vowperf: predictions off, 1 for this map, 2 for the session */
 #define W_RUN_MAX 31       /* vowperf: the longest prediction run, microseconds */
 #define W_TEST_BUDGET 500  /* vowperf: tests (FATES_INFO_BUDGET): another budget for a prediction's calls */
+#define W_TEST_DELAY 501   /* lines4: tests (FATES_INFO_RUN_DELAY): microseconds added to each run, a slower PC */
 #define W_NESTED 420       /* predict: guest calls that returned through other frames (gcall) */
 #define W_BAD 421          /* predict: predictions given up at an access to nothing (unmapped, refused) */
 #define W_BAD_ADDR 422     /* predict: the last such access's address */
+#define W_REST_WAITS 423   /* lines4: ticks a new tile's first run waited for the cursor to rest (slow runs) */
+#define W_VOTE_WAITS 424   /* lines4: ticks a vote run was put off (slow runs, the frame share) */
+#define W_EST 425          /* lines4: what a run takes on this map lately, microseconds */
+#define W_PICK_TICKS 426   /* lines4: ticks choosing a unit's destination with a tile to predict */
+#define W_PICK_BEHIND 427  /* lines4: ... of them not yet showing that tile's lines */
+#define W_OFF_MAPS 428     /* lines4: times the predictions were turned off for a map */
+#define W_TICK_MAX 429     /* lines4: the most one tick spent predicting, microseconds */
+#define W_MAPS 430         /* lines4: maps (situations) predicted on */
+#define W_BEGIN_MAX 431    /* lines4: the longest cow_begin, microseconds (debug bit 32) */
 #define W_GROWTH_RATES 16
 #define W_DECISIONS 24
 #define W_DECISION0 32
@@ -524,6 +535,17 @@ static int run_fork(Context *ctx, uint32_t sp, uint32_t seed, const Place *place
     uint32_t count = 0;
     if (!cow_begin(ctx))
         return 0;
+    if (iu_debug(32)) {
+        /* lines4: what making the copy costs (tests, bit 32: made twice) */
+        struct timeval b0, b1;
+        gettimeofday(&b0, 0);
+        cow_end(ctx);
+        cow_begin(ctx);
+        gettimeofday(&b1, 0);
+        uint32_t us = (uint32_t)((b1.tv_sec - b0.tv_sec) * 1000000ll + (b1.tv_usec - b0.tv_usec));
+        if (us > info_ui_words[W_BEGIN_MAX])
+            info_ui_words[W_BEGIN_MAX] = us;
+    }
     int ok;
     /* the enemy's phase, in the copy */
     mem_write8(ctx, sit + 8, 1);
@@ -780,17 +802,28 @@ static void publish(const Prediction *p, int log) {
      failures with no prediction ever made in this session, for the session
      (W_OFF 2). An svc stays what it was: that situation's prediction alone
      is given up.
-   - A run that took longer than SLOW_RUN_US (a map, or a code mod's AI,
-     heavy enough) makes that map's predictions lighter: one run instead of
-     FORK_SEEDS, and none per tile while a unit's destination is chosen
-     (the lines of the map as it is stay shown). The game's own AI runs 1
-     to 9 ms on the bench's maps, under it. */
+   - lines4: a map whose runs are slow (over SLOW_RUN_US lately: a heavy
+     map, a code mod's AI, a slower PC) used to get "lighter" predictions
+     for the rest of the session: one run, and none per tile while a unit's
+     destination was chosen, so the lines never followed the unit being
+     moved (issue #12: "I never see them until after I finish moving a
+     unit"). It took one run over SLOW_RUN_US, and the first run of a
+     session, its pages fresh, is the slowest; and since a new
+     map::Situation is often made at the same address (the Prologue's and
+     Chapter 5's, 31CCA8F8), "this map" could be every map after it. Now
+     every situation is predicted in full, and only when the runs are slow
+     is it paced (predict_tick):
+     a new tile's first run waits for the cursor to rest on it, and the
+     vote's runs share the frames (FRAME_SHARE_US a frame on average). A
+     frame never runs more than one run, as before. */
 #define PREDICT_BUDGET (24 << 20)
 #define SLOW_RUN_US 10000u
+#define FRAME_SHARE_US 4000u
 static uint32_t off_sit;      /* the map (map::Situation) predictions are off for */
-static uint32_t slow_sit;     /* the map whose predictions are lightened */
 static int hard_failures;     /* runs that failed hard, this session */
 static int ever_predicted;    /* a prediction run succeeded this session */
+static uint32_t est_us;       /* lines4: what a run takes on this map lately */
+static int32_t share_us;      /* lines4: what the vote's runs may still spend of the frames' share */
 /* predict: predictions given up at an access to nothing, on the map
    bad_sit; at BAD_PER_MAP of them the map's predictions are off */
 #define BAD_PER_MAP 3
@@ -927,16 +960,30 @@ static void predict_runs(Context *ctx, Prediction *p, int last) {
             locate_return(ctx, &saved, sp, seeds[p->runs], &p->place);
         gettimeofday(&r1, 0);
         uint32_t run_us = (uint32_t)((r1.tv_sec - r0.tv_sec) * 1000000ll + (r1.tv_usec - r0.tv_usec));
+        /* lines4, tests: a slower PC, the run made that much longer */
+        if (info_ui_words[W_TEST_DELAY]) {
+            uint32_t want = run_us + info_ui_words[W_TEST_DELAY];
+            for (;;) {
+                struct timeval r2;
+                gettimeofday(&r2, 0);
+                uint32_t now = (uint32_t)((r2.tv_sec - r0.tv_sec) * 1000000ll + (r2.tv_usec - r0.tv_usec));
+                if (now >= want) {
+                    run_us = now;
+                    break;
+                }
+            }
+        }
         if (run_us > info_ui_words[W_RUN_MAX])
             info_ui_words[W_RUN_MAX] = run_us;
+        /* lines4: what a run takes on this map lately (a long one at once,
+           shorter ones bring it down slowly) and what it took from the
+           frames' share */
+        est_us = run_us > est_us ? run_us : (est_us * 3 + run_us) / 4;
+        info_ui_words[W_EST] = est_us;
+        share_us -= (int32_t)run_us;
         if (!p->failed) {
             p->runs++;
             ever_predicted = 1;
-            if (run_us > SLOW_RUN_US && slow_sit != sit) {
-                slow_sit = sit;
-                if (iu_debug(1))
-                    fprintf(stderr, "info-ui: a run took %u us: this map's predictions are lighter\n", run_us);
-            }
         }
     }
     gcall_budget = budget_before;
@@ -960,12 +1007,16 @@ static void predict_runs(Context *ctx, Prediction *p, int last) {
         }
         if (bad_on_map >= BAD_PER_MAP) {
             off_sit = sit;
+            if (!info_ui_words[W_OFF])
+                info_ui_words[W_OFF_MAPS]++;
             info_ui_words[W_OFF] = 1;
         }
     }
     if (p->failed && fork_hard_failure) {
         hard_failures++;
         off_sit = sit;
+        if (!info_ui_words[W_OFF])
+            info_ui_words[W_OFF_MAPS]++;
         info_ui_words[W_OFF] = !ever_predicted && hard_failures >= 2 ? 2 : 1;
         if (iu_debug(1))
             fprintf(stderr, "info-ui: the AI fails on the copy: predictions off %s\n", info_ui_words[W_OFF] == 2 ? "for the session" : "for this map");
@@ -992,46 +1043,93 @@ static void predict_runs(Context *ctx, Prediction *p, int last) {
     }
 }
 
+/* lines4: a new map (map::Situation changed, or the last map's Panel was
+   finalized): what was learnt of the last one goes. A new map::Situation
+   is often made at the same address as the last, so its address alone
+   did not tell the maps apart: a map's "off", "lighter" and bad-access
+   count could stay for the rest of the session. */
+static void map_reset(void) {
+    if (info_ui_words[W_OFF] == 1)
+        info_ui_words[W_OFF] = 0;
+    off_sit = 0;
+    bad_sit = 0;
+    bad_on_map = 0;
+    est_us = 0;
+    share_us = 0;
+    info_ui_words[W_EST] = 0;
+    info_ui_words[W_MAPS]++;
+}
+
 /* once a tick of the free cursor or of choosing where a unit moves: the
    prediction for this situation, one run further, and the lines show it as
-   soon as it has a run; until then the last one stays */
-static void predict_tick(Context *ctx, const Place *place) {
+   soon as it has a run; until then the last one stays.
+
+   lines4: one run a tick at most, as before. When the runs are quick (the
+   game's own AI on this PC: 1 to 9 ms) every tick runs one, so a new tile's
+   lines show the tick after the cursor reaches it and its vote completes
+   over the next four. When they are slow (over SLOW_RUN_US lately), a new
+   tile's first run waits until the cursor rests (cursor_rests: the cursor
+   held over the same spot two ticks running), so a cursor gliding across
+   tiles is never held back by tiles it only passes, and the vote's runs
+   share the ticks: each tick adds FRAME_SHARE_US, each run takes what it
+   took. Nothing is ever skipped for good: every situation gets its first
+   run and then its full vote. */
+static int cursor_rests;
+static void predict_tick(Context *ctx, const Place *place, int picking) {
     uint32_t sit = mem_read32(ctx, SITUATION_PTR);
     if (!sit || mem_read8(ctx, sit + 8) != 0)
         return;
+    struct timeval t0, t1;
+    gettimeofday(&t0, 0);
     uint64_t h = units_hash(ctx) ^ (uint64_t)sit << 32;
     if (sit != predicted_sit) {
         predicted_sit = sit;
         cache_clear();
-        if (info_ui_words[W_OFF] == 1 && sit != off_sit)
-            info_ui_words[W_OFF] = 0;
+        map_reset();
+        if (iu_debug(1))
+            fprintf(stderr, "info-ui: a new map: map::Situation %08X\n", sit);
     }
-    /* vowperf: off for this map or the session, or lighter on this map */
+    /* vowperf: off for this map or the session */
     if (info_ui_words[W_OFF]) {
         info_ui_words[W_DECISIONS] = 0;
         return;
     }
-    Place none = { 0, 0, 0 };
-    int slow = sit == slow_sit;
-    if (slow)
-        place = &none;
     Prediction *p = cache_get(h, place);
-    if (!p->failed && p->runs < (slow ? 1 : FORK_SEEDS))
-        predict_runs(ctx, p, p->runs + 1);
+    int slow = est_us > SLOW_RUN_US;
+    share_us += FRAME_SHARE_US;
+    if (share_us > (int32_t)(est_us + FRAME_SHARE_US))
+        share_us = (int32_t)(est_us + FRAME_SHARE_US);
+    if (!p->failed && p->runs < FORK_SEEDS) {
+        int go = 1;
+        if (slow && p->runs == 0 && picking && !cursor_rests) {
+            go = 0;
+            info_ui_words[W_REST_WAITS]++;
+        } else if (slow && p->runs > 0 && share_us < (int32_t)est_us) {
+            go = 0;
+            info_ui_words[W_VOTE_WAITS]++;
+        }
+        if (go)
+            predict_runs(ctx, p, p->runs + 1);
+    }
     if (info_ui_words[W_OFF]) {
         info_ui_words[W_DECISIONS] = 0;
-        return;
-    }
-    if (p->failed) {
+    } else if (p->failed) {
         if (shown == p || !shown)
             info_ui_words[W_DECISIONS] = 0;
-        return;
-    }
-    if (p->runs > 0 && (shown != p || shown_runs != p->runs)) {
+    } else if (p->runs > 0 && (shown != p || shown_runs != p->runs)) {
         publish(p, 0);
         shown = p;
         shown_runs = p->runs;
     }
+    if (picking && place->unit) {
+        info_ui_words[W_PICK_TICKS]++;
+        if (shown != p)
+            info_ui_words[W_PICK_BEHIND]++;
+    }
+    gettimeofday(&t1, 0);
+    uint32_t us = (uint32_t)((t1.tv_sec - t0.tv_sec) * 1000000ll + (t1.tv_usec - t0.tv_usec));
+    if (us > info_ui_words[W_TICK_MAX])
+        info_ui_words[W_TICK_MAX] = us;
 }
 
 /* the whole prediction at once (the test at the enemy phase's start) */
@@ -1058,7 +1156,7 @@ RECOMP_OVERRIDE(0x00351904) {
     if (info_ui_words[W_MODE]) {
         info_ui_words[W_FREE_FRAME] = mem_read32(ctx, FRAME_COUNTER);
         Place none = { 0, 0, 0 };
-        predict_tick(ctx, &none);
+        predict_tick(ctx, &none, 0);
     }
     CALL(RECOMP_ORIGINAL(0x00351904));
 }
@@ -1079,21 +1177,37 @@ RECOMP_OVERRIDE(0x00352800) {
         uint32_t image = mem_read32(ctx, IMAGE_PTR), deploy = mem_read32(ctx, DEPLOY_PTR);
         uint32_t index = mind ? mem_read8(ctx, mind) : 0;
         info_ui_words[W_PICK_UNIT] = index;
+        /* lines4: the cursor rests when it is where it was the tick before */
+        static uint32_t last_cx = 0xFFFFFFFFu, last_cy = 0xFFFFFFFFu;
+        uint32_t cx = cursor ? mem_read32(ctx, cursor + 0x18) : 0, cy = cursor ? mem_read32(ctx, cursor + 0x1C) : 0;
+        cursor_rests = cx == last_cx && cy == last_cy;
+        last_cx = cx;
+        last_cy = cy;
         if (index && cursor && image && deploy) {
-            int x = (int)f32_of(mem_read32(ctx, cursor + 0x18)), y = (int)f32_of(mem_read32(ctx, cursor + 0x1C));
+            int x = (int)f32_of(cx), y = (int)f32_of(cy);
             uint8_t w = mem_read8(ctx, image), h = mem_read8(ctx, image + 1);
             uint32_t move = mem_read32(ctx, deploy + 0x80C);
+            int reach = -2, on = -1;
             if (x >= 0 && y >= 0 && x < w && y < h && move) {
                 uint32_t at = (uint32_t)x | (uint32_t)y << 5;
-                uint32_t on = mem_read8(ctx, image + 8 + at);
-                if ((int8_t)mem_read8(ctx, move + at) >= 0 && (on == 0 || on == index)) {
+                on = mem_read8(ctx, image + 8 + at);
+                reach = (int8_t)mem_read8(ctx, move + at);
+                if (reach >= 0 && (on == 0 || on == (int)index)) {
                     place.unit = index;
                     place.x = x;
                     place.y = y;
                 }
             }
+            /* lines4, tests: each tile the cursor reaches while a unit's
+               destination is chosen */
+            static int last_x = -1, last_y = -1;
+            if (iu_debug(1) && (x != last_x || y != last_y))
+                fprintf(stderr, "info-ui: picking: unit %u, cursor on %d,%d (%.2f, %.2f), move image %d, unit there %d: %s\n", index, x, y,
+                        f32_of(cx), f32_of(cy), reach, on, place.unit ? "predicted with the unit there" : "the map as it is");
+            last_x = x;
+            last_y = y;
         }
-        predict_tick(ctx, &place);
+        predict_tick(ctx, &place, 1);
     }
     CALL(RECOMP_ORIGINAL(0x00352800));
 }

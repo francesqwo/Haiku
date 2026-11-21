@@ -19,6 +19,7 @@ pub mod kernel;
 pub mod loader;
 pub mod memory;
 pub mod mods;
+pub mod moflexhd; // moflexhd: FATES_MOVIE_STATS, where a movie's time goes
 // gfx: seam for the native renderer (fates-gfx)
 pub mod native_gfx;
 // os: native platform layer
@@ -1227,7 +1228,13 @@ impl System {
     pub fn set_interpolation(&mut self, on: bool) -> bool {
         // hfr: the frontend's tracking and fractions stay
         let (tracking, wanted) = (self.pacing.tracking, std::mem::take(&mut self.pacing.wanted));
-        self.pacing = Pacing { tracking, wanted, ..Pacing::default() };
+        // hfr60: and the count of the pictures the title set, which the
+        // frontend paces by: at 60 interpolation goes on and off as 30 FPS
+        // scenes start and end, and starting the count over made the next
+        // refresh's picture look new (and the refresh numbers go back)
+        let p = &self.pacing;
+        let (refreshes, new_at, gap, last, native_last) = (p.refreshes, p.new_at, p.gap, p.last, p.native_last);
+        self.pacing = Pacing { tracking, wanted, refreshes, new_at, gap, last, native_last, ..Pacing::default() };
         self.gpu.set_interpolation(on)
     }
 

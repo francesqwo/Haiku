@@ -456,13 +456,16 @@ RECOMP_OVERRIDE(0x0033B228) {
 /* is::app::movie::MovieThread::MovieLeave(void), once a picture: an event
    movie not yet skipping (+0x6F0) gets Start for the check it makes (Start,
    or with +0x6F1 any of A/B/X/Y/Start), taken back after */
+extern uint32_t moflexhd_skip; /* moflexhd: a movie too large for the game's decoder is skipped (overrides/moflexhd.c) */
 RECOMP_OVERRIDE(0x002247A8) {
     uint32_t self = ctx->r[0];
-    if (*(volatile uint32_t *)&qol_skip_story && qol_event_movie && mem_read8(ctx, self + 0x6F0) == 0) {
+    int unplayable = moflexhd_skip && mem_read8(ctx, self + 0x6F0) == 0; /* moflexhd */
+    if (moflexhd_skip && !unplayable) moflexhd_skip = 0; /* moflexhd: skipping now */
+    if ((unplayable || (*(volatile uint32_t *)&qol_skip_story && qol_event_movie)) && mem_read8(ctx, self + 0x6F0) == 0) {
         uint32_t pad = mem_read32(ctx, PAD);
         if (pad && !(mem_read32(ctx, pad + 0x14) & BUTTON_START)) {
             mem_write32(ctx, pad + 0x14, mem_read32(ctx, pad + 0x14) | BUTTON_START);
-            qol_movies_skipped++;
+            if (!unplayable) qol_movies_skipped++;
             CALL_THEN(RECOMP_ORIGINAL(0x002247A8), qol_start_taken, pad + 0x14);
             return;
         }

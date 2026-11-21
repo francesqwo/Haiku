@@ -1,8 +1,8 @@
 # jpprep: USA Special Edition (BFZE) -> Japanese build (Fire Emblem if) addresses
 # made by dev/region/map.py from the two dumps' code and symbol tables (or bytes); addresses only
 us	jpn	method	use	note	where
-0x00100000	0x00100000	func-exact	code	.ARM.Collect$$libshutdown$$00000002	source/gfx/src/live2d.rs,source/src/console.rs,vendor/zakuro/crates/zakuro-common/src/memory_map.rs,vendor/zakuro/crates/zakuro-core/src/cheats.rs,vendor/zakuro/crates/zakuro-core/src/coverage.rs,vendor/zakuro/crates/zakuro-core/src/hints.rs,vendor/zakuro/crates/zakuro-core/src/kernel/mod.rs,vendor/zakuro/crates/zakuro-core/src/lib.rs,vendor/zakuro/crates/zakuro-core/src/loader.rs,vendor/zakuro/crates/zakuro-core/src/pcos/hang.rs,vendor/zakuro/crates/zakuro-core/src/recompiled.rs,vendor/zakuro/crates/zakuro-core/src/region.rs,vendor/zakuro/crates/zakuro-core/src/services/mod.rs,vendor/zakuro/crates/zakuro-fs/src/testing.rs,vendor/zakuro/crates/zakuro-gpu/src/raster.rs,vendor/zakuro/crates/zakuro/src/native_cpu.rs,vendor/zakuro/crates/zakuro/src/recompile.rs
-0x00100001	0x00100001	func-exact	code	.ARM.Collect$$libshutdown$$00000002	vendor/zakuro/crates/zakuro-core/src/recompiled.rs
+0x00100000	0x00100000	func-exact	code	.ARM.Collect$$libshutdown$$00000002	overrides/info_ui.c,source/gfx/src/live2d.rs,source/src/console.rs,vendor/zakuro/crates/zakuro-common/src/memory_map.rs,vendor/zakuro/crates/zakuro-core/src/cheats.rs,vendor/zakuro/crates/zakuro-core/src/coverage.rs,vendor/zakuro/crates/zakuro-core/src/dispatch.rs,vendor/zakuro/crates/zakuro-core/src/hints.rs,vendor/zakuro/crates/zakuro-core/src/kernel/mod.rs,vendor/zakuro/crates/zakuro-core/src/lib.rs,vendor/zakuro/crates/zakuro-core/src/loader.rs,vendor/zakuro/crates/zakuro-core/src/pcos/hang.rs,vendor/zakuro/crates/zakuro-core/src/recompiled.rs,vendor/zakuro/crates/zakuro-core/src/region.rs,vendor/zakuro/crates/zakuro-core/src/services/mod.rs,vendor/zakuro/crates/zakuro-fs/src/testing.rs,vendor/zakuro/crates/zakuro-gpu/src/raster.rs,vendor/zakuro/crates/zakuro/src/native_cpu.rs,vendor/zakuro/crates/zakuro/src/recompile.rs
+0x00100001	0x00100001	func-exact	code	.ARM.Collect$$libshutdown$$00000002	vendor/zakuro/crates/zakuro-core/src/recompiled.rs,vendor/zakuro/crates/zakuro/src/vowperf_sample.rs
 0x00100004	0x00100004	func-exact	code	.ARM.Collect$$libshutdown$$00000002	vendor/zakuro/crates/zakuro-core/src/hints.rs,vendor/zakuro/crates/zakuro-core/src/lib.rs
 0x00100008	0x00100008	func-exact	code	.ARM.Collect$$libshutdown$$00000002	vendor/zakuro/crates/zakuro-core/src/hints.rs
 0x00100010	0x00100010	func-exact	code	.ARM.Collect$$libshutdown$$00000002	vendor/zakuro/crates/zakuro-core/src/lib.rs
@@ -11,8 +11,12 @@ us	jpn	method	use	note	where
 0x00100044	-	literal-disagrees	code	.ARM.Collect$$libshutdown$$00000002	vendor/zakuro/crates/zakuro-core/src/lib.rs
 0x00100050	0x00100050	func-changed-context	code	.ARM.Collect$$libshutdown$$00000002	vendor/zakuro/crates/zakuro-core/src/cheats.rs
 0x001000C2	0x001000C2	func-changed-context	code	.ARM.Collect$$libshutdown$$00000002	vendor/zakuro/crates/zakuro-core/src/services/dsp.rs
-0x00100100	0x00100100	func-changed-context	code	.ARM.Collect$$libshutdown$$00000002	vendor/zakuro/crates/zakuro-core/src/hints.rs
+0x00100100	0x00100100	func-changed-context	code	.ARM.Collect$$libshutdown$$00000002	vendor/zakuro/crates/zakuro-core/src/hints.rs,vendor/zakuro/crates/zakuro-core/src/state/keep.rs
 0x00100101	0x00100101	func-changed-context	code	.ARM.Collect$$libshutdown$$00000002	vendor/zakuro/crates/zakuro-core/src/hints.rs
+0x00100200	0x00100200	func-changed-context	code	.ARM.Collect$$libshutdown$$00000002	vendor/zakuro/crates/zakuro-core/src/state/keep.rs
+0x00100300	0x001002C8	func-exact	code	__aeabi_vec_ctor_nocookie_nodtor	vendor/zakuro/crates/zakuro-core/src/state/keep.rs
+0x00100400	0x001003C8	func-same	code	std::__rw_exception::_C_vformat(int,std::__va_list)	vendor/zakuro/crates/zakuro-core/src/state/keep.rs
+0x00100500	0x001004C8	func-same	code	__rw::__rw_vfmatstr(char*,unsigned int,int,std::__va_list)	vendor/zakuro/crates/zakuro-core/src/state/keep.rs
 0x00100701	-	func-changed-ambiguous	hint	std::exception::exception(void)	vendor/3dsrecomp/hints.txt
 0x00100705	-	func-changed-ambiguous	hint	std::exception::exception(void)	vendor/3dsrecomp/hints.txt
 0x00100707	-	func-changed-ambiguous	hint	std::exception::exception(void)	vendor/3dsrecomp/hints.txt
@@ -51,6 +55,7 @@ us	jpn	method	use	note	where
 0x001045B0	0x00104618	func-same	override	HomeButton::Tick(void)	overrides/qol.c
 0x00104CA8	0x00104D10	func-same	override	SoundPrivate::Tick(int)	overrides/snd_native.c
 0x001052B8	0x00105320	func-same	override	Proc::Exec(Proc::Priority)	overrides/cheats.c
+0x00105580	0x001055E4	func-same	comment	Backup::Initialize(void)	vendor/zakuro/crates/zakuro-core/src/pcos/sched.rs
 0x00105930	0x00105994	func-same	hint+	Memory::InitializeStartUp(void)	vendor/3dsrecomp/hints.txt
 0x00105E18	0x00105E7C	func-same	override	Graphics::SwapBuffer(void)	overrides/gfx_survey.c
 0x00105E84	0x00105EE8	func-same	override	Graphics::WaitBuffer(void)	overrides/gfx_survey.c
@@ -502,6 +507,8 @@ us	jpn	method	use	note	where
 0x001616B4	0x001616B4	func-exact	hint+	VX2_DECODER_ARMV5_STRIDE_512_VXS2	vendor/3dsrecomp/hints.txt
 0x00162C08	0x00162C08	func-exact	hint+	VX2_DECODER_ARMV5_STRIDE_512_VXS2	vendor/3dsrecomp/hints.txt
 0x00166044	0x00166058	func-same	hint+	CreateCSSubtitle(const char*,int,int)	vendor/3dsrecomp/hints.txt
+0x001666E0	0x001666F4	func-exact	override	VX2DecoderUnpack(VX2DecoderData&,const void*,unsigned int)	overrides/moflexhd.c
+0x00169118	0x0016912C	func-same	override	MoDeblock(const MoDeblocking&)	overrides/moflexhd.c
 0x00170182	0x0016FF92	func-same	code	BattleUnit::CreateFootStepEffectHuman(const char*)	vendor/zakuro/crates/zakuro-core/src/pcos/uds.rs
 0x00170388	0x00170198	func-same	override	BattleUnit::PlayAnimForceDirectEndPose(AnimClip::Type)	overrides/randomizer.c
 0x00170590	0x001703A0	func-same	hint	BattleUnit::UpdateCameraFrustumVisibility(void)	vendor/3dsrecomp/hints.txt
@@ -664,6 +671,7 @@ us	jpn	method	use	note	where
 0x00225D30	0x00227148	func-same	code	mw::mo::helper::GlVideoPresentation::Draw(void)	overrides/widescreen.c
 0x00225DF8	0x00227210	func-exact	code	mw::mo::helper::GlVideoPresentation::Finalize(void)	overrides/widescreen.c
 0x00225F74	0x0022738C	func-same	code	mw::mo::helper::MovieStereoDrawCallback::OnBegin(void)	source/gfx/src/prim.rs
+0x002269F8	0x00227E10	func-same	override	mw::mo::helper::Player::DecodeVideoData(void)	overrides/moflexhd.c
 0x002292D4	0x0022A6EC	func-same	hint+	nn::ac::CTR::detail::Ac::CancelConnectAsync(void)	vendor/3dsrecomp/hints.txt
 0x00229364	0x0022A77C	func-same	hint+	nn::ac::CTR::detail::Ac::GetConnectingLocation(unsigned char*)	vendor/3dsrecomp/hints.txt
 0x00229604	0x0022AA1C	func-same	hint+	nn::am::detail::ApplicationControl::IsDataTitleInUse(bool*,nn::fs::MediaType,unsigned long long)	vendor/3dsrecomp/hints.txt
@@ -1065,6 +1073,7 @@ us	jpn	method	use	note	where
 0x003FE570	0x003FF160	func-same	hint+	link::ec::purchase::Sequence::CreateBind(ProcInst*)	vendor/3dsrecomp/hints.txt
 0x003FE9EC	0x003FF5DC	func-same	override	link::anonymous_namespace::ProcExtRead::End(void)	overrides/qol.c
 0x003FEA50	0x003FF640	func-same	override	link::anonymous_namespace::ProcExtRead::Begin(void)	overrides/qol.c
+0x003FFFFF	0x00400BEF	func-same	code	link::anonymous_namespace::ProcReset::End(void)	source/gfx/src/skybg.rs
 0x00400000	0x00400BF0	func-same	code	link::anonymous_namespace::ProcReset::End(void)	vendor/zakuro/crates/zakuro-gpu/src/lib.rs
 0x004049A8	0x00405598	func-same	code	link::match::Game::DetectInvalidData(void)	overrides/online.c
 0x00405140	0x00405D30	func-same	hint+	link::match::WiFi::AutoMatchmake(ProcInst*,const link::match::WiFi::MatchmakeParam&)	vendor/3dsrecomp/hints.txt
@@ -1571,6 +1580,7 @@ us	jpn	method	use	note	where
 0x005C4D24	0x005C4CE0	func-same	hint+	mwmoimaadpcmDecoderUnpackFrame	vendor/3dsrecomp/hints.txt
 0x005C4E44	0x005C4E00	func-same	hint+	mwmomobiclipDecoderCreate	vendor/3dsrecomp/hints.txt
 0x005C4F8C	0x005C4F48	func-same	hint+	mwmomobiclipDecoderGetFrame	vendor/3dsrecomp/hints.txt
+0x005C506C	0x005C5028	func-exact	override	mw::mo::mobiclip::Decoder::GetNbPushedFrame(int&)	overrides/moflexhd.c
 0x005C5074	0x005C5030	func-same	hint+	mwmomobiclipDecoderGetNbPushedFrame	vendor/3dsrecomp/hints.txt
 0x005C50B4	0x005C5070	func-exact	hint+	mwmomobiclipDecoderGetQueueCapacity	vendor/3dsrecomp/hints.txt
 0x005C5100	0x005C50BC	func-same	hint+	mwmomobiclipDecoderPopFrame	vendor/3dsrecomp/hints.txt
@@ -1593,6 +1603,7 @@ us	jpn	method	use	note	where
 0x0062AABC	0x0062A8D4	data-neighbours	code	shift -0x1e8	overrides/amiibo.c,overrides/gate.c
 0x0063156C	0x006312F0	data-xref	code	2 refs	overrides/qol5.c
 0x006319A4	0x00631728	data-xref	code	1 refs	overrides/qol.c
+0x0067B000	0x0067AB80	data-neighbours	code	shift -0x480	vendor/zakuro/crates/zakuro-core/src/dispatch.rs
 0x0068F0E4	0x0068EC28	data-xref	code	1 refs	overrides/cameras.c
 0x0068F438	0x0068EF7C	data-xref	code	1 refs	overrides/cameras.c
 0x00692C68	0x0069279C	data-xref	code	1 refs	overrides/cameras.c
@@ -1608,7 +1619,7 @@ us	jpn	method	use	note	where
 0x006BD96C	0x006BC96C	data-xref	code	38 refs	overrides/cameras.c,overrides/qol.c,overrides/randomizer.c
 0x006BDA6C	0x006BCA6C	data-xref	code	2 refs	overrides/mods.c,overrides/offline_msg.c,overrides/online.c,overrides/qol.c
 0x006BE3C0	0x006BD3C0	data-xref	code	10 refs	overrides/cameras.c,overrides/drawdist.c,source/gfx/src/shadow.rs
-0x006BE404	0x006BD404	data-xref	code	40 refs	overrides/cameras.c,overrides/drawdist.c,overrides/info_ui.c,overrides/widescreen.c,source/gfx/src/freecam.rs
+0x006BE404	0x006BD404	data-xref	code	40 refs	overrides/cameras.c,overrides/drawdist.c,overrides/info_ui.c,overrides/widescreen.c,source/gfx/src/freecam.rs,source/gfx/src/skybg.rs
 0x006D1998	0x006D0998	data-xref	code	3 refs	overrides/amiibo.c,overrides/cheats.c,vendor/zakuro/crates/zakuro/src/cheats.rs
 0x006D19FC	0x006D09FC	data-xref	code	7 refs	vendor/zakuro/crates/zakuro/src/cheats.rs
 0x006D1B70	0x006D0B70	data-xref	code	22 refs	overrides/amiibo.c,overrides/cameras.c,overrides/cheats.c,overrides/qol.c,vendor/zakuro/crates/zakuro/src/cheats.rs,vendor/zakuro/crates/zakuro/src/states.rs
@@ -1667,3 +1678,8 @@ us	jpn	method	use	note	where
 0x00752B7C	0x00751510	data-xref	comment	39 refs	overrides/info_ui.c
 0x00752B8C	0x00751520	data-xref	code	12 refs	vendor/zakuro/crates/zakuro/src/pulse.rs
 0x00777FFF	0x0077D2BF	data-neighbours	code	shift +0x52c0	vendor/zakuro/crates/zakuro-gpu/src/raster.rs,vendor/zakuro/crates/zakuro-gpu/src/raster/hardware.rs
+0x0077B000	0x007802C0	data-xref+off	code	1 refs	vendor/zakuro/crates/zakuro-core/src/dispatch.rs
+0x0077B001	0x007802C1	data-xref+off	code	1 refs	vendor/zakuro/crates/zakuro-core/src/dispatch.rs
+0x0077B002	0x007802C2	data-xref+off	code	1 refs	vendor/zakuro/crates/zakuro-core/src/dispatch.rs
+0x0077B003	0x007802C3	data-xref+off	code	1 refs	vendor/zakuro/crates/zakuro-core/src/dispatch.rs
+0x0077B004	0x007802C4	data-xref+off	code	1 refs	vendor/zakuro/crates/zakuro-core/src/dispatch.rs

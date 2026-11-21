@@ -278,9 +278,15 @@ impl Screen {
             }
             stage.text_right(right - 4.0, bar_y - 2.0, &format!("{:.0}%", self.progress.percent.clamp(0.0, 100.0)), 0.76, TEXT_DARK);
             let detail = if matches!(self.phase, Phase::Done(_)) { "Done".to_owned() } else { self.progress.detail.clone() };
-            stage.text(bar_x, bar_y + 12.0, &detail, 0.64, TEXT_DARK);
             let seconds = self.took.unwrap_or_else(|| self.started.elapsed()).as_secs();
-            stage.text_right(right - 4.0, bar_y + 12.0, &format!("{}:{:02}", seconds / 60, seconds % 60), 0.64, TEXT_DARK);
+            let time = format!("{}:{:02}", seconds / 60, seconds % 60);
+            // release141: the compile's longer lines (compile32: "2 of 4 files,
+            // 0:02 so far. Compiling code233.c (0:02) and 1 other") end before
+            // the time instead of running under it and off the panel
+            let room = right - 4.0 - kit.measure(&time, 0.64) - 6.0 - bar_x;
+            let (line, scale) = fit_line(kit, &detail, room, 0.64);
+            stage.text(bar_x, bar_y + 12.0 + (0.64 - scale) * 6.0, &line, scale, TEXT_DARK);
+            stage.text_right(right - 4.0, bar_y + 12.0, &time, 0.64, TEXT_DARK);
             help = if matches!(self.phase, Phase::Done(_)) { "" } else { "The game starts by itself when this is done." };
             if self.phase == Phase::Working && nav.back {
                 action = Some(Action::Ask);
@@ -363,6 +369,28 @@ fn spacing(text: &str) -> f32 {
 /// the panel's top edge.
 fn fit(kit: &Kit, title: &str, scale: f32) -> f32 {
     scale.min(scale * (PANEL_W - 110.0) / kit.measure(title, scale).max(1.0))
+}
+
+/// release141: a line and the scale it is drawn at to fit in width units:
+/// as asked, else smaller (down to 0.5), else also cut after a word with
+/// "...".
+fn fit_line(kit: &Kit, text: &str, width: f32, scale: f32) -> (String, f32) {
+    let wide = kit.measure(text, scale);
+    if wide <= width {
+        return (text.to_owned(), scale);
+    }
+    let smaller = (scale * width / wide * 0.99).max(0.5);
+    if kit.measure(text, smaller) <= width {
+        return (text.to_owned(), smaller);
+    }
+    let words: Vec<&str> = text.split(' ').collect();
+    for n in (1..words.len()).rev() {
+        let cut = format!("{}...", words[..n].join(" ").trim_end_matches([',', '.', ';', ':']));
+        if kit.measure(&cut, smaller) <= width {
+            return (cut, smaller);
+        }
+    }
+    (text.to_owned(), smaller)
 }
 
 /// text whose words (a path, say) are wider than width units broken after

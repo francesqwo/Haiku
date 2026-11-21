@@ -226,11 +226,15 @@ pub fn build(source: &Path, work: &Path, out: &Path, amiibo: Option<&Path>, setu
 
     // 6. compiling what changed
     let p = Progress::begin(status, "compile", "Compiling the game's code");
+    let mut lowered = 0;
     let tools = toolchain::Toolchain::prepare(setup, work)?;
     let jobs = toolchain::jobs();
     tools.enter(jobs);
     crate::spawn::quiet();
-    let compiler = recomp3ds::compile::check(None).map_err(|e| format!("The bundled compiler doesn't run: {e}"))?;
+    // compile32: the compiler is run by Haiku Setup's own cc.rs (memory,
+    // a job object for each compiler, tries again), with the same flags as
+    // the recompiler's, so the module is the same
+    recomp3ds::compile::check(None).map_err(|e| format!("The bundled compiler doesn't run: {e}"))?;
     let version = {
         let mut command = crate::spawn::command(&tools.gcc);
         command.arg("-dumpfullversion");
@@ -246,40 +250,71 @@ pub fn build(source: &Path, work: &Path, out: &Path, amiibo: Option<&Path>, setu
     };
     let keys: Vec<(String, String)> = generated.sources.iter().map(|s| (s.clone(), key_of(s))).collect();
     let pending: Vec<String> = keys.iter().filter(|(s, k)| compiled.get(s) != Some(k) || !code.join(s).with_extension("o").is_file()).map(|(s, _)| s.clone()).collect();
-    log::line(format!("module: {} C files, {} to compile (gcc {version}, {jobs} at once)", generated.sources.len(), pending.len()));
+    log::line(format!("module: {} C files, {} to compile (gcc {version}, {jobs} at once at most)", generated.sources.len(), pending.len()));
     let total = pending.len();
+    let total_bytes: u64 = pending.iter().map(|s| std::fs::metadata(code.join(s)).map_or(0, |m| m.len())).sum::<u64>().max(1);
     let t0 = Instant::now();
-    let progress = |done: usize, total: usize| {
-        let eta = if done > 0 { t0.elapsed().as_secs_f32() / done as f32 * (total - done) as f32 } else { 0.0 };
-        p.at(done as f32 / total.max(1) as f32, format!("{done} of {total} files{}", if done > 2 { format!(", about {} min left", (eta / 60.0).ceil()) } else { String::new() }));
-        !cancel.load(Ordering::Relaxed)
+    let watch = crate::cc::Watch::default();
+    let done = std::sync::atomic::AtomicUsize::new(0);
+    // compile32: the screen says what is being compiled and for how long,
+    // every second, so a long file shows it is still working
+    let show = || {
+        let done = done.load(Ordering::Relaxed);
+        let bytes = watch.bytes_done.load(Ordering::Relaxed);
+        let fraction = bytes as f32 / total_bytes as f32;
+        let elapsed = t0.elapsed();
+        let when = if fraction >= 0.05 && elapsed.as_secs() >= 60 {
+            let left = elapsed.as_secs_f32() / fraction * (1.0 - fraction);
+            format!("about {} min left", (left / 60.0).ceil().max(1.0))
+        } else {
+            format!("{} so far", crate::cc::clock(elapsed))
+        };
+        p.at(fraction, format!("{done} of {total} files, {when}{}", activity(&watch.running.lock().unwrap())));
     };
     if total > 0 {
         // what is compiled already stays so even if this stops halfway:
         // the list is written as files finish
-        let mut kept: BTreeMap<String, String> = compiled.into_iter().filter(|(s, _)| !pending.contains(s)).collect();
+        let kept: std::sync::Mutex<BTreeMap<String, String>> = std::sync::Mutex::new(compiled.into_iter().filter(|(s, _)| !pending.contains(s)).collect());
         let write_kept = |kept: &BTreeMap<String, String>| {
             let text: String = kept.iter().map(|(s, k)| format!("{s}\t{k}\n")).collect();
             let _ = std::fs::write(&compiled_path, text);
         };
-        write_kept(&kept);
-        recomp3ds::compile::uncancel();
+        write_kept(&kept.lock().unwrap());
+        show();
         let finished = AtomicBool::new(false);
         let result = std::thread::scope(|scope| {
             scope.spawn(|| {
+                let mut shown = Instant::now();
+                let mut logged = Instant::now();
                 while !finished.load(Ordering::Relaxed) {
-                    if cancel.load(Ordering::Relaxed) {
-                        recomp3ds::compile::cancel_running();
-                        break;
+                    if shown.elapsed().as_millis() >= 1000 {
+                        shown = Instant::now();
+                        show();
+                    }
+                    if logged.elapsed().as_secs() >= 60 {
+                        logged = Instant::now();
+                        heartbeat(&watch, done.load(Ordering::Relaxed), total, t0.elapsed());
                     }
                     std::thread::sleep(std::time::Duration::from_millis(100));
                 }
             });
-            let result = recomp3ds::compile::objects(&compiler, &code, &pending, &progress, true);
+            let result = crate::cc::objects(&tools.gcc, &code, &pending, jobs, &watch, &|n, _, file, compiled| {
+                done.store(n, Ordering::Relaxed);
+                // the list as files finish, so a build that is ended (the
+                // window closed, the PC turned off) carries on from there
+                if compiled {
+                    if let Some((s, k)) = keys.iter().find(|(s, _)| s == file) {
+                        let mut kept = kept.lock().unwrap();
+                        kept.insert(s.clone(), k.clone());
+                        write_kept(&kept);
+                    }
+                }
+                show();
+            }, cancel);
             finished.store(true, Ordering::Relaxed);
             result
         });
-        recomp3ds::compile::uncancel();
+        let mut kept = kept.into_inner().unwrap();
         // the objects that were made, whatever came of the rest
         for (s, k) in &keys {
             if pending.contains(s) && code.join(s).with_extension("o").is_file() && result.is_ok() {
@@ -298,13 +333,21 @@ pub fn build(source: &Path, work: &Path, out: &Path, amiibo: Option<&Path>, setu
             }
         }
         write_kept(&kept);
-        result.map_err(|e| {
+        let outcome = result.map_err(|e| {
             if e == "stopped" {
                 "Stopped. Start Haiku again to carry on where it stopped.".to_string()
             } else {
                 format!("Compiling the game's code failed ({e}). The log has the compiler's messages.")
             }
         })?;
+        if !outcome.lowered.is_empty() {
+            let list: Vec<String> = outcome.lowered.iter().map(|(s, level)| format!("{s} at {level}")).collect();
+            log::line(format!("module: this PC's memory was too short for {} of the files at -O2: {} (the game runs the same; that code a little slower)", list.len(), list.join(", ")));
+            lowered = list.len();
+        }
+        if outcome.retried > 0 {
+            log::line(format!("module: {} tries made again", outcome.retried));
+        }
     }
     log::line(format!("module: compiled {total} files in {:.0} s", t0.elapsed().as_secs_f32()));
     if stopped() {
@@ -342,7 +385,42 @@ pub fn build(source: &Path, work: &Path, out: &Path, amiibo: Option<&Path>, setu
     }
     let took = started.elapsed().as_secs_f32();
     log::line(format!("module: built {} in {:.0} s ({total} files compiled)", out.join(FILE).display(), took));
-    Ok(format!("The game's code is built ({total} files compiled, {} min {} s).", (took / 60.0).floor() as u32, (took % 60.0) as u32))
+    let short = if lowered > 0 { format!(" This PC's memory was short for {lowered} of them, compiled with fewer optimisations: the game plays the same.") } else { String::new() };
+    Ok(format!("The game's code is built ({total} files compiled, {} min {} s).{short}", (took / 60.0).floor() as u32, (took % 60.0) as u32))
+}
+
+/// compile32: what is being compiled, for the progress screen: the one
+/// running longest (how long, how much memory), and how many beside it
+fn activity(running: &[crate::cc::Activity]) -> String {
+    let Some(longest) = running.iter().min_by_key(|a| a.started) else { return String::new() };
+    let mut text = format!(". Compiling {}", longest.file);
+    if longest.level != "-O2" {
+        text += &format!(" at {} (short of memory)", longest.level);
+    } else if longest.attempt > 0 {
+        text += " again";
+    }
+    text += &format!(" ({}", crate::cc::clock(longest.started.elapsed()));
+    if longest.peak >= 1 << 28 {
+        text += &format!(", {}", crate::cc::gb(longest.peak));
+    }
+    text += ")";
+    match running.len() {
+        0 | 1 => {}
+        2 => text += " and 1 other",
+        n => text += &format!(" and {} others", n - 1),
+    }
+    text
+}
+
+/// compile32: a line in the log every minute while compiling
+fn heartbeat(watch: &crate::cc::Watch, done: usize, total: usize, elapsed: std::time::Duration) {
+    let running = watch.running.lock().unwrap().clone();
+    let list: Vec<String> = running
+        .iter()
+        .map(|a| format!("{} {} ({:.0} s of processor time{})", a.file, crate::cc::clock(a.started.elapsed()), a.cpu.as_secs_f32(), if a.peak > 0 { format!(", {}", crate::cc::gb(a.peak)) } else { String::new() }))
+        .collect();
+    let free = crate::cc::memory(running.iter().map(|a| a.peak).sum()).map_or(String::new(), |m| format!("; {} of {} free", crate::cc::gb(m.free), crate::cc::gb(m.total)));
+    log::line(format!("compile: {done} of {total} files after {}; running {}{free}", crate::cc::clock(elapsed), if list.is_empty() { "nothing".to_owned() } else { list.join(", ") }));
 }
 
 /// moves a module into out, the old one out of the way first (Windows lets
@@ -366,4 +444,19 @@ fn install(partial: &Path, out: &Path, note: &Note) -> Result<(), String> {
         .map_err(|e| format!("The game's module can't be put in place ({e})."))?;
     note.write(&note_path).map_err(|e| format!("{}: {e}", note_path.display()))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    /// compile32: the progress line names the file compiling longest
+    #[test]
+    fn the_progress_line_says_what_is_compiling() {
+        let at = |secs: u64, file: &str, peak: u64, attempt: usize, level: &'static str| crate::cc::Activity { file: file.into(), started: Instant::now() - Duration::from_secs(secs), peak, cpu: Duration::ZERO, attempt, level };
+        assert_eq!(activity(&[]), "");
+        assert_eq!(activity(&[at(5, "code001.c", 0, 0, "-O2"), at(83, "code155.c", 3 << 29, 0, "-O2"), at(9, "code002.c", 0, 0, "-O2")]), ". Compiling code155.c (1:23, 1.5 GB) and 2 others");
+        assert_eq!(activity(&[at(7, "code155.c", 0, 1, "-O1")]), ". Compiling code155.c at -O1 (short of memory) (0:07)");
+    }
 }

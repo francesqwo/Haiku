@@ -1561,9 +1561,21 @@ fn rigid_at(before: &[f32; 12], now: &[f32; 12], t: f32) -> Option<[f32; 12]> {
     let mut out = [0.0f32; 12];
     // castlecam: the translation goes round with the turn (screw_at)
     let screwed = screw_at(qa, qb, sa, sb, [before[3], before[7], before[11]], [now[3], now[7], now[11]], t);
+    // judder: what of each matrix is not its rotation times one scale
+    // (rigid takes rows within 2 % of one length and of right angles: a
+    // model's view with a slightly uneven scale, the battle map's ground
+    // seen by the turning transition camera) moves straight from the frame
+    // before's to the frame's. Rebuilt from the rotation alone, every
+    // picture in between lost it, so they were drawn off the frames (the
+    // map 20 pixels lower at 1440 rows and more each frame as the camera
+    // began to turn), until the matrices left the 2 % and the pictures
+    // snapped back to the frames: the judder entering and leaving a fight
+    // (issue #1).
+    let (ra, rb) = (residual(before, qa, sa), residual(now, qb, sb));
     for r in 0..3 {
         for c in 0..3 {
-            out[r * 4 + c] = rot[r][c] * s;
+            let k = r * 4 + c;
+            out[k] = rot[r][c] * s + ra[k] + (rb[k] - ra[k]) * t;
         }
         out[r * 4 + 3] = match screwed {
             Some(p) => p[r],
@@ -1571,6 +1583,35 @@ fn rigid_at(before: &[f32; 12], now: &[f32; 12], t: f32) -> Option<[f32; 12]> {
         };
     }
     out.iter().all(|v| v.is_finite()).then_some(out)
+}
+
+/// judder: the 3x3 part of a matrix less its rotation (a unit quaternion
+/// [w, x, y, z]) times its scale, in the matrix's places (the translation's
+/// 0). FATES_GFX_HFR_RESIDUAL=0: none, as before (dev, for comparing).
+fn residual(m: &[f32; 12], q: [f32; 4], s: f32) -> [f32; 12] {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let mut out = [0.0f32; 12];
+    if !*ON.get_or_init(|| crate::perf::var("FATES_GFX_HFR_RESIDUAL").map_or(true, |v| v != "0")) {
+        return out;
+    }
+    // normalised as rigid_at normalises the turned quaternion, so at t 0
+    // and 1 the rotation and this add up to the matrix exactly
+    let n = (q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]).sqrt();
+    if !(n > 0.0) {
+        return out;
+    }
+    let [w, x, y, z] = q.map(|c| c / n);
+    let rot = [
+        [1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - w * z), 2.0 * (x * z + w * y)],
+        [2.0 * (x * y + w * z), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z - w * x)],
+        [2.0 * (x * z - w * y), 2.0 * (y * z + w * x), 1.0 - 2.0 * (x * x + y * y)],
+    ];
+    for r in 0..3 {
+        for c in 0..3 {
+            out[r * 4 + c] = m[r * 4 + c] - rot[r][c] * s;
+        }
+    }
+    out
 }
 
 /// castlecam: FATES_GFX_HFR_SCREW=0 moves a turning matrix's translation
@@ -3348,6 +3389,34 @@ mod tests {
         // a projection is no rigid matrix
         let p = [1.5, 0.0, 0.0, 0.0, 0.0, 2.4, 0.0, 0.0, 0.0, 0.0, -1.0, -0.2];
         assert!(rigid(&p).is_none());
+    }
+
+    /// judder: a matrix within rigid's 2 % but not quite rigid (a turning
+    /// view of something scaled a little unevenly) is drawn exactly as the
+    /// frame before at 0 and as the frame at 1, and between them on the
+    /// way (rebuilt from its rotation alone it was off both, more as it
+    /// turned: issue #1's judder entering a fight).
+    #[test]
+    fn nearly_rigid_matrices_keep_their_unevenness() {
+        // a turn about x (a camera tilting) of a model 1 % taller than wide
+        let m = |a: f32, ty: f32| {
+            let (c, s) = (a.cos(), a.sin());
+            [1.0, 0.0, 0.0, 3.0, 0.0, c * 1.01, -s, ty, 0.0, s * 1.01, c, -400.0]
+        };
+        let (a, b) = (m(0.02, 10.0), m(0.05, 12.0));
+        assert!(rigid(&a).is_some() && rigid(&b).is_some());
+        let at0 = rigid_at(&a, &b, 0.0).unwrap();
+        let at1 = rigid_at(&a, &b, 1.0).unwrap();
+        for k in 0..12 {
+            assert!((at0[k] - a[k]).abs() < 1e-4, "t 0, {k}: {at0:?} {a:?}");
+            assert!((at1[k] - b[k]).abs() < 1e-4, "t 1, {k}: {at1:?} {b:?}");
+        }
+        // half way: the turn half way, the unevenness kept
+        let half = rigid_at(&a, &b, 0.5).unwrap();
+        let want = m(0.035, 11.0);
+        for k in 0..12 {
+            assert!((half[k] - want[k]).abs() < 2e-3, "t 0.5, {k}: {half:?} {want:?}");
+        }
     }
 
     /// gfx-models: a quad stretched with its texture as it was (a window

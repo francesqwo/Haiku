@@ -80,6 +80,69 @@ pub fn sample_texel(data: &[u8], format: TextureFormat, width: u32, x: u32, y: u
     }
 }
 
+/// moflexhd: a whole texture as straight RGBA8, row 0 first (or last, with
+/// `flip`), into `out` (width * height * 4 bytes): texel for texel what
+/// `sample_texel` gives, read a tile at a time in the order memory holds it
+/// instead of looking each texel's place up. A movie's picture changes
+/// every frame, and a modder's HD movie is a 1024x1024 texture.
+pub fn decode_texture(data: &[u8], format: TextureFormat, width: u32, height: u32, flip: bool, out: &mut [u8]) {
+    let (w, h) = (width as usize, height as usize);
+    let bits = format.bits_per_pixel();
+    let whole = matches!(format, TextureFormat::Etc1 | TextureFormat::Etc1A4 | TextureFormat::Unknown(_)) || bits < 8;
+    let bytes = (bits / 8) as usize;
+    if whole || !w.is_multiple_of(8) || !h.is_multiple_of(8) || data.len() < w * h * bytes || out.len() < w * h * 4 {
+        for y in 0..height {
+            for x in 0..width {
+                let row = if flip { height - 1 - y } else { y } as usize;
+                let o = (row * w + x as usize) * 4;
+                out[o..o + 4].copy_from_slice(&sample_texel(data, format, width, x, y));
+            }
+        }
+        return;
+    }
+    // where each of a tile's 64 texels sits in it
+    const PLACES: [(u8, u8); 64] = {
+        let mut places = [(0u8, 0u8); 64];
+        let mut y = 0;
+        while y < 8 {
+            let mut x = 0;
+            while x < 8 {
+                places[crate::format::morton_interleave(x, y) as usize] = (x as u8, y as u8);
+                x += 1;
+            }
+            y += 1;
+        }
+        places
+    };
+    // the formats the movie player's pictures come in get a loop of their own
+    match format {
+        TextureFormat::Rgb8 => decode_tiles::<3>(data, w, h, flip, out, &PLACES, |b| [b[2], b[1], b[0], 0xFF]),
+        TextureFormat::Rgba8 => decode_tiles::<4>(data, w, h, flip, out, &PLACES, |b| [b[3], b[2], b[1], b[0]]),
+        _ => match bytes {
+            1 => decode_tiles::<1>(data, w, h, flip, out, &PLACES, |b| decode_bytes(format, b)),
+            2 => decode_tiles::<2>(data, w, h, flip, out, &PLACES, |b| decode_bytes(format, b)),
+            3 => decode_tiles::<3>(data, w, h, flip, out, &PLACES, |b| decode_bytes(format, b)),
+            _ => decode_tiles::<4>(data, w, h, flip, out, &PLACES, |b| decode_bytes(format, b)),
+        },
+    }
+}
+
+/// moflexhd: decode_texture's loop over a texture's 8x8 tiles, BYTES a texel.
+#[inline(always)]
+fn decode_tiles<const BYTES: usize>(data: &[u8], w: usize, h: usize, flip: bool, out: &mut [u8], places: &[(u8, u8); 64], texel: impl Fn(&[u8; BYTES]) -> [u8; 4]) {
+    let tiles_per_row = w / 8;
+    for (tile, texels) in data[..w * h * BYTES].chunks_exact(64 * BYTES).enumerate() {
+        let (tx, ty) = (tile % tiles_per_row * 8, tile / tiles_per_row * 8);
+        for (i, bytes) in texels.as_chunks::<BYTES>().0.iter().enumerate() {
+            let (x, y) = places[i];
+            let y = ty + y as usize;
+            let row = if flip { h - 1 - y } else { y };
+            let o = (row * w + tx + x as usize) * 4;
+            out[o..o + 4].copy_from_slice(&texel(bytes));
+        }
+    }
+}
+
 fn sample_uncompressed(
     data: &[u8],
     format: TextureFormat,

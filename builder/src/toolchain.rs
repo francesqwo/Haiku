@@ -149,9 +149,9 @@ impl Toolchain {
     }
 }
 
-/// how many compilers to run at once: HAIKU_SETUP_JOBS, else all but two
-/// of the cores (the recompiler also stops starting compilers when memory
-/// runs short).
+/// how many compilers to run at once at most: HAIKU_SETUP_JOBS, else all
+/// but two of the cores (compile32: cc.rs starts fewer when the memory
+/// free doesn't hold them).
 pub fn jobs() -> usize {
     if let Some(n) = std::env::var("HAIKU_SETUP_JOBS").ok().and_then(|v| v.trim().parse::<usize>().ok()).filter(|&n| n > 0) {
         return n;

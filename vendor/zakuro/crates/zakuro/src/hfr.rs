@@ -322,6 +322,70 @@ pub struct Pacer {
     stepped_up: Option<Instant>,
     /// mapjit: when the latency was last moved (see paced_pass)
     latency_at: Option<Instant>,
+    /// hfr60: presenting at about the console's rate (60) with Smooth 30
+    /// FPS Scenes on: pictures in between only while the game runs a scene
+    /// at 30 ticks a second or slower (`slow_scene`, GameTime's step at the
+    /// last refresh), one halfway between each two of its pictures. The
+    /// scenes at 60 are shown as without interpolation, and the renderer
+    /// does not match their draws (`gpu_between`: what the GPU was last
+    /// told, see hfr_between_sync).
+    half_only: bool,
+    slow_scene: bool,
+    gpu_between: Option<bool>,
+    /// hfr60: the game's clock (GameTime total) when it last moved, over the
+    /// last seconds while pictures in between are drawn (see clock_rate);
+    /// the half seconds in a row it ran slow; how long the emulation must
+    /// keep up before they start again (half seconds, doubling while they
+    /// keep slowing the game, see hfr_title), and when they last did.
+    clock: std::collections::VecDeque<(Instant, u32)>,
+    slow_halves: u32,
+    recover_need: u32,
+    recovered_at: Option<Instant>,
+}
+
+/// hfr60: the game's clock in a 30 FPS scene at full speed advances 59.83
+/// units (1/60 s) a wall second, as the console's refreshes. Below this,
+/// sustained (more than 1.5% slow), the pictures in between take time the
+/// game needs.
+const CLOCK_SLOW: f64 = 59.83 * 0.985;
+
+impl Pacer {
+    /// hfr60: the game's clock rate (units a second) over the last 1.5 to
+    /// 2.5 s, from its moves; none for a shorter stretch. A stall over 100 ms
+    /// (a scene loading) starts it over, so only a sustained slowing counts,
+    /// not a load, which the refreshes' rate (57.5) catches.
+    fn clock_rate(&self) -> Option<f64> {
+        let (&(t0, c0), &(t1, c1)) = (self.clock.front()?, self.clock.back()?);
+        let span = (t1 - t0).as_secs_f64();
+        (span >= 1.5).then(|| c1.wrapping_sub(c0) as f64 / span)
+    }
+
+    fn clock_moved(&mut self, now: Instant, total: u32) {
+        match self.clock.back() {
+            Some(&(_, last)) if last == total => return,
+            Some(&(at, _)) if now - at > Duration::from_millis(100) => self.clock.clear(),
+            _ => {}
+        }
+        self.clock.push_back((now, total));
+        while self.clock.front().is_some_and(|&(at, _)| now - at > Duration::from_millis(2500)) {
+            self.clock.pop_front();
+        }
+    }
+}
+
+/// hfr60: the rates around the console's own (a 60 Hz display, 59.94 Hz
+/// too, Frame Rate 60, a cap of 60), where only the game's 30 FPS scenes get
+/// pictures in between (Smooth 30 FPS Scenes).
+pub fn console_rate(rate: f64) -> bool {
+    (59.0..=61.0).contains(&rate)
+}
+
+/// hfr60: Smooth 30 FPS Scenes as set, or FATES_HFR60=0/1 for tests.
+fn smooth_30fps(pc: &crate::settings::PcSettings) -> bool {
+    match std::env::var("FATES_HFR60") {
+        Ok(v) => v != "0",
+        Err(_) => pc.smooth_30fps,
+    }
 }
 
 /// mapjit: how fast the latency may grow and shrink, as a share of the wall
@@ -549,7 +613,51 @@ impl super::App {
     /// whether frame interpolation draws pictures in between: presenting
     /// faster than the console's rate, or the old 30 to 60 option.
     pub(crate) fn hfr_interpolates(&self) -> bool {
-        (self.settings.pc.frame_rate != 30 && self.hfr_rate() > 61.0) || self.active.frame_interpolation
+        (self.settings.pc.frame_rate != 30 && self.hfr_rate() > 61.0) || self.active.frame_interpolation || self.hfr_half_only()
+    }
+
+    /// hfr60: whether pictures in between are drawn for the 30 FPS scenes
+    /// alone: presenting at about 60 in a window, with Smooth 30 FPS Scenes
+    /// on. A 30 Hz scene (gap 2) then gets one picture halfway
+    /// (fractions(60, 2) = [0.5]), a 60 Hz one none.
+    fn hfr_half_only(&self) -> bool {
+        let pc = &self.settings.pc;
+        self.window.is_some() && pc.frame_rate != 30 && !self.active.frame_interpolation && console_rate(self.hfr_rate()) && smooth_30fps(pc)
+    }
+
+    /// hfr60: whether the pictures shown now are interpolated: the frame
+    /// rate's interpolation on, the emulation keeping up, and at 60 a 30 FPS
+    /// scene running.
+    fn hfr_smoothing(&self) -> bool {
+        self.hfr.interpolating && !self.hfr.degraded && (!self.hfr.half_only || self.hfr.slow_scene)
+    }
+
+    /// hfr60: at 60, the renderer matches draws (frame interpolation on the
+    /// GPU) only while a 30 FPS scene runs and the emulation keeps up, so a
+    /// 60 FPS scene costs exactly what it did without interpolation. Told
+    /// only when it changes. Leaving, the scale pictures in between were
+    /// drawn at goes back to the renderer's own (full), so the frames that
+    /// follow are drawn as without interpolation.
+    fn hfr_between_sync(&mut self) {
+        if !self.hfr.half_only {
+            self.hfr.gpu_between = None;
+            return;
+        }
+        let on = self.hfr.slow_scene && !self.hfr.degraded;
+        if self.hfr.gpu_between == Some(on) {
+            return;
+        }
+        self.hfr.gpu_between = Some(on);
+        self.hfr.clock.clear();
+        self.hfr.slow_halves = 0;
+        let Some(game) = &mut self.game else { return };
+        let drawn = game.system.set_interpolation(on);
+        if !on {
+            zakuro_core::native_gfx::set_between_fraction(0.0);
+            zakuro_core::native_gfx::set_between_samples(0);
+        }
+        zakuro_gpu::smooth::point("hfr60", Instant::now(), on as i64, game.frame as f64);
+        log::debug!("hfr60: pictures in between {} (frame {})", if drawn { "on, a 30 FPS scene" } else { "off" }, game.frame);
     }
 
     /// puts the frame rate settings to use, called from apply_settings and
@@ -559,6 +667,8 @@ impl super::App {
         let wanted = self.hfr_wanted();
         let rate = if wanted { self.hfr_rate() } else { 0.0 };
         let interpolate = wanted && self.hfr_interpolates();
+        // hfr60: at 60, for the 30 FPS scenes alone (hfr_between_sync)
+        let half_only = interpolate && self.hfr_half_only();
         // smooth: the monitor rate, for the present thread grid
         let display_hz = self.window.as_ref().and_then(|w| w.current_monitor()).and_then(|m| m.refresh_rate_millihertz()).map_or(60.0, |mhz| mhz as f64 / 1000.0);
         // smooth2: with VSync off the present thread paces at the rate asked
@@ -571,15 +681,32 @@ impl super::App {
         self.hfr.free_rate = 0.0;
         if let Some(game) = &mut self.game {
             game.system.track_pictures(wanted);
-            if game.system.gpu.interpolates() != interpolate {
+            // hfr60: at 60 the GPU interpolates only in 30 FPS scenes, see
+            // hfr_between_sync below
+            if game.system.gpu.interpolates() != interpolate && !half_only {
                 let on = game.system.set_interpolation(interpolate);
                 log::info!("hfr: frame interpolation {}", if on { "on" } else { "off, it takes the 3D drawn on the GPU and shown with Vulkan" });
             }
             if !interpolate {
                 game.system.set_between(&[]);
             }
+            // hfr60: the scale pictures in between were drawn at is the
+            // renderer's own again once none are drawn (a change from a
+            // higher rate to 60 or below kept it, and the frames with it)
+            if !interpolate && zakuro_core::native_gfx::between_fraction().is_some() {
+                zakuro_core::native_gfx::set_between_fraction(0.0);
+                zakuro_core::native_gfx::set_between_samples(0);
+            }
+        }
+        if half_only != self.hfr.half_only {
+            log::info!("hfr60: {}", if half_only { "at 60 FPS, the 30 FPS scenes get a picture in between each two of theirs" } else { "the 30 FPS scenes as the other scenes" });
         }
         self.hfr.interpolating = interpolate;
+        self.hfr.half_only = half_only;
+        // hfr60: told again (from a higher rate the GPU interpolates: off
+        // until a 30 FPS scene runs)
+        self.hfr.gpu_between = None;
+        self.hfr_between_sync();
         if rate != self.hfr.rate {
             log::info!("hfr: presenting at {rate:.1} pictures a second{}", if rate == 0.0 { " (the console's rate)" } else { "" });
             self.hfr.rate = rate;
@@ -740,7 +867,7 @@ impl super::App {
             }
             // without pictures in between, each of the game's pictures once,
             // as soon as it is made and the rate (a cap) allows
-            let interpolating = self.hfr.interpolating && !self.hfr.degraded;
+            let interpolating = self.hfr_smoothing(); // hfr60: at 60, 30 FPS scenes alone
             if !interpolating && playing {
                 let newest = self.hfr.latched.map(|(_, refresh, _)| refresh);
                 if newest.is_none() || newest == self.hfr.shown_refresh || slot > now {
@@ -756,11 +883,19 @@ impl super::App {
                 // where between the picture before and the newest the
                 // slot's time falls, the newest's time starting when it is
                 // made, a smoothed emulation's time after its refresh began
+                // (hfr60: at 60 too: so the slot showing the halfway picture
+                // comes at least half a refresh after the newest is made,
+                // which the GPU needs to draw it at a high render scale. Half
+                // a refresh earlier, a third of them reached the display a
+                // refresh or two late at 8x; measured in hfr60.md)
                 let start = scheduled + self.hfr.emulating;
                 let span = period * gap.max(1) as u32;
                 let at = slot.saturating_duration_since(start).as_secs_f32() / span.as_secs_f32();
                 // not made yet: it waits for the game's next refresh
-                if at > 1.02 && slot > now {
+                // (hfr60: at 60 up to a quarter past it the newest is the
+                // nearest picture, and shows)
+                let made_yet = if self.hfr.half_only { 1.25 } else { 1.02 };
+                if at > made_yet && slot > now {
                     break;
                 }
                 let ready = game.system.between_ready();
@@ -768,7 +903,8 @@ impl super::App {
                 // interpolated time, else the newest shows at once
                 pick = nearest(ready, at.clamp(0.0, 1.0), !ready.is_empty());
                 // castlecam: the native renderer's picture at the slot's own time
-                if let Some(exact) = exact_place(zakuro_core::native_gfx::active(), ready, at as f64) {
+                // (hfr60: at 60, the halfway picture or a frame, the nearest)
+                if let Some(exact) = exact_place(zakuro_core::native_gfx::active() && !self.hfr.half_only, ready, at as f64) {
                     pick = Pick::At(exact);
                 }
                 let gap_f = gap.max(1) as f64;
@@ -785,6 +921,19 @@ impl super::App {
                     Pick::Newest => game.system.show_layer(0),
                     Pick::Before(f) => game.system.show_before(f),
                     Pick::At(f) => game.system.show_at(f),
+                }
+            }
+            // hfr60: at 60 below the display's rate (Frame Rate 60 on a
+            // faster display), pictures recorded ahead go out at their own
+            // slots on the present thread, not at once: handed over at once,
+            // the frame before, the halfway picture and the frame were shown
+            // in three refreshes in a row, then none for the rest of the
+            // 30 Hz frame's time
+            if self.hfr.half_only && interpolating && playing {
+                if let Some(backend) = &mut self.backend {
+                    if backend.pacing().is_some() {
+                        backend.set_present_at(Some(slot));
+                    }
                 }
             }
             let start = Instant::now();
@@ -914,22 +1063,48 @@ impl super::App {
             if let (Some(game), true) = (&self.game, playing && self.hfr.interpolating) {
                 let behind = game.fps < 57.5;
                 (self.hfr.falling_behind, self.hfr.keeping_up) = if behind { (self.hfr.falling_behind + 1, 0) } else { (0, self.hfr.keeping_up + 1) };
+                // hfr60: at 60, a 30 FPS scene's pictures in between can slow
+                // the game a little on a PC that keeps up without them (its
+                // refreshes still above 57.5 a second, or in real time its
+                // ticks late): its clock running more than 1.5% slow for 1.5 s
+                // stops them too (measured: a PC at 14 ms a refresh ran at
+                // 0.97 of the game's speed with them, 0.997 without)
+                let rate = self.hfr.clock_rate();
+                let slow = self.hfr.half_only && self.hfr.gpu_between == Some(true) && rate.is_some_and(|r| r < CLOCK_SLOW);
+                self.hfr.slow_halves = if slow { self.hfr.slow_halves + 1 } else { 0 };
+                if slow {
+                    self.hfr.keeping_up = 0;
+                }
                 // gfxcastle: dev, FATES_GFX_SEQ's captures stall the game on purpose
-                if !self.hfr.degraded && self.hfr.falling_behind >= 3 && std::env::var_os("FATES_GFX_SEQ").is_none() {
+                if !self.hfr.degraded && (self.hfr.falling_behind >= 3 || self.hfr.slow_halves >= 3) && std::env::var_os("FATES_GFX_SEQ").is_none() {
                     self.hfr.degraded = true;
-                    log::warn!("hfr: the emulation falls behind ({:.1} refreshes a second), pictures in between stop until it keeps up", game.fps);
+                    // hfr60: they slowed the game again soon after they
+                    // started again: twice as long before the next try (up
+                    // to a minute), so a PC at the edge loses next to no time
+                    if self.hfr.half_only {
+                        let again = self.hfr.recovered_at.is_some_and(|t| t.elapsed() < Duration::from_secs(20));
+                        self.hfr.recover_need = if again { (self.hfr.recover_need.max(2) * 2).min(120) } else { 2 };
+                    }
+                    match self.hfr.slow_halves >= 3 {
+                        true => log::warn!("hfr60: the game runs {:.1}% slow with pictures in between, they stop for {:.0} s or more", 100.0 * (1.0 - rate.unwrap_or(0.0) / 59.83), self.hfr.recover_need.max(2) as f32 / 2.0),
+                        false => log::warn!("hfr: the emulation falls behind ({:.1} refreshes a second), pictures in between stop until it keeps up", game.fps),
+                    }
                 // smooth2: back after a second of keeping up (was five): a
                 // battle's loading made the game fall behind, and its whole
                 // opening then went without pictures in between
-                } else if self.hfr.degraded && self.hfr.keeping_up >= 2 {
+                } else if self.hfr.degraded && self.hfr.keeping_up >= if self.hfr.half_only { self.hfr.recover_need.max(2) } else { 2 } {
                     self.hfr.degraded = false;
+                    self.hfr.recovered_at = Some(Instant::now());
                     log::info!("hfr: the emulation keeps up again, pictures in between start again");
                 }
             }
+            // hfr60: at 60 the switch above stops the renderer's matching too
+            self.hfr_between_sync();
             // smooth2: pictures in between at a smaller scale while the
             // display goes without pictures (the frontend cannot record them
             // in time), back up after four calm seconds
-            if playing && self.hfr.interpolating && zakuro_core::native_gfx::active() && std::env::var_os("FATES_GFX_HFR_SCALE").is_none() {
+            // hfr60: at 60, only while a 30 FPS scene's pictures in between are drawn
+            if playing && self.hfr.interpolating && (!self.hfr.half_only || self.hfr.gpu_between == Some(true)) && zakuro_core::native_gfx::active() && std::env::var_os("FATES_GFX_HFR_SCALE").is_none() {
                 let mut starved = std::mem::take(&mut self.hfr.starved);
                 let step = self.hfr.scale_step;
                 // sharp: and only when the display got fewer than nine in
@@ -1028,7 +1203,12 @@ impl super::App {
                 // measured with mapjit's pacing and still overloads the GPU
                 // (battle: 30 refreshes a second without a new picture
                 // against 2; castle by a wall: 4 against 0.7; sharp.md)
-                let scale = match rtpace_switch(&SCALE_CAP) && floor > 0.0 {
+                // hfr60: not at 60, where a 30 FPS scene's pictures in between
+                // are 30 a second: capped, every battle's frames were drawn
+                // at the window's own pixels (the user's 8x at 6x), and the
+                // renderer's targets were made again as each battle started
+                // and ended (a hitch each)
+                let scale = match rtpace_switch(&SCALE_CAP) && floor > 0.0 && !self.hfr.half_only {
                     true => scale.min(floor),
                     false => scale,
                 };
@@ -1088,6 +1268,20 @@ impl super::App {
         self.emulate();
         let took = start.elapsed();
         self.spent.emulating.add(took);
+        // hfr60: at 60, whether the game runs a 30 FPS scene now (GameTime's
+        // step: 2 in battles, 3D cutscenes, the title screen), which alone
+        // gets pictures in between
+        if self.hfr.half_only {
+            if let Some(game) = &mut self.game {
+                let time = GameTime::read(&mut game.system.memory);
+                self.hfr.slow_scene = time.step >= 2;
+                // and how fast its clock runs while pictures in between are drawn
+                if self.hfr.gpu_between == Some(true) {
+                    self.hfr.clock_moved(Instant::now(), time.total);
+                }
+            }
+            self.hfr_between_sync();
+        }
         // rt-merge: in real time the refresh itself takes microseconds; what
         // the pictures ahead and the latency must cover is how long after
         // its due time the refresh's picture is there (raised late after a
@@ -1152,9 +1346,11 @@ impl super::App {
                 self.hfr.gaps.pop_front();
             }
             // the next picture's pictures in between, for its gap
+            // (hfr60: at 60 the one halfway, fractions(60, 2), and the
+            // nearest picture shown: one picture in between a 30 Hz frame)
             let wanted = if self.hfr.degraded {
                 Vec::new()
-            } else if dense && gap <= 2 && crate::qol::speed() <= 1.0 {
+            } else if dense && !self.hfr.half_only && gap <= 2 && crate::qol::speed() <= 1.0 {
                 // (qol: above 1x the game makes its pictures faster than at
                 // the console's rate, so the offer follows the rate below)
                 // smooth: the native renderer draws a picture in between
@@ -1214,13 +1410,20 @@ impl super::App {
             return None;
         }
         let game_refresh = refresh().as_secs_f64();
-        let interpolating = self.hfr.interpolating && !self.hfr.degraded && playing;
-        self.hfr.dense = zakuro_core::native_gfx::active();
+        let interpolating = self.hfr_smoothing() && playing; // hfr60: at 60, 30 FPS scenes alone
+        // hfr60: at 60 the halfway picture and the frames, the nearest
+        // (exact places would draw two pictures in between a 30 Hz frame)
+        self.hfr.dense = zakuro_core::native_gfx::active() && !self.hfr.half_only;
         // the emulation's cost as the pictures ahead must cover it: its
         // smoothed slow ones, not loading's (those hitch anyway)
         let emulating = self.hfr.emulating.as_secs_f64().min(2.0 * game_refresh);
         let margin = 0.0015;
-        let depth = (((emulating + margin) / display.as_secs_f64()).ceil() as usize + 1).clamp(3, zakuro_gpu::backend::vulkan::MOST_AHEAD);
+        // hfr60: at 60 on a 60 Hz display, two pictures ahead cover 33 ms,
+        // more than three at 175 Hz: a third only made the 30 FPS scenes'
+        // pictures a refresh later (the 60 FPS ones, not interpolated, are
+        // recorded as before)
+        let fewest = if self.hfr.half_only && interpolating && display.as_secs_f64() > 0.012 { 2 } else { 3 };
+        let depth = (((emulating + margin) / display.as_secs_f64()).ceil() as usize + 1).clamp(fewest, zakuro_gpu::backend::vulkan::MOST_AHEAD);
         // the largest of the recent pictures' gaps: a picture with a gap of
         // 1 can be followed by one 2 refreshes later, which the slots must
         // wait for as well
@@ -1240,6 +1443,11 @@ impl super::App {
             static T0: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
             eprintln!("pace: {:.3} cadence {gap} largest {} latency {:.1} ms emulating {:.1} ms", T0.get_or_init(Instant::now).elapsed().as_secs_f64(), self.hfr.gaps.iter().copied().max().unwrap_or(1), self.hfr.latency * 1e3, emulating * 1e3);
         }
+        // hfr60: at 60 a 30 FPS scene's pictures are the frames and the
+        // halfway ones, the nearest: a slot needs the newest frame once its
+        // time is a quarter of the way to it, so the time shown can be half
+        // a refresh sooner than a whole gap behind
+        let gap = if self.hfr.half_only && interpolating { (gap - 0.5).max(1.0) } else { gap };
         let wanted = gap * game_refresh + emulating + display.as_secs_f64() + margin;
         // rtpace: in real time a refresh is raised on time and costs
         // nothing (emulating is how late it came), but pictures are still
@@ -1337,8 +1545,10 @@ impl super::App {
                     }
                 });
                 // not made yet: wait for the game, unless the display would
-                // go without a picture
-                if at > 1.01 && pending > 0 {
+                // go without a picture (hfr60: at 60 up to a quarter past
+                // it the newest is the nearest picture, and shows)
+                let made_yet = if self.hfr.half_only { 1.25 } else { 1.01 };
+                if at > made_yet && pending > 0 {
                     zakuro_gpu::smooth::point("ahead", Instant::now(), pending as i64, at);
                     waiting_for_game = true;
                     break;
@@ -1491,6 +1701,21 @@ mod tests {
         assert_eq!(fractions(165.0, 1).len(), 2);
         assert_eq!(fractions(240.0, 1), vec![0.25, 0.5, 0.75]);
         assert_eq!(fractions(240.0, 2).len(), 7, "capped at the layers there are");
+    }
+
+    #[test]
+    fn at_60_a_30_fps_scene_gets_one_picture_halfway() {
+        // hfr60: the band where only 30 FPS scenes are smoothed
+        assert!(console_rate(60.0) && console_rate(59.94) && console_rate(60.0 * 1.0001));
+        assert!(!console_rate(61.5) && !console_rate(75.0) && !console_rate(50.0) && !console_rate(30.0));
+        for rate in [59.94, 60.0] {
+            assert_eq!(fractions(rate, 2), vec![0.5], "{rate}: one halfway");
+            assert!(fractions(rate, 1).is_empty(), "{rate}: a 60 FPS scene none");
+        }
+        // shown the nearest: the frame before, the halfway picture, the newest
+        assert_eq!(nearest(&[0.5], 0.2, true), Pick::Previous);
+        assert_eq!(nearest(&[0.5], 0.3, true), Pick::Between(1));
+        assert_eq!(nearest(&[0.5], 0.8, true), Pick::Newest);
     }
 
     #[test]
