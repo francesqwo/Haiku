@@ -106,7 +106,7 @@ pub fn dir(root: &Path) -> PathBuf {
 }
 
 /// where the module is: HAIKU_GAME_MODULE (a test or a bench root, which
-/// has the exe alone), else data/code/game.dll
+/// has the exe alone), else data/code/game.dll on Windows, game.so natively
 pub fn find(root: &Path) -> PathBuf {
     match std::env::var_os("HAIKU_GAME_MODULE").map(PathBuf::from) {
         Some(path) if path.is_dir() => path.join(spec_module::file()),
