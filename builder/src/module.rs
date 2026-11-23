@@ -257,17 +257,27 @@ pub fn build(source: &Path, work: &Path, out: &Path, amiibo: Option<&Path>, setu
         command.arg("-dumpfullversion");
         command.output().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned()).unwrap_or_default()
     };
+    // abi: what the compiler makes objects for (x86_64-w64-mingw32 or
+    // x86_64-linux-gnu). Two toolchains with the same version string make
+    // different objects, which must never be mistaken for each other (a
+    // Windows module and a native one built in the same work folder).
+    let machine = {
+        let mut command = crate::spawn::command(&tools.gcc);
+        command.arg("-dumpmachine");
+        command.output().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned()).unwrap_or_default()
+    };
     let header = std::fs::read(code.join("recomp.h")).unwrap_or_default();
     let key_of = |source: &str| -> String {
         let mut hash = FNV_START;
         fnv(&mut hash, version.as_bytes());
+        fnv(&mut hash, machine.as_bytes());
         fnv(&mut hash, &header);
         fnv(&mut hash, &std::fs::read(code.join(source)).unwrap_or_default());
         format!("{hash:016X}")
     };
     let keys: Vec<(String, String)> = generated.sources.iter().map(|s| (s.clone(), key_of(s))).collect();
     let pending: Vec<String> = keys.iter().filter(|(s, k)| compiled.get(s) != Some(k) || !code.join(s).with_extension("o").is_file()).map(|(s, _)| s.clone()).collect();
-    log::line(format!("module: {} C files, {} to compile (gcc {version}, {jobs} at once at most)", generated.sources.len(), pending.len()));
+    log::line(format!("module: {} C files, {} to compile (gcc {version} {machine}, {jobs} at once at most)", generated.sources.len(), pending.len()));
     let total = pending.len();
     let total_bytes: u64 = pending.iter().map(|s| std::fs::metadata(code.join(s)).map_or(0, |m| m.len())).sum::<u64>().max(1);
     let t0 = Instant::now();
