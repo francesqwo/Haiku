@@ -559,6 +559,14 @@ fn path() -> Option<PathBuf> {
         var("APPDATA")
     } else if cfg!(target_os = "macos") {
         var("HOME").map(|home| home.join("Library/Application Support"))
+    } else if cfg!(target_os = "linux") {
+        // Haiku's portable Linux folder keeps settings and saves together
+        // under userdata/, as the Windows build does under APPDATA. Without
+        // HAIKU_HOME (plain Zakuro), keep the usual XDG location.
+        var("HAIKU_HOME")
+            .map(|home| home.join("userdata"))
+            .or_else(|| var("XDG_CONFIG_HOME"))
+            .or_else(|| var("HOME").map(|home| home.join(".config")))
     } else {
         var("XDG_CONFIG_HOME").or_else(|| var("HOME").map(|home| home.join(".config")))
     };

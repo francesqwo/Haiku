@@ -411,6 +411,13 @@ fn default_data_dir() -> Option<PathBuf> {
         var("APPDATA")
     } else if cfg!(target_os = "macos") {
         var("HOME").map(|home| home.join("Library/Application Support"))
+    } else if cfg!(target_os = "linux") {
+        // Haiku's portable Linux folder keeps saves and settings together
+        // under userdata/, as the Windows build does under APPDATA.
+        var("HAIKU_HOME")
+            .map(|home| home.join("userdata"))
+            .or_else(|| var("XDG_DATA_HOME"))
+            .or_else(|| var("HOME").map(|home| home.join(".local/share")))
     } else {
         var("XDG_DATA_HOME").or_else(|| var("HOME").map(|home| home.join(".local/share")))
     };
